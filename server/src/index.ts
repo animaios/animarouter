@@ -2,6 +2,7 @@ import './env.js';
 import { createApp } from './app.js';
 import { initDb } from './db/index.js';
 import { startHealthChecker } from './services/health.js';
+import { rebuildExhaustionFromDB } from './services/key-exhaustion.js';
 
 const PORT = process.env.PORT ?? 3001;
 // Dual-stack ('::') by default so the dashboard is reachable over both IPv4
@@ -11,6 +12,7 @@ const HOST = process.env.HOST ?? '::';
 
 async function main() {
   initDb();
+  rebuildExhaustionFromDB();
   const app = createApp();
 
   const onReady = (host: string) => () => {

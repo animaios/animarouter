@@ -2,6 +2,7 @@ import { getDb, getSetting, setSetting } from '../db/index.js';
 import { buildProviderFor } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { canMakeRequest, canUseTokens, isOnCooldown, canUseProvider } from './ratelimit.js';
+import { isExhausted, getExhaustedKeysForModel } from './key-exhaustion.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
@@ -182,6 +183,28 @@ export function setRoutingStrategy(strategy: RoutingStrategy): void {
     throw new Error(`Unknown routing strategy: ${strategy}`);
   }
   setSetting(STRATEGY_KEY, strategy);
+}
+
+// ── Global retry limit (persisted) ──────────────────────────────────────────
+// Controls how many 1-RPM cycles run after all keys/models are exhausted.
+// 0 = infinite (keep retrying forever), 1-100 = stop after that many cycles.
+const RETRY_LIMIT_KEY = 'global_retry_limit';
+const DEFAULT_RETRY_LIMIT = 5;
+
+export function getGlobalRetryLimit(): number {
+  const raw = getSetting(RETRY_LIMIT_KEY);
+  if (raw) {
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 0 && n <= 100) return n;
+  }
+  return DEFAULT_RETRY_LIMIT;
+}
+
+export function setGlobalRetryLimit(limit: number): void {
+  if (!Number.isFinite(limit) || limit < 0 || limit > 100) {
+    throw new Error('Global retry limit must be between 0 and 100');
+  }
+  setSetting(RETRY_LIMIT_KEY, String(limit));
 }
 
 // ── Custom weights (persisted) ──────────────────────────────────────────────
@@ -415,7 +438,14 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
  * @param requireVision - only consider models that accept image input (#118)
  * @param requireTools - only consider models that emit structured tool_calls
  */
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>): RouteResult {
+export interface RouteOptions {
+  /** Don't fall through to other models when the preferred model's keys are exhausted. */
+  pinMode?: boolean;
+  /** 1 RPM recovery mode: ignore cooldowns and rate limits, try exhausted keys in exhaustion order. */
+  oneRPM?: boolean;
+}
+
+export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, options?: RouteOptions): RouteResult {
   const db = getDb();
 
   const strategy = getRoutingStrategy();
@@ -443,6 +473,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       sortedChain.unshift(preferred);
     }
   }
+
+  const pinMode = options?.pinMode ?? false;
+  const oneRPM = options?.oneRPM ?? false;
 
   for (const entry of sortedChain) {
     // Models the caller has ruled out for this request — e.g. a 404
@@ -500,28 +533,57 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       tpd: entry.tpd_limit,
     };
 
-    // Try all keys for this model before giving up on it
+    // Try all keys for this model before giving up on it.
+    // In 1 RPM mode, sort by exhaustion time (earliest first) so the key with
+    // the longest recovery window gets tried first. Otherwise use round-robin.
     const rrKey = `${entry.platform}:${entry.model_id}`;
-    let idx = roundRobinIndex.get(rrKey) ?? 0;
 
-    for (let attempt = 0; attempt < keys.length; attempt++) {
-      const key = keys[idx % keys.length];
-      idx++;
+    let keyOrder: KeyRow[];
+    if (oneRPM) {
+      // Order by exhaustion time: earliest exhausted first.
+      const exhaustedOrder = getExhaustedKeysForModel(entry.platform, entry.model_id);
+      const exhaustedSet = new Set(exhaustedOrder.map(e => e.keyId));
+      // Unexhausted keys go first (they might work immediately), then exhausted
+      // keys sorted earliest→latest.
+      const unexhausted: KeyRow[] = [];
+      const exhausted: Array<{ row: KeyRow; exhaustedAt: number }> = [];
+      for (const k of keys) {
+        const ex = exhaustedOrder.find(e => e.keyId === k.id);
+        if (ex) {
+          exhausted.push({ row: k, exhaustedAt: ex.exhaustedAt });
+        } else {
+          unexhausted.push(k);
+        }
+      }
+      exhausted.sort((a, b) => a.exhaustedAt - b.exhaustedAt);
+      keyOrder = [...unexhausted, ...exhausted.map(e => e.row)];
+    } else {
+      keyOrder = keys;
+    }
+
+    let idx = oneRPM ? 0 : (roundRobinIndex.get(rrKey) ?? 0);
+
+    for (let attempt = 0; attempt < keyOrder.length; attempt++) {
+      const key = keyOrder[(idx + attempt) % keyOrder.length];
 
       const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
 
       if (skipKeys?.has(skipId)) continue;
 
-      // Check cooldown (from previous 429s)
-      if (isOnCooldown(entry.platform, entry.model_id, key.id)) continue;
+      // In 1 RPM mode, skip normal cooldown + rate-limit checks so exhausted
+      // keys get a chance to recover.
+      if (!oneRPM) {
+        // Check cooldown (from previous 429s)
+        if (isOnCooldown(entry.platform, entry.model_id, key.id)) continue;
 
-      // Provider-wide daily request cap (#162): providers like OpenRouter cap
-      // total requests/day across ALL their models for the account, not per
-      // model — skip every model on this provider once that key hits the cap.
-      if (!canUseProvider(entry.platform, key.id)) continue;
+        // Provider-wide daily request cap (#162): providers like OpenRouter cap
+        // total requests/day across ALL their models for the account, not per
+        // model — skip every model on this provider once that key hits the cap.
+        if (!canUseProvider(entry.platform, key.id)) continue;
 
-      if (!canMakeRequest(entry.platform, entry.model_id, key.id, limits)) continue;
-      if (!canUseTokens(entry.platform, entry.model_id, key.id, estimatedTokens, limits)) continue;
+        if (!canMakeRequest(entry.platform, entry.model_id, key.id, limits)) continue;
+        if (!canUseTokens(entry.platform, entry.model_id, key.id, estimatedTokens, limits)) continue;
+      }
 
       let decryptedKey: string;
       try {
@@ -536,7 +598,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // a custom provider row was deleted), we already continued.
 
       // We found a working key for this model!
-      roundRobinIndex.set(rrKey, idx);
+      if (!oneRPM) {
+        roundRobinIndex.set(rrKey, idx + attempt + 1);
+      }
 
       // ── Parallel request gating (provider-level) ──
       // Check if this provider has a concurrency cap and try to reserve a slot.
@@ -565,7 +629,17 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
     // If we reach here, this specific model has NO available keys.
     // Update round-robin index even if we failed so we don't get stuck.
-    roundRobinIndex.set(rrKey, idx);
+    if (!oneRPM) {
+      roundRobinIndex.set(rrKey, idx);
+    }
+
+    // In pin mode, don't fall through to the next model.
+    if (pinMode && preferredModelDbId && entry.model_db_id === preferredModelDbId) {
+      const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
+      pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+      pinErr.status = 429;
+      throw pinErr;
+    }
 
     // We don't explicitly penalize the model here because the fact that we
     // couldn't find a key means we will naturally move to the next model

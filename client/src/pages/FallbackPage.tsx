@@ -614,6 +614,19 @@ export default function FallbackPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
   })
 
+  const { data: retryLimitData } = useQuery<{ limit: number }>({
+    queryKey: ['fallback', 'retry-limit'],
+    queryFn: () => apiFetch('/api/fallback/retry-limit'),
+  })
+
+  const retryLimitMutation = useMutation({
+    mutationFn: (limit: number) =>
+      apiFetch('/api/fallback/retry-limit', { method: 'PUT', body: JSON.stringify({ limit }) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'retry-limit'] }),
+  })
+
+  const globalRetryLimit = retryLimitData?.limit ?? 5
+
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
   const isManual = strategy === 'priority'
 
@@ -746,6 +759,46 @@ export default function FallbackPage() {
               ? 'Manual mode: requests follow the order below, top-to-bottom. Drag to reorder.'
               : 'Scores update from live traffic. The order below is how requests are routed right now.'}
           </p>
+        </section>
+
+        {/* Global retry limit */}
+        <section className="rounded-3xl border bg-card p-5">
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-medium">Exhaustion recovery</h2>
+            <span className="text-xs text-muted-foreground">
+              {globalRetryLimit === 0 ? '∞ infinite' : `${globalRetryLimit} cycle${globalRetryLimit > 1 ? 's' : ''}`}
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">
+            When all keys for all enabled models are rate-limited, the proxy enters 1 RPM recovery mode.
+            Set how many recovery cycles before giving up (1–100), or 0 to keep retrying forever.
+          </p>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={globalRetryLimit}
+              disabled={retryLimitMutation.isPending}
+              onChange={e => {
+                const v = parseInt(e.target.value, 10)
+                retryLimitMutation.mutate(v)
+              }}
+              className="flex-1 h-1.5 rounded-full appearance-none bg-muted cursor-pointer accent-foreground"
+            />
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              value={globalRetryLimit}
+              disabled={retryLimitMutation.isPending}
+              onChange={e => {
+                const v = parseInt(e.target.value, 10)
+                if (Number.isFinite(v) && v >= 0 && v <= 100) retryLimitMutation.mutate(v)
+              }}
+              className="w-20 text-center text-sm"
+            />
+          </div>
         </section>
 
         {/* Unified routing / fallback table */}

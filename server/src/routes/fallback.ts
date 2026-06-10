@@ -2,11 +2,30 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
-import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy } from '../services/router.js';
+import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, getGlobalRetryLimit, setGlobalRetryLimit } from '../services/router.js';
 import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
 import { parseBudget } from '../lib/budget.js';
 
 export const fallbackRouter = Router();
+
+// ── Global retry limit ──────────────────────────────────────────────────────
+fallbackRouter.get('/retry-limit', (_req: Request, res: Response) => {
+  res.json({ limit: getGlobalRetryLimit() });
+});
+
+const retryLimitSchema = z.object({
+  limit: z.number().int().min(0).max(100),
+});
+
+fallbackRouter.put('/retry-limit', (req: Request, res: Response) => {
+  const parsed = retryLimitSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: 'Limit must be 0 (infinite) or 1-100' } });
+    return;
+  }
+  setGlobalRetryLimit(parsed.data.limit);
+  res.json({ limit: getGlobalRetryLimit() });
+});
 
 // ── Bandit routing strategy ─────────────────────────────────────────────────
 // GET  /routing → active strategy, preset weights, the saved custom weights,

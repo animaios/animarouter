@@ -3,7 +3,8 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { ChatMessage, ModelListRow } from '@freellmapi/shared/types.js';
-import { routeRequest, recordRateLimitHit, recordSuccess, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
+import { routeRequest, recordRateLimitHit, recordSuccess, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult, getGlobalRetryLimit } from '../services/router.js';
+import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
 import { recordRequest, recordTokens, setCooldown, getCooldownDurationForLimit, PAYMENT_REQUIRED_COOLDOWN_MS, MODEL_FORBIDDEN_COOLDOWN_MS } from '../services/ratelimit.js';
 import { pruneRequestAnalytics } from '../services/request-retention.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
@@ -173,7 +174,7 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
 });
 
 
-const MAX_RETRIES = 20;
+const PER_KEY_RETRIES = 3;
 
 // Echo-tolerant tool calls: agents replay OUR responses back as history, and
 // not all of them preserve the strict OpenAI shape. `type` may be dropped
@@ -659,34 +660,73 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // traffic and failover overrides are visible.
   const pinnedModelId = requestedModel && !isAutoModel(requestedModel) ? requestedModel : null;
 
-  // Retry loop: on 429/rate limit, skip that model+key and try the next one
+  // Retry loop: per-key 3-retry followed by model/key cycling.
+  // In 1 RPM mode (after all keys/models are exhausted), retries are
+  // throttled to 1 request/minute for the globally-configured number of
+  // cycles (0 = infinite).
   const skipKeys = new Set<string>();
   const skipModels = new Set<number>();
   let lastError: any = null;
 
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    let route: RouteResult;
-    try {
-      route = routeRequest(estimatedTotal, skipKeys.size > 0 ? skipKeys : undefined, preferredModel, hasImage, wantsTools, skipModels.size > 0 ? skipModels : undefined);
-    } catch (err: any) {
-      // No more models available
-      if (lastError) {
-        const safeLastError = sanitizeProviderErrorMessage(lastError.message);
-        res.status(429).json({
-          error: {
-            message: `All models rate-limited. Last error: ${safeLastError}`,
-            type: 'rate_limit_error',
-          },
-        });
-      } else {
-        res.status(err.status ?? 503).json({
-          error: { message: err.message, type: 'routing_error' },
-        });
-      }
+  const isPinned = !!(requestedModel && !isAutoModel(requestedModel));
+  let inOneRPMMode = false;
+  let oneRPMCycles = 0;
+  let lastRequestTime = 0;
+  const globalRetryMax = getGlobalRetryLimit();
+
+  for (let totalAttempt = 0; ; totalAttempt++) {
+    // ---- Exit: global retries exhausted (1 RPM mode only) ----
+    if (inOneRPMMode && globalRetryMax > 0 && oneRPMCycles >= globalRetryMax) {
+      res.status(429).json({
+        error: {
+          message: `All models rate-limited after ${oneRPMCycles} recovery cycle(s). Last: ${sanitizeProviderErrorMessage(lastError?.message)}`,
+          type: 'rate_limit_error',
+        },
+      });
       return;
     }
 
+    // ---- 1 RPM throttling ----
+    if (inOneRPMMode && lastRequestTime > 0) {
+      const elapsed = Date.now() - lastRequestTime;
+      if (elapsed < 60_000) {
+        await new Promise(r => setTimeout(r, 60_000 - elapsed));
+      }
+    }
+
+    // ---- Get route ----
+    let route: RouteResult;
     try {
+      route = routeRequest(
+        estimatedTotal,
+        skipKeys.size > 0 ? skipKeys : undefined,
+        preferredModel,
+        hasImage,
+        wantsTools,
+        skipModels.size > 0 ? skipModels : undefined,
+        { pinMode: isPinned, oneRPM: inOneRPMMode },
+      );
+    } catch (err: any) {
+      // Pinned model has no more keys — enter 1 RPM mode.
+      if (err.code === 'PINNED_MODEL_EXHAUSTED') {
+        inOneRPMMode = true;
+        oneRPMCycles++;
+        lastRequestTime = 0; // allow immediate first attempt
+        console.log(`[Proxy] Pinned model ${requestedModel} exhausted, entering 1 RPM recovery (cycle ${oneRPMCycles}${globalRetryMax > 0 ? `/${globalRetryMax}` : '/∞'})`);
+        continue;
+      }
+      // All models exhausted — enter 1 RPM mode.
+      inOneRPMMode = true;
+      oneRPMCycles++;
+      lastRequestTime = 0;
+      console.log(`[Proxy] All models exhausted, entering 1 RPM recovery (cycle ${oneRPMCycles}${globalRetryMax > 0 ? `/${globalRetryMax}` : '/∞'})`);
+      continue;
+    }
+
+    // ---- Per-key retry: up to PER_KEY_RETRIES immediate attempts ----
+    let keySucceeded = false;
+    keyRetry: for (let keyAttempt = 0; keyAttempt < PER_KEY_RETRIES; keyAttempt++) {
+      try {
       if (stream) {
         // — Stream turn-integrity (#231 audit) —
         // The old loop forwarded upstream chunks verbatim and called any
@@ -726,7 +766,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           res.setHeader('Cache-Control', 'no-cache');
           res.setHeader('Connection', 'keep-alive');
           res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
-          if (attempt > 0) res.setHeader('X-Fallback-Attempts', String(attempt));
+          if (totalAttempt > 0) res.setHeader('X-Fallback-Attempts', String(totalAttempt));
           headerSent = true;
           for (const p of preamble) res.write(`data: ${JSON.stringify(p)}\n\n`);
           preamble.length = 0;
@@ -889,6 +929,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           recordSuccess(route.modelDbId);
           setStickyModel(messages, route.modelDbId, sessionIdHeader);
           logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, pinnedModelId);
+          clearExhausted(route.keyId);
+          if (inOneRPMMode) { inOneRPMMode = false; oneRPMCycles = 0; }
           return;
         } catch (streamErr: any) {
           if (headerSent) {
@@ -919,12 +961,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         const respMsg = result.choices?.[0]?.message;
         const respText = contentToString(respMsg?.content ?? '');
         if (!respText && (respMsg?.tool_calls?.length ?? 0) === 0) {
-          logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, 'empty completion (no content, no tool_calls)', null, pinnedModelId);
-          skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
-          setCooldown(route.platform, route.modelId, route.keyId, getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
-          recordRateLimitHit(route.modelDbId);
-          lastError = new Error(`empty completion from ${route.displayName}`);
-          continue;
+          throw new Error(`empty completion from ${route.displayName}`);
         }
 
         // Inline tool-call dialect rescue (#231 audit): a tool-bearing
@@ -958,7 +995,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         setStickyModel(messages, route.modelDbId, sessionIdHeader);
 
         res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
-        if (attempt > 0) res.setHeader('X-Fallback-Attempts', String(attempt));
+        if (totalAttempt > 0) res.setHeader('X-Fallback-Attempts', String(totalAttempt));
+        if (inOneRPMMode) res.setHeader('X-Recovery-Mode', '1rpm');
         // Repair double-encoded tool arguments against the request's tool
         // schemas (e.g. GLM emitting an array parameter as a JSON string),
         // so strict clients don't reject the call. Schema-gated — a true
@@ -980,6 +1018,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           result.usage?.completion_tokens ?? 0,
           Date.now() - start, null, null, pinnedModelId,
         );
+        clearExhausted(route.keyId);
+        if (inOneRPMMode) { inOneRPMMode = false; oneRPMCycles = 0; }
         return;
       }
     } catch (err: any) {
@@ -988,60 +1028,72 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, pinnedModelId);
 
       if (isRetryableError(err)) {
-        // Model-level 404 (removed/deprecated upstream): rule the whole model
-        // out for the rest of this request — its other keys would 404 the same
-        // way. The per-key cooldown below still applies, so cross-request
-        // behavior (#66/#76) is unchanged. (PR #111, credits @barbotkonv.)
-        // 404 (removed upstream) and 403 (model off-limits to this key's tier)
-        // both rule the model out: a sibling key on the same platform would
-        // fail it identically, so skip it for the rest of this request.
-        if (isModelNotFoundError(err) || isModelAccessForbiddenError(err)) skipModels.add(route.modelDbId);
+        // Model-level 404/403: rule the whole model out immediately.
+        if (isModelNotFoundError(err) || isModelAccessForbiddenError(err)) {
+          skipModels.add(route.modelDbId);
+        }
+        // Dead-turn errors (in-band error, empty completion, stream stall,
+        // unparseable dialect): skip key immediately — retrying the same key
+        // won't help. Per-key 3-retry is for transient limits (429, etc.).
+        const msg = (err.message ?? '').toLowerCase();
+        const skipImmediately = msg.includes('in-band provider error')
+          || msg.includes('empty completion')
+          || msg.includes('stream ended unexpectedly')
+          || msg.includes('stream stalled')
+          || msg.includes('unparseable inline tool-call dialect');
 
-        // Put this model+key on cooldown and try the next one
-        const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
-        skipKeys.add(skipId);
-        setCooldown(
-          route.platform,
-          route.modelId,
-          route.keyId,
-          isPaymentRequiredError(err)
-            ? PAYMENT_REQUIRED_COOLDOWN_MS
-            // A 403 won't clear on the next window (it's a tier/subscription gate,
-            // not a transient limit), so bench this model+key for a day like a 402
-            // instead of re-trying it every request. See issue #256.
-            : isModelAccessForbiddenError(err)
-            ? MODEL_FORBIDDEN_COOLDOWN_MS
-            : getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, {
-                rpd: route.rpdLimit,
-                tpd: route.tpdLimit,
-              }, err.retryAfterMs),
-        );
-        recordRateLimitHit(route.modelDbId);
+        if (!skipImmediately && keyAttempt < PER_KEY_RETRIES - 1) {
+          // Transient limit: retry same key immediately.
+          lastError = err;
+          console.log(`[Proxy] ${safeError.slice(0, 60)} from ${route.displayName}, retry ${keyAttempt + 1}/${PER_KEY_RETRIES} (same key)`);
+          continue keyRetry;
+        }
+        // Skip immediately or last attempt → fall through to key exhaustion.
         lastError = err;
-        console.log(`[Proxy] ${safeError.slice(0, 60)} from ${route.displayName}, falling back (attempt ${attempt + 1}/${MAX_RETRIES})`);
-        continue;
+        break keyRetry;
+      } else {
+        // Non-retryable error (auth, 4xx, etc.): don't retry.
+        res.status(502).json({
+          error: {
+            message: `Provider error (${route.displayName}): ${safeError}`,
+            type: 'provider_error',
+          },
+        });
+        return;
       }
-
-      // Non-retryable error (auth, 4xx, etc.): don't retry
-      res.status(502).json({
-        error: {
-          message: `Provider error (${route.displayName}): ${safeError}`,
-          type: 'provider_error',
-        },
-      });
-      return;
     } finally {
       route.release();
     }
+    } // end keyRetry
+
+    // Key exhausted: all PER_KEY_RETRIES attempts failed.
+    // Mark it so the router cycles to the next key (and in 1 RPM mode,
+    // exhausted keys are re-tried in exhaustion order).
+    markExhausted(route.keyId, route.platform, route.modelId);
+    const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
+    skipKeys.add(skipId);
+    if (!isModelNotFoundError(lastError) && !isModelAccessForbiddenError(lastError)) {
+      setCooldown(
+        route.platform,
+        route.modelId,
+        route.keyId,
+        isPaymentRequiredError(lastError)
+          ? PAYMENT_REQUIRED_COOLDOWN_MS
+          : isModelAccessForbiddenError(lastError)
+          ? MODEL_FORBIDDEN_COOLDOWN_MS
+          : getCooldownDurationForLimit(route.platform, route.modelId, route.keyId, {
+              rpd: route.rpdLimit,
+              tpd: route.tpdLimit,
+            }, lastError?.retryAfterMs),
+      );
+    }
+    recordRateLimitHit(route.modelDbId);
+    lastRequestTime = Date.now();
+    console.log(`[Proxy] Key ${route.keyId} exhausted after ${PER_KEY_RETRIES} failures from ${route.displayName}`);
+    // Continue outer loop → routeRequest picks next key.
   }
 
-  // Exhausted all retries
-  res.status(429).json({
-    error: {
-      message: `All models rate-limited after ${MAX_RETRIES} attempts. Last: ${sanitizeProviderErrorMessage(lastError?.message)}`,
-      type: 'rate_limit_error',
-    },
-  });
+  // Unreachable — the outer loop exits via the 1-RPM limit check above.
 });
 
 export function logRequest(
