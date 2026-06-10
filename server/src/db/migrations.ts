@@ -528,7 +528,6 @@ function migrateModelsV4(db: Database.Database) {
   const removals: Array<[string, string]> = [
     ['moonshot', 'kimi-latest'],                                            // paid-only now ($1 min deposit)
     ['minimax', 'MiniMax-M1'],                                              // superseded; use OR minimax-m2.5:free
-    ['openrouter', 'google/gemma-4-31b-it:free'],                           // weak at tool use
     ['huggingface', 'accounts/fireworks/models/llama-v3p3-70b-instruct'],  // emits tool call as text content, not structured
   ];
   const applyRemovals = db.transaction(() => {
