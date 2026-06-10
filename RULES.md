@@ -265,6 +265,28 @@ single rebase session. Follow them in order.
    uses a noreply GitHub address. Personal credentials should never leak into
    commit metadata outside their own repos.
 
+10. **Never commit API keys, tokens, or secrets.** Not in migrations, not in config
+    files, not in scripts committed to git. Use one-time import scripts that are
+    deleted immediately after running. The DB file (`server/data/`) is gitignored
+    — secrets live there encrypted, not in source.
+
+11. **INSERT OR IGNORE needs a companion UPDATE for corrections.** If you add a
+    migration that inserts data, also add UPDATE statements for fields that might
+    change between runs (RPM limits, model properties, size labels). Otherwise a
+    re-run silently skips stale values.
+
+12. **When adding custom providers, verify every property after migration.** Check
+    RPM limits, parallel gating, model size labels, intelligence ranks, context
+    windows, and max output tokens against the source config. A single typo or
+    omission (e.g., `parallelEnabled: false` in pi but `max_parallel_requests = 5`
+    in the migration) breaks behavior silently.
+
+13. **Share providers that look similar may be completely different.** Cloudflare
+    AI Gateway ≠ Cloudflare Workers AI. Always read the actual provider config
+    (base URL, credential format, auth method) before assuming. Pi's credential
+    "sets" (multi-field keys) map to FreeLLMAPI's colon-separated combined key
+    format — the UI already handles this with `needsAccountId`.
+
 ### 4.1 Conflict Hotspots (files you modify that upstream also touches)
 
 | File | Your Features Touching It | Risk Level |
@@ -487,7 +509,7 @@ npm run dev
 
 ```
 After rebase:
-  □ npm run test -w server    — all tests pass (currently 468)
+  □ npm run test -w server    — all tests pass (currently 468, 43 test files)
   □ npm run dev               — manual smoke test
   □ If ANYTHING fails → DO NOT PUSH → fix first
   □ Common failure patterns after upstream sync:
@@ -577,6 +599,11 @@ git push origin main
 | **Using JOIN instead of EXISTS for filtering in SQL subqueries** | JOIN introduces column ambiguity when both tables have `id` columns. EXISTS avoids the ambiguity entirely. | `ambiguous column name: id` error in /v1/models query. Fixed by switching JOIN → EXISTS. |
 | **Replacing shared type files wholesale** | `shared/types.ts` has fields added by upstream (e.g., `reasoning_content`). Overwriting removes them silently. | `reasoning_content` test failed after overwrite. |
 | **Not testing between consecutive rebase resolutions** | If you resolve conflict 1, continue, hit conflict 2, and only test at the end — you won't know WHICH resolution broke things. | — |
+| **Committing API keys to git (even in migrations)** | Keys in source code leak to GitHub on push. Even if you delete the file later, it's in git history forever. | — |
+| **INSERT OR IGNORE without companion UPDATE** | First run inserts correct data. Second run skips silently, leaving stale values from the first run. Broken RPM limits and wrong model sizes persist until you notice. | GLM 5.1 models showed `Frontier` instead of `Large`. ModalResearch had `max_parallel=5` instead of `null`. |
+| **Not verifying provider config against source** | Pi provider-manager.json had `parallelEnabled: false` for ModalResearch. Migration set `max_parallel_requests = 5`. Silent mismatch until manually caught. | ModalResearch parallel gating was wrong until the user caught it. |
+| **Changing EditModelModal to queued edits but leaving stale mutation refs** | The modal's JSX still referenced `save.isError` and `save.isPending` after removing the `save` mutation. React crashes with "save is not defined" and the entire modal goes black. | EditModelModal broke completely until the stale refs were removed. |
+| **Adding models but forgetting to update hasProvider** | `hasProvider()` only checked the built-in provider map. Custom providers added via `custom_providers` table weren't found, breaking the idempotency test and the /api/models response. | Tests failed: "expected [bluesminds, deepseek, modalresearch] to equal []". |
 
 ---
 
@@ -642,6 +669,44 @@ at request time, not cached. This means dashboard changes take effect immediatel
 **Testability:** Custom provider auto-discovery skips in test environments (`VITEST` env
 var) to avoid timeouts from unreachable fake URLs. Follow the same pattern for any new
 network-dependent feature.
+
+**Exhaustion retry architecture:** The retry system has three layers:
+1. **Per-key 3-retry** (immediate): Same key retried up to 3 times for transient
+   errors (429, timeouts). Dead-turn errors (in-band errors, empty completions,
+   stream stalls) skip immediately — retrying the same key won't help.
+2. **Key cycling** (exhaustion order): When a key exhausts after 3 failures, the
+   router cycles to the next available key. Exhausted keys are tracked in-memory
+   and rebuilt from DB cooldowns on restart. Keys are tried in exhaustion-time
+   order (earliest exhausted first) so the key with the longest recovery window
+   gets the first chance.
+3. **1-RPM recovery mode** (global retry limit): When ALL keys for a pinned model
+   (or ALL models in auto mode) are exhausted, the system throttles to 1 request
+   per minute and cycles through exhausted keys. The global retry limit (1-100 or
+   0=∞) controls how many recovery cycles to attempt before giving up. A single
+   successful request clears the exhaustion and restores normal operation.
+
+The 1-RPM throttle is purely in-memory — the model's DB `rpm_limit` is never
+changed. This means switching models mid-recovery immediately uses the new model's
+configured RPM.
+
+**Queued edits pattern:** When multiple UI changes (model edits, slider, sort order)
+can be pending simultaneously, batch them behind a single FloatingBar "Save changes"
+button. Each change type stores to local state, and the save handler fires all
+mutations in sequence. Discard reverts everything. This avoids:
+- Mid-edit API calls that leave partial state
+- Multiple overlapping mutations racing
+- Sliders that fire an API call on every pixel of drag
+
+**Custom provider hasProvider fix:** `hasProvider()` originally only checked the
+built-in provider map. Custom providers added via `custom_providers` table weren't
+found, breaking the idempotency test and `/api/models` response. Fix: check
+`custom_providers` table as a fallback:
+```ts
+export function hasProvider(platform: Platform): boolean {
+  if (providers.has(platform)) return true;
+  return !!db.prepare('SELECT 1 FROM custom_providers WHERE slug = ?').get(platform);
+}
+```
 
 ---
 
@@ -836,7 +901,98 @@ git push origin main
 6. **The rebase direction matters** — `--ours` = main (base), `--theirs` = feature (applied).
 7. **Preserve upstream additions** — especially in shared types files.
 
+
+## 12. API Key Import from pi Provider Manager
+
+When migrating credentials from a pi coding agent setup, follow this exact
+procedure to avoid leaking secrets into git history.
+
+### 12.1 Never Commit Secrets
+
+API keys, tokens, and account IDs must NEVER appear in committed files. The
+`server/data/` directory (which contains the SQLite DB with encrypted keys)
+is gitignored. All other secret-containing files must be deleted immediately
+after use.
+
+### 12.2 One-Time Import Script Pattern
+
+```ts
+// scripts/import-keys.ts — RUN ONCE, DELETE IMMEDIATELY
+import { initDb } from '../server/src/db/index.js';
+import { encrypt } from '../server/src/lib/crypto.js';
+
+const KEYS = [
+  { platform: 'openrouter', label: 'Key 1', value: 'sk-or-v1-...' },
+  // ... all keys ...
+];
+
+const db = initDb();
+const insertKey = db.prepare(`
+  INSERT OR IGNORE INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+  VALUES (?, ?, ?, ?, ?, 'healthy', 1)
+`);
+
+for (const { platform, label, value } of KEYS) {
+  const { encrypted, iv, authTag } = encrypt(value);
+  insertKey.run(platform, label, encrypted, iv, authTag);
+}
+```
+
+Run with: `npx tsx scripts/import-keys.ts`
+Delete with: `rm scripts/import-keys.ts`
+
+### 12.3 Credential Mapping: pi → FreeLLMAPI
+
+Pi stores credentials in three formats:
+
+| pi Format | FreeLLMAPI Equivalent |
+|---|---|
+| `keys["openrouter"][{name, value: "sk-..."}]` | `api_keys(platform='openrouter', label=name, encrypted_key=encrypt(value))` |
+| `sets["cloudflare-ai"][{name, fields: {accountId, apiKey}}]` | `api_keys(platform='cloudflare', label=name, encrypted_key=encrypt(accountId + ':' + apiKey))` |
+| `tokens["google-antigravity"][{name, access, refresh, extra}]` | Not directly supported. Google uses OAuth in pi, Cloudflare uses API keys in FreeLLMAPI. |
+
+Cloudflare Workers AI credential "sets" (two fields: accountId + apiKey) map to
+FreeLLMAPI's colon-separated format (`account_id:api_token`). The UI already shows
+two separate input fields when Cloudflare is selected in the "Add a provider key"
+form (`needsAccountId = platform === 'cloudflare'`).
+
+### 12.4 Post-Import Verification
+
+```bash
+sqlite3 server/data/freeapi.db \
+  "SELECT platform, COUNT(*) FROM api_keys WHERE enabled=1 GROUP BY platform ORDER BY COUNT(*) DESC"
+```
+
+Compare counts against the source pi config. Every provider should match exactly.
+
 ---
 
-*Last updated: 2026-06-08 after rebasing 2 feature branches through upstream V24→V25 migration refactor.*
-*Features tracked: feat/lan-auto-grant, feat/custom-providers-redesign, parallel gating, auto-discovery, model editing, /v1/models filter*
+## 13. Select Component Positioning (Base UI)
+
+This project uses `@base-ui/react` Select, not Radix UI. The dropdown popup
+is rendered via `SelectPrimitive.Portal` to `document.body` with a
+`SelectPrimitive.Positioner` that anchors to the trigger element.
+
+### 13.1 Common Positioning Issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Dropdown appears detached from trigger | Positioner defaults to `positionMethod="absolute"` which anchors relative to nearest positioned ancestor, not the viewport | Add `positionMethod="fixed"` to `Positioner` |
+| Dropdown doesn't follow trigger on scroll | Same cause — absolute positioning doesn't track viewport scroll | Same fix |
+| Dropdown renders behind other elements | z-index stacking context issue | Ensure `Positioner` has `className="isolate z-50"` |
+
+### 13.2 The Fix
+
+In `client/src/components/ui/select.tsx`, add to the `Positioner`:
+```tsx
+<SelectPrimitive.Positioner
+  positionMethod="fixed"   // ← anchors to viewport, tracks scroll
+  className="isolate z-50" // ← stacks above other content
+  ...
+>
+```
+
+---
+
+*Last updated: 2026-06-10 after adding custom providers (Bluesminds/ModalResearch/DeepSeek), per-key 3-retry with 1-RPM exhaustion recovery, max_output_tokens field, queued edits pattern, and 79 API key imports from pi.*
+*Features tracked: feat/lan-auto-grant, feat/custom-providers-redesign, parallel gating, auto-discovery, model editing, /v1/models filter, exhaustion retry, max_output_tokens, Bluesminds/ModalResearch/DeepSeek providers*
