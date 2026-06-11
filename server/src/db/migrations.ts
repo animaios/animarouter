@@ -46,6 +46,7 @@ export function migrateDbSchema(db: Database.Database) {
   ensureUnifiedKey(db);
   migrateSchemaV28IndexesAndFK(db);
   migrateSchemaV29ArchiveProviders(db);
+  migrateSchemaV30KeylessProviders(db);
 }
 
 function createTables(db: Database.Database) {
@@ -2301,10 +2302,20 @@ function migrateSchemaV28IndexesAndFK(db: Database.Database) {
 // ── V29: archive support for custom providers (2026-06) ──
 // Adds an `archived` column so deleting a custom provider is a soft-delete:
 // models and keys are disabled, the provider row stays for analytics.
-// Re-adding a provider with the same slug revives it from the archive.
 function migrateSchemaV29ArchiveProviders(db: Database.Database) {
   const cols = db.prepare("PRAGMA table_info('custom_providers')").all() as Array<{ name: string }>;
   if (!cols.some(c => c.name === 'archived')) {
     db.prepare('ALTER TABLE custom_providers ADD COLUMN archived INTEGER DEFAULT 0').run();
+  }
+}
+
+// ── V30: keyless custom providers (2026-06) ──
+// Lets operators register custom providers that don't need an API key
+// (e.g. a local Ollama instance, anonymous gateway). Keyless providers
+// auto-create a sentinel key row so routing treats them as configured.
+function migrateSchemaV30KeylessProviders(db: Database.Database) {
+  const cols = db.prepare("PRAGMA table_info('custom_providers')").all() as Array<{ name: string }>;
+  if (!cols.some(c => c.name === 'keyless')) {
+    db.prepare('ALTER TABLE custom_providers ADD COLUMN keyless INTEGER DEFAULT 0').run();
   }
 }

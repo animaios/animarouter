@@ -47,6 +47,7 @@ export interface CustomProvider {
   tpmLimit: number | null;
   tpdLimit: number | null;
   maxParallelRequests: number | null;
+  keyless: boolean;
 }
 export interface CustomProviderCreate {
   slug: string;
@@ -57,6 +58,7 @@ export interface CustomProviderCreate {
   tpmLimit?: number | null;
   tpdLimit?: number | null;
   maxParallelRequests?: number | null;
+  keyless?: boolean;
 }
 
 export interface CustomProviderUpdate {
@@ -67,6 +69,7 @@ export interface CustomProviderUpdate {
   tpmLimit?: number | null;
   tpdLimit?: number | null;
   maxParallelRequests?: number | null;
+  keyless?: boolean;
 }
 
 export interface CustomModelCreate {

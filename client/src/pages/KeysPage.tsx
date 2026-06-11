@@ -189,6 +189,7 @@ function AddPlatformModal({
   const [tpdLimit, setTpdLimit] = useState<string>('')
   const [parallelEnabled, setParallelEnabled] = useState(false)
   const [maxParallelRequests, setMaxParallelRequests] = useState(4)
+  const [keyless, setKeyless] = useState(false)
 
   const create = useMutation<{ slug: string }, Error, Record<string, unknown>>({
     mutationFn: (body) => apiFetch('/api/custom-providers', { method: 'POST', body: JSON.stringify(body) }) as Promise<{ slug: string }>,
@@ -206,6 +207,7 @@ function AddPlatformModal({
       setTpdLimit('')
       setParallelEnabled(false)
       setMaxParallelRequests(4)
+      setKeyless(false)
     },
   })
 
@@ -234,8 +236,7 @@ function AddPlatformModal({
         <form
           onSubmit={e => {
             e.preventDefault()
-            if (!slug || !displayName || !baseUrl) return
-            const body: Record<string, unknown> = { slug: slug.trim(), displayName: displayName.trim(), baseUrl: baseUrl.trim() }
+            const body: Record<string, unknown> = { slug: slug.trim(), displayName: displayName.trim(), baseUrl: baseUrl.trim(), keyless }
             if (showAdvanced) {
               if (rpmLimit) body.rpmLimit = parseInt(rpmLimit, 10)
               if (rpdLimit) body.rpdLimit = parseInt(rpdLimit, 10)
@@ -328,6 +329,10 @@ function AddPlatformModal({
             </div>
             </>
           )}
+          <div className="flex items-center gap-2 pt-1">
+            <Switch checked={keyless} onCheckedChange={setKeyless} />
+            <span className="text-xs text-muted-foreground">No API key required (anonymous/sentinel)</span>
+          </div>
           {create.isError && (
             <p className="text-destructive text-xs">{(create.error as Error).message}</p>
           )}
@@ -758,7 +763,7 @@ export default function KeysPage() {
   // first; user-added custom providers appear at the end of the dropdown.
   const allPlatforms: { value: string; label: string; url: string; keyless?: boolean }[] = [
     ...PLATFORMS,
-    ...customProviders.map(cp => ({ value: cp.slug, label: `${cp.displayName} (custom)`, url: '' })),
+    ...customProviders.map(cp => ({ value: cp.slug, label: `${cp.displayName} (custom)`, url: '', keyless: cp.keyless })),
   ]
   const selectedPlatform = allPlatforms.find(p => p.value === platform)
   const needsAccountId = platform === 'cloudflare'

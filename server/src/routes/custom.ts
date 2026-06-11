@@ -28,6 +28,7 @@ const createProviderSchema = z.object({
   tpmLimit: z.number().int().positive().nullable().optional(),
   tpdLimit: z.number().int().positive().nullable().optional(),
   maxParallelRequests: z.number().int().min(1).nullable().optional(),
+  keyless: z.boolean().optional(),
 });
 
 const updateProviderSchema = z.object({
@@ -38,8 +39,8 @@ const updateProviderSchema = z.object({
   tpmLimit: z.number().int().positive().nullable().optional(),
   tpdLimit: z.number().int().positive().nullable().optional(),
   maxParallelRequests: z.number().int().min(1).nullable().optional(),
+  keyless: z.boolean().optional(),
 }).refine(d => d.displayName !== undefined || d.baseUrl !== undefined
-  || d.rpmLimit !== undefined || d.rpdLimit !== undefined
   || d.tpmLimit !== undefined || d.tpdLimit !== undefined
   || d.maxParallelRequests !== undefined, {
   message: 'At least one field must be provided',
@@ -182,6 +183,7 @@ customRouter.get('/api/custom-providers', (_req: Request, res: Response) => {
     tpm_limit: number | null; tpd_limit: number | null;
     max_parallel_requests: number | null;
     created_at: string;
+    keyless: number;
   }>;
   const modelCounts = db.prepare(`
     SELECT platform, COUNT(*) AS n FROM models GROUP BY platform
@@ -202,6 +204,7 @@ customRouter.get('/api/custom-providers', (_req: Request, res: Response) => {
     tpmLimit: r.tpm_limit,
     tpdLimit: r.tpd_limit,
     maxParallelRequests: r.max_parallel_requests,
+    keyless: r.keyless === 1,
     createdAt: r.created_at,
     modelCount: modelByPlatform.get(r.slug) ?? 0,
     keyCount: keysByPlatform.get(r.slug) ?? 0,
@@ -215,8 +218,7 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-
-  const { slug, displayName, rpmLimit, rpdLimit, tpmLimit, tpdLimit, maxParallelRequests } = parsed.data;
+  const { slug, displayName, rpmLimit, rpdLimit, tpmLimit, tpdLimit, maxParallelRequests, keyless } = parsed.data;
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
 
   if (BUILTIN_SLUGS.has(slug)) {
@@ -235,38 +237,36 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
       res.status(409).json({ error: { message: `provider with slug '${slug}' already exists` } });
       return;
     }
-    // Revive from archive only when the base URL matches — different URL
-    // means a genuinely different provider using the same slug.
+    // Revive from archive — preserve keyless flag.
     if (existing.base_url !== baseUrl) {
       res.status(409).json({ error: { message: `slug '${slug}' is archived with a different base_url — delete it first or choose a new slug` } });
       return;
     }
-    // Restore: un-archive, re-enable keys and models, update limits.
     const tx = db.transaction(() => {
-      db.prepare('UPDATE custom_providers SET archived = 0, display_name = ?, rpm_limit = ?, rpd_limit = ?, tpm_limit = ?, tpd_limit = ?, max_parallel_requests = ? WHERE slug = ?')
-        .run(displayName.trim(), rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, slug);
+      db.prepare('UPDATE custom_providers SET archived = 0, display_name = ?, rpm_limit = ?, rpd_limit = ?, tpm_limit = ?, tpd_limit = ?, max_parallel_requests = ?, keyless = ? WHERE slug = ?')
+        .run(displayName.trim(), rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0, slug);
       db.prepare('UPDATE api_keys SET enabled = 1 WHERE platform = ?').run(slug);
       db.prepare('UPDATE models SET enabled = 1 WHERE platform = ?').run(slug);
     });
     tx();
 
     clearPlatformCaches(slug);
-    // Re-sync models in case the provider added new ones while archived.
     const sync = await syncModelsFromProvider(baseUrl, slug);
     res.json({
       id: existing.id, slug, displayName: displayName.trim(), baseUrl,
       rpmLimit: rpmLimit ?? null, rpdLimit: rpdLimit ?? null,
       tpmLimit: tpmLimit ?? null, tpdLimit: tpdLimit ?? null,
       maxParallelRequests: maxParallelRequests ?? null,
+      keyless: !!keyless,
       modelCount: sync.fetched, revived: true,
     });
     return;
   }
 
   const result = db.prepare(`
-    INSERT INTO custom_providers (slug, display_name, base_url, rpm_limit, rpd_limit, tpm_limit, tpd_limit, max_parallel_requests)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(slug, displayName.trim(), baseUrl, rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null);
+    INSERT INTO custom_providers (slug, display_name, base_url, rpm_limit, rpd_limit, tpm_limit, tpd_limit, max_parallel_requests, keyless)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(slug, displayName.trim(), baseUrl, rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0);
 
   // Auto-discover models from the provider's /models endpoint.
   const sync = await syncModelsFromProvider(baseUrl, slug);
@@ -281,6 +281,7 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
     tpmLimit: tpmLimit ?? null,
     tpdLimit: tpdLimit ?? null,
     maxParallelRequests: maxParallelRequests ?? null,
+    keyless: !!keyless,
     modelCount: sync.fetched,
   });
 });
@@ -340,6 +341,10 @@ customRouter.patch('/api/custom-providers/:slug', (req: Request, res: Response) 
     updates.push('max_parallel_requests = ?');
     values.push(parsed.data.maxParallelRequests);
   }
+  if (parsed.data.keyless !== undefined) {
+    updates.push('keyless = ?');
+    values.push(parsed.data.keyless ? 1 : 0);
+  }
 
   if (updates.length === 0) {
     res.json({ success: true, slug });
@@ -351,7 +356,6 @@ customRouter.patch('/api/custom-providers/:slug', (req: Request, res: Response) 
 
   res.json({ success: true, slug });
 });
-
 // Archive a provider. Disables models and keys, removes from fallback chain.
 // Analytics retains historical request data. Re-adding the same slug+bare_url
 // revives the provider from the archive.
