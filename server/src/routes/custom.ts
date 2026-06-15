@@ -29,6 +29,7 @@ const createProviderSchema = z.object({
   tpdLimit: z.number().int().positive().nullable().optional(),
   maxParallelRequests: z.number().int().min(1).nullable().optional(),
   keyless: z.boolean().optional(),
+  apiFormat: z.enum(['openai', 'anthropic']).optional(),
 });
 
 const updateProviderSchema = z.object({
@@ -41,9 +42,10 @@ const updateProviderSchema = z.object({
   tpdLimit: z.number().int().positive().nullable().optional(),
   maxParallelRequests: z.number().int().min(1).nullable().optional(),
   keyless: z.boolean().optional(),
+  apiFormat: z.enum(['openai', 'anthropic']).optional(),
 }).refine(d => d.displayName !== undefined || d.baseUrl !== undefined
   || d.slug !== undefined || d.tpmLimit !== undefined || d.tpdLimit !== undefined
-  || d.maxParallelRequests !== undefined || d.keyless !== undefined, {
+  || d.maxParallelRequests !== undefined || d.keyless !== undefined || d.apiFormat !== undefined, {
     message: `At least one of displayName, slug, baseUrl, or limit must be provided`,
   });
 // tools by default (the most common case for OpenAI-compatible endpoints).
@@ -93,7 +95,7 @@ function isKnownProvider(slug: string): boolean {
 // inserts them into the catalog with sensible defaults. Existing models
 // (matched by platform + model_id) are skipped so re-runs are safe.
 
-async function syncModelsFromProvider(baseUrl: string, slug: string): Promise<{ fetched: number; error?: string }> {
+export async function syncModelsFromProvider(baseUrl: string, slug: string): Promise<{ fetched: number; error?: string }> {
   // Skip auto-discovery in test environments — fake provider URLs won't respond.
   if (process.env.VITEST) return { fetched: 0 };
 
@@ -182,6 +184,7 @@ customRouter.get('/api/custom-providers', (_req: Request, res: Response) => {
     max_parallel_requests: number | null;
     created_at: string;
     keyless: number;
+    api_format: string;
     archived: number;
   }>;
   const modelCounts = db.prepare(`
@@ -203,6 +206,7 @@ customRouter.get('/api/custom-providers', (_req: Request, res: Response) => {
     tpdLimit: r.tpd_limit,
     maxParallelRequests: r.max_parallel_requests,
     keyless: r.keyless === 1,
+    apiFormat: r.api_format as 'openai' | 'anthropic',
     archived: r.archived === 1,
     createdAt: r.created_at,
     modelCount: modelByPlatform.get(r.slug) ?? 0,
@@ -217,7 +221,7 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
-  const { slug, displayName, rpmLimit, rpdLimit, tpmLimit, tpdLimit, maxParallelRequests, keyless } = parsed.data;
+  const { slug, displayName, rpmLimit, rpdLimit, tpmLimit, tpdLimit, maxParallelRequests, keyless, apiFormat = 'openai' } = parsed.data;
   const baseUrl = parsed.data.baseUrl.trim().replace(/\/+$/, '');
 
   if (BUILTIN_SLUGS.has(slug)) {
@@ -255,8 +259,8 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
     } else {
       // Same slug, same base_url — revive from archive.
       const tx = db.transaction(() => {
-        db.prepare('UPDATE custom_providers SET archived = 0, display_name = ?, rpm_limit = ?, rpd_limit = ?, tpm_limit = ?, tpd_limit = ?, max_parallel_requests = ?, keyless = ? WHERE slug = ?')
-          .run(displayName.trim(), rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0, slug);
+        db.prepare('UPDATE custom_providers SET archived = 0, display_name = ?, rpm_limit = ?, rpd_limit = ?, tpm_limit = ?, tpd_limit = ?, max_parallel_requests = ?, keyless = ?, api_format = ? WHERE slug = ?')
+          .run(displayName.trim(), rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0, apiFormat, slug);
         db.prepare('UPDATE api_keys SET enabled = 1 WHERE platform = ?').run(slug);
         db.prepare('UPDATE models SET enabled = 1 WHERE platform = ?').run(slug);
       });
@@ -270,6 +274,7 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
         tpmLimit: tpmLimit ?? null, tpdLimit: tpdLimit ?? null,
         maxParallelRequests: maxParallelRequests ?? null,
         keyless: !!keyless,
+        apiFormat,
         modelCount: sync.fetched, revived: true,
       });
       return;
@@ -277,9 +282,9 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
   }
 
   const result = db.prepare(`
-    INSERT INTO custom_providers (slug, display_name, base_url, rpm_limit, rpd_limit, tpm_limit, tpd_limit, max_parallel_requests, keyless)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(slug, displayName.trim(), baseUrl, rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0);
+    INSERT INTO custom_providers (slug, display_name, base_url, rpm_limit, rpd_limit, tpm_limit, tpd_limit, max_parallel_requests, keyless, api_format)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(slug, displayName.trim(), baseUrl, rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0, apiFormat);
 
   // Auto-discover models from the provider's /models endpoint.
   const sync = await syncModelsFromProvider(baseUrl, slug);
@@ -295,6 +300,7 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
     tpdLimit: tpdLimit ?? null,
     maxParallelRequests: maxParallelRequests ?? null,
     keyless: !!keyless,
+    apiFormat,
     modelCount: sync.fetched,
   });
 });
@@ -357,6 +363,10 @@ customRouter.patch('/api/custom-providers/:slug', (req: Request, res: Response) 
   if (parsed.data.keyless !== undefined) {
     updates.push('keyless = ?');
     values.push(parsed.data.keyless ? 1 : 0);
+  }
+  if (parsed.data.apiFormat !== undefined) {
+    updates.push('api_format = ?');
+    values.push(parsed.data.apiFormat);
   }
 
   if (parsed.data.slug !== undefined) {

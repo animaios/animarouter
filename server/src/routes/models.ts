@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db/index.js';
-import { hasProvider } from '../providers/index.js';
+import { hasProvider, getAllProviders } from '../providers/index.js';
+import { syncModelsFromProvider } from './custom.js';
 
 export const modelsRouter = Router();
 
@@ -50,4 +51,48 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
   }));
 
   res.json(result);
+});
+
+// ── Model sync-all ────────────────────────────────────────────────────────
+// Discovers models from every built-in and custom provider, inserting any new
+// ones (matched by platform + model_id) at the end of the fallback chain.
+// Keyless providers and providers without a baseUrl are skipped gracefully.
+modelsRouter.post('/sync-all', async (_req: Request, res: Response) => {
+  const db = getDb();
+  const builtins = getAllProviders();
+
+  // Collect slugs + baseUrls from built-ins that expose a discoverable /models endpoint.
+  const targets: { slug: string; baseUrl: string }[] = [];
+  for (const p of builtins) {
+    if (p.baseUrl) {
+      targets.push({ slug: p.platform, baseUrl: p.baseUrl });
+    }
+  }
+
+  // Add custom providers. Skip Anthropic-format rows: Anthropic has no
+  // /v1/models endpoint, so there's nothing to discover.
+  const customRows = db.prepare(
+    "SELECT slug, base_url, api_format FROM custom_providers WHERE archived = 0 AND api_format != 'anthropic'",
+  ).all() as { slug: string; base_url: string; api_format: string }[];
+  for (const r of customRows) {
+    targets.push({ slug: r.slug, baseUrl: r.base_url });
+  }
+
+  let totalFetched = 0;
+  const errors: { slug: string; error: string }[] = [];
+
+  for (const t of targets) {
+    const result = await syncModelsFromProvider(t.baseUrl, t.slug);
+    totalFetched += result.fetched;
+    if (result.error) {
+      errors.push({ slug: t.slug, error: result.error });
+    }
+  }
+
+  res.json({
+    success: true,
+    fetched: totalFetched,
+    providers: targets.length,
+    errors,
+  });
 });

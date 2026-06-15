@@ -15,6 +15,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateSchemaV28IndexesAndFK(db);
   migrateSchemaV29ArchiveProviders(db);
   migrateSchemaV30KeylessProviders(db);
+  migrateSchemaV31ApiFormat(db);
   migrateEmbeddingsV1(db);
   migrateCustomProvidersV24(db);
 
@@ -56,9 +57,9 @@ export function migrateDbSchema(db: Database.Database) {
   }
 
   // Non-destructive refreshes that should run every boot (updates, not resets).
-  // Must run AFTER data migrations so the model rows exist on first boot.
   applyModelPricing(db);
   migrateQuirksV1(db);
+  migrateModelsV32CommandCode(db);
 }
 
 function createTables(db: Database.Database) {
@@ -2330,4 +2331,66 @@ function migrateSchemaV30KeylessProviders(db: Database.Database) {
   if (!cols.some(c => c.name === 'keyless')) {
     db.prepare('ALTER TABLE custom_providers ADD COLUMN keyless INTEGER DEFAULT 0').run();
   }
+}
+
+// ── V31: api_format column for custom providers (2026-06) ──
+// Lets operators specify whether a custom provider uses OpenAI-compatible
+// ('openai') or Anthropic-compatible ('anthropic') API format. Default is
+// 'openai' (backward-compatible with all existing providers).
+function migrateSchemaV31ApiFormat(db: Database.Database) {
+  const cols = db.prepare("PRAGMA table_info('custom_providers')").all() as Array<{ name: string }>;
+  if (!cols.some(c => c.name === 'api_format')) {
+    db.prepare("ALTER TABLE custom_providers ADD COLUMN api_format TEXT DEFAULT 'openai'").run();
+  }
+}
+
+// ── V32: CommandCode provider (2026-06) ─────────────────────────────────
+// Seeds the CommandCode catalog into the gateway's model pool. CommandCode
+// posts to api.commandcode.ai/alpha/generate with a content-part message
+// format, translated by CommandCodeProvider. Requires an API key.
+// The upstream model list is static (no /v1/models endpoint) — the models
+// below are the currently available IDs from the proxy's model mappings.
+// Idempotent INSERT OR IGNORE + fallback_config backfill, safe to re-run.
+//
+// Removal: delete this function + its call in migrateDbSchema, remove
+// commandcode from platform.ts and keys.ts, and drop the one DB table row
+// via a one-line migration.
+function migrateModelsV32CommandCode(db: Database.Database) {
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, context_window)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  // Tier assignments reflect Artificial Analysis Intelligence Index v4.0
+  // (June 2026) bands, same tiering as the V17 audit.
+  // RPM/RPD left null — CommandCode doesn't document public rate limits in
+  // the API tier; the gateway's per-platform limits are set on the key.
+  const additions: Array<[string, string, string, number, number, string, number | null]> = [
+    ['commandcode', 'deepseek/deepseek-v4-pro',    'DeepSeek V4 Pro (CommandCode)',    4,  4, 'Frontier', 131072],
+    ['commandcode', 'deepseek/deepseek-v4-flash',  'DeepSeek V4 Flash (CommandCode)',  10, 3, 'Frontier', 131072],
+    ['commandcode', 'MiniMaxAI/MiniMax-M2.7',      'MiniMax M2.7 (CommandCode)',       12, 4, 'Large',    131072],
+    ['commandcode', 'MiniMaxAI/MiniMax-M2.5',      'MiniMax M2.5 (CommandCode)',       14, 4, 'Large',    131072],
+    ['commandcode', 'zai-org/GLM-5.1',             'GLM-5.1 (CommandCode)',            8,  4, 'Large',    131072],
+    ['commandcode', 'zai-org/GLM-5',               'GLM-5 (CommandCode)',              10, 4, 'Large',    131072],
+    ['commandcode', 'moonshotai/Kimi-K2.6',         'Kimi K2.6 (CommandCode)',          6,  4, 'Frontier', 131072],
+    ['commandcode', 'moonshotai/Kimi-K2.5',         'Kimi K2.5 (CommandCode)',          8,  4, 'Frontier', 131072],
+    ['commandcode', 'Qwen/Qwen3.6-Max-Preview',     'Qwen 3.6 Max Preview (CommandCode)', 5, 4, 'Frontier', 131072],
+    ['commandcode', 'Qwen/Qwen3.6-Plus',            'Qwen 3.6 Plus (CommandCode)',      10, 4, 'Large',    131072],
+    ['commandcode', 'stepfun/Step-3.5-Flash',       'Step 3.5 Flash (CommandCode)',     14, 4, 'Medium',   131072],
+    ['commandcode', 'google/gemini-3.1-flash-lite', 'Gemini 3.1 Flash Lite (CommandCode)', 16, 3, 'Medium', 1048576],
+  ];
+
+  const tx = db.transaction(() => {
+    for (const a of additions) insert.run(...a);
+    const missing = db.prepare(`
+      SELECT m.id FROM models m
+      LEFT JOIN fallback_config f ON m.id = f.model_db_id
+      WHERE f.id IS NULL ORDER BY m.intelligence_rank ASC
+    `).all() as { id: number }[];
+    if (missing.length > 0) {
+      const maxPriority = (db.prepare('SELECT COALESCE(MAX(priority), 0) AS mx FROM fallback_config').get() as { mx: number }).mx;
+      const addFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
+      for (let i = 0; i < missing.length; i++) addFb.run(missing[i].id, maxPriority + i + 1);
+    }
+  });
+  tx();
 }

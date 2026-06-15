@@ -13,6 +13,7 @@ export type LiveEvent =
   | { type: 'request.start'; id: string; model?: string; stream: boolean; at: number }
   | { type: 'request.done'; id: string; model: string; provider: string; keyId: number; latencyMs: number; tokens?: { in: number; out: number }; at: number }
   | { type: 'request.error'; id: string; error: string; at: number }
+  | { type: 'request.aborted'; id: string; at: number }
   | { type: 'routing.key_exhausted'; id: string; provider: string; keyId: number; model: string; reason: string; at: number }
   | { type: 'routing.key_retry'; id: string; provider: string; keyId: number; model: string; attempt: number; max: number; at: number }
   | { type: 'routing.model_switch'; id: string; from: string; to: string; reason: string; at: number }

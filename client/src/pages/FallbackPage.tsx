@@ -655,6 +655,9 @@ export default function FallbackPage() {
     setLocalEntries(allEntries.map(e => (e.modelDbId === modelDbId ? { ...e, enabled } : e)))
   }
 
+  function handleToggleAll(enabled: boolean) {
+    setLocalEntries(allEntries.map(e => (e.keyCount > 0 ? { ...e, enabled } : e)))
+  }
 
   const activeRetryLimit = pendingRetryLimit ?? globalRetryLimit
   const hasChanges = localEntries !== null || pendingModelEdits.size > 0 || pendingRetryLimit !== null
@@ -737,7 +740,15 @@ export default function FallbackPage() {
             <span className="underline decoration-dotted underline-offset-2 cursor-help">Score</span>
           </Tooltip>
         </th>
-        <th className="py-2 pr-3 font-medium text-right">On</th>
+        <th className="py-2 pr-3 font-medium text-right">
+          <label className="flex items-center gap-1 justify-end cursor-pointer" title="Enable all / disable all">
+            <Switch
+              checked={configured.every(e => e.enabled)}
+              onCheckedChange={(c) => handleToggleAll(c)}
+            />
+            <span>On</span>
+          </label>
+        </th>
       </tr>
     </thead>
   )

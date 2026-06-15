@@ -28,7 +28,8 @@ export type Platform =
   | 'opencode'
   // OVHcloud AI Endpoints — OpenAI-compatible, keyless anonymous tier
   // (2 req/min per IP per model); see migrateModelsV26.
-  | 'ovh';
+  | 'ovh'
+  | 'commandcode';
 // NOTE: the literal string 'custom' is no longer a special platform. Users add
 // their own OpenAI-compatible providers (ollama, llama.cpp, LM Studio, vLLM,
 // any base_url) via POST /api/custom-providers, and the resulting slug becomes
@@ -48,6 +49,7 @@ export interface CustomProvider {
   tpdLimit: number | null;
   maxParallelRequests: number | null;
   keyless: boolean;
+  apiFormat: 'openai' | 'anthropic';
   archived: boolean;
 }
 export interface CustomProviderCreate {
@@ -275,6 +277,7 @@ export interface ChatCompletionChunk {
     };
     finish_reason: string | null;
   }[];
+  usage?: TokenUsage;
 }
 
 // ---- Analytics Types ----

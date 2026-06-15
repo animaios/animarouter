@@ -49,9 +49,9 @@ const PLATFORMS: { value: Platform; label: string; url: string; keyless?: boolea
   { value: 'pollinations', label: 'Pollinations (no key needed)', url: 'https://pollinations.ai', keyless: true },
   { value: 'ovh', label: 'OVH AI Endpoints (no key needed)', url: 'https://endpoints.ai.cloud.ovh.net', keyless: true },
   { value: 'llm7', label: 'LLM7 (anon ok)', url: 'https://llm7.io' },
-  { value: 'huggingface', label: 'HuggingFace Router', url: 'https://huggingface.co/settings/tokens' },
   { value: 'opencode', label: 'OpenCode Zen (free key)', url: 'https://opencode.ai/auth' },
-]
+  { value: 'commandcode', label: 'CommandCode', url: '' },
+];
 
 const statusDot: Record<string, string> = {
   healthy: 'bg-emerald-500',
@@ -190,6 +190,7 @@ function AddPlatformModal({
   const [parallelEnabled, setParallelEnabled] = useState(false)
   const [maxParallelRequests, setMaxParallelRequests] = useState(4)
   const [keyless, setKeyless] = useState(false)
+  const [apiFormat, setApiFormat] = useState<'openai' | 'anthropic'>('openai')
 
   const create = useMutation<{ slug: string }, Error, Record<string, unknown>>({
     mutationFn: (body) => apiFetch('/api/custom-providers', { method: 'POST', body: JSON.stringify(body) }) as Promise<{ slug: string }>,
@@ -206,8 +207,8 @@ function AddPlatformModal({
       setTpmLimit('')
       setTpdLimit('')
       setParallelEnabled(false)
-      setMaxParallelRequests(4)
       setKeyless(false)
+      setApiFormat('openai')
     },
   })
 
@@ -236,7 +237,7 @@ function AddPlatformModal({
         <form
           onSubmit={e => {
             e.preventDefault()
-            const body: Record<string, unknown> = { slug: slug.trim(), displayName: displayName.trim(), baseUrl: baseUrl.trim(), keyless }
+            const body: Record<string, unknown> = { slug: slug.trim(), displayName: displayName.trim(), baseUrl: baseUrl.trim(), keyless, apiFormat }
             if (showAdvanced) {
               if (rpmLimit) body.rpmLimit = parseInt(rpmLimit, 10)
               if (rpdLimit) body.rpdLimit = parseInt(rpdLimit, 10)
@@ -327,6 +328,17 @@ function AddPlatformModal({
                 Caps in-flight requests across all models on this provider. When at the limit, every model is skipped until a slot frees.
               </p>
             </div>
+            <div className="border-t pt-3 mt-1">
+              <Label className="text-xs">API format</Label>
+              <p className="text-[10px] text-muted-foreground mb-1">
+                OpenAI-compatible endpoints use /v1/chat/completions. Anthropic endpoints use /v1/messages.
+              </p>
+              <label className="flex items-center gap-2 cursor-pointer text-xs">
+                <span className={apiFormat === 'openai' ? '' : 'text-muted-foreground'}>OpenAI</span>
+                <Switch checked={apiFormat === 'anthropic'} onCheckedChange={c => setApiFormat(c ? 'anthropic' : 'openai')} />
+                <span className={apiFormat === 'anthropic' ? '' : 'text-muted-foreground'}>Anthropic</span>
+              </label>
+            </div>
             </>
           )}
           <div className="flex items-center gap-2 pt-1">
@@ -375,6 +387,7 @@ function EditPlatformModal({
   const [parallelEnabled, setParallelEnabled] = useState(provider.maxParallelRequests != null)
   const [maxParallelRequests, setMaxParallelRequests] = useState(provider.maxParallelRequests ?? 4)
   const [keyless, setKeyless] = useState(provider.keyless)
+  const [apiFormat, setApiFormat] = useState<'openai' | 'anthropic'>(provider.apiFormat ?? 'openai')
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   const save = useMutation({
@@ -418,6 +431,7 @@ function EditPlatformModal({
             const newMax = parallelEnabled ? maxParallelRequests : null
             if (newMax !== provider.maxParallelRequests) body.maxParallelRequests = newMax
             if (keyless !== provider.keyless) body.keyless = keyless
+            if (apiFormat !== (provider.apiFormat ?? 'openai')) body.apiFormat = apiFormat
             if (Object.keys(body).length === 0) { onClose(); return }
             save.mutate(body)
           }}
@@ -452,6 +466,17 @@ function EditPlatformModal({
                   <label className="flex items-center gap-1.5 cursor-pointer text-xs"><Switch checked={parallelEnabled} onCheckedChange={setParallelEnabled} />Limit</label>
                   {parallelEnabled && <Input type="number" min={1} max={100} value={maxParallelRequests} onChange={e => setMaxParallelRequests(parseInt(e.target.value, 10) || 1)} className="font-mono text-xs w-20" />}
                 </div>
+              </div>
+              <div className="border-t pt-3 mt-1">
+                <Label className="text-xs">API format</Label>
+                <p className="text-[10px] text-muted-foreground mb-1">
+                  OpenAI-compatible endpoints use /v1/chat/completions. Anthropic endpoints use /v1/messages.
+                </p>
+                <label className="flex items-center gap-2 cursor-pointer text-xs">
+                  <span className={apiFormat === 'openai' ? '' : 'text-muted-foreground'}>OpenAI</span>
+                  <Switch checked={apiFormat === 'anthropic'} onCheckedChange={c => setApiFormat(c ? 'anthropic' : 'openai')} />
+                  <span className={apiFormat === 'anthropic' ? '' : 'text-muted-foreground'}>Anthropic</span>
+                </label>
               </div>
               <div className="flex items-center gap-2 pt-1">
                 <Switch checked={keyless} onCheckedChange={setKeyless} />
@@ -521,6 +546,36 @@ function CustomModelsSection() {
       setDisplayName('')
     },
   })
+  const syncAll = useMutation({
+    mutationFn: () => apiFetch<{ fetched: number; providers: number; errors: { slug: string; error: string }[] }>(
+      '/api/models/sync-all',
+      { method: 'POST' },
+    ),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      if (data.errors.length > 0) {
+        const slugs = data.errors.map(e => e.slug).join(', ')
+        console.warn(`Model sync errors on: ${slugs}`, data.errors)
+      }
+    },
+  })
+  // Auto-discover persisted in localStorage so it survives page reloads.
+  const [autoSync, setAutoSync] = useState(() => {
+    try { return localStorage.getItem('auto-discover-models') === 'true' } catch { return false }
+  })
+  const toggleAutoSync = (v: boolean) => {
+    setAutoSync(v)
+    try { localStorage.setItem('auto-discover-models', String(v)) } catch { /* ignore */ }
+  }
+  // Auto-sync every 5 minutes when enabled.
+  useEffect(() => {
+    if (!autoSync) return
+    const id = setInterval(() => {
+      if (!syncAll.isPending) syncAll.mutate()
+    }, 5 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [autoSync, syncAll.isPending, syncAll.mutate])
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!provider || !modelId || !displayName) return
@@ -559,12 +614,25 @@ function CustomModelsSection() {
   ]
   return (
     <section>
-      <h2 className="text-sm font-medium mb-1">Add a model</h2>
-      <p className="text-xs text-muted-foreground mb-3">
-        Register a model on a built-in provider (e.g. an unlisted Cerebras model) or on one of your
-        custom platforms. The new model joins the fallback chain at the lowest priority — reorder in
-        the Fallback tab.
-      </p>
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="text-sm font-medium">Models</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Register a model on a built-in provider (e.g. an unlisted Cerebras model) or on one of your
+            custom platforms. The new model joins the fallback chain at the lowest priority — reorder in
+            the Fallback tab.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs text-muted-foreground">
+            <Switch checked={autoSync} onCheckedChange={toggleAutoSync} />
+            Auto-discover
+          </label>
+          <Button variant="outline" size="sm" onClick={() => syncAll.mutate()} disabled={syncAll.isPending}>
+            {syncAll.isPending ? 'Discovering…' : 'Discover Models'}
+          </Button>
+        </div>
+      </div>
       <form onSubmit={submit} className="space-y-3 rounded-3xl border p-4 bg-card">
         <div className="space-y-1.5">
           <Label className="text-xs">Provider</Label>

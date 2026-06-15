@@ -698,7 +698,18 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   let lastRequestTime = 0;
   const globalRetryMax = getGlobalRetryLimit();
 
+  // Client-disconnect detection: if the agent presses Stop or closes the
+  // session, abort the whole retry/recovery loop instead of grinding through
+  // 1-RPM cycles forever. `req.aborted` is set to true when the underlying
+  // connection is severed before `res.end()`. We deliberately do NOT use
+  // `req.on('close')` because that also fires when the response completes
+  // normally, which would break stream/path completions.
   outerLoop: for (let totalAttempt = 0; ; totalAttempt++) {
+    // ---- Exit: client disconnected ----
+    if (req.aborted) {
+      publish({ type: 'request.aborted', id: requestId, at: Date.now() });
+      return;
+    }
     // ---- Exit: global retries exhausted (1 RPM mode only) ----
     if (inOneRPMMode && globalRetryMax > 0 && oneRPMCycles >= globalRetryMax) {
       const msg = `All models rate-limited after ${oneRPMCycles} recovery cycle(s). Last: ${sanitizeProviderErrorMessage(lastError?.message)}`;

@@ -5,6 +5,9 @@ import { BaseProvider } from './base.js';
 import { CloudflareProvider } from './cloudflare.js';
 import { CohereProvider } from './cohere.js';
 import { GoogleProvider } from './google.js';
+import { AnthropicCompatProvider } from './anthropic.js';
+import { CommandCodeProvider } from './commandcode.js';
+
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -76,6 +79,11 @@ register(new CohereProvider());
 
 // Cloudflare Workers AI - OpenAI-compatible endpoint (key = "account_id:token")
 register(new CloudflareProvider());
+
+// CommandCode — OpenAI→CommandCode format translator. Posts to
+// api.commandcode.ai/alpha/generate with content-part messages and parses
+// the NDJSON event stream into OpenAI SSE chunks. Requires an API key.
+register(new CommandCodeProvider());
 
 // Zhipu (Z.ai / bigmodel.cn) - OpenAI-compatible
 register(new OpenAICompatProvider({
@@ -212,14 +220,24 @@ export function buildProviderFor(platformSlug: string): BaseProvider | undefined
   // across requests — OpenAICompatProvider holds no per-instance state worth
   // reusing, and the DB hit is one indexed lookup.
   const db = getDb();
-  const row = db.prepare('SELECT base_url, keyless FROM custom_providers WHERE slug = ?').get(platformSlug) as { base_url: string; keyless: number } | undefined;
+  const row = db.prepare('SELECT base_url, keyless, api_format FROM custom_providers WHERE slug = ?').get(platformSlug) as { base_url: string; keyless: number; api_format: string } | undefined;
   if (!row?.base_url) return undefined;
+  const keyless = row.keyless === 1;
+  if (row.api_format === 'anthropic') {
+    return new AnthropicCompatProvider({
+      platform: platformSlug as Platform,
+      name: platformSlug,
+      baseUrl: row.base_url,
+      timeoutMs: CUSTOM_PROVIDER_TIMEOUT_MS,
+      keyless,
+    });
+  }
   return new OpenAICompatProvider({
     platform: platformSlug as Platform,
     name: platformSlug,
     baseUrl: row.base_url,
     timeoutMs: CUSTOM_PROVIDER_TIMEOUT_MS,
-    keyless: row.keyless === 1,
+    keyless,
   });
 }
 
