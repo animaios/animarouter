@@ -7,7 +7,7 @@ import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
 import { FloatingBar } from '@/components/floating-bar'
 import { ModelsTabs } from '@/components/models-tabs'
-import { ModelSearchBox, matchesModelQuery } from '@/components/model-search-box'
+import { ModelSearchBox, matchesModelQuery, normalizeForSearch } from '@/components/model-search-box'
 
 interface ProviderEntry {
   id: number
@@ -76,15 +76,21 @@ export default function EmbeddingsPage() {
   // enough to run on every keystroke; no debounce.
   const [query, setQuery] = useState('')
   const filteredFamilies = useMemo(
-    () => families
-      .map(f => ({
-        ...f,
-        providers: f.providers.filter(p =>
-          matchesModelQuery(query, { displayName: p.displayName, modelId: p.modelId, platform: p.platform })
-          || f.family.toLowerCase().includes(query.trim().toLowerCase()),
-        ),
-      }))
-      .filter(f => f.providers.length > 0),
+    () => {
+      // Normalise the query once for the family-name fallback so
+      // "kimi k2" matches a family called "kimi-k2" — see the note on
+      // matchesModelQuery in model-search-box.tsx for the rule.
+      const familyQ = normalizeForSearch(query)
+      return families
+        .map(f => ({
+          ...f,
+          providers: f.providers.filter(p =>
+            matchesModelQuery(query, { displayName: p.displayName, modelId: p.modelId, platform: p.platform })
+            || (familyQ.length > 0 && normalizeForSearch(f.family).includes(familyQ)),
+          ),
+        }))
+        .filter(f => f.providers.length > 0)
+    },
     [families, query],
   )
   const totalProviders = families.reduce((n, f) => n + f.providers.length, 0)
