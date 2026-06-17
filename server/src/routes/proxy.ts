@@ -1108,7 +1108,31 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       // Model-level 404/403: not a key issue — every key on this platform
       // would hit the same dead route. Skip only the model and continue the
       // outer loop without exhausting the key or burning retries.
+      //
+      // Pinned-model exception: when the caller explicitly named this model
+      // (model: "platform/model_id") they are asking for THIS specific
+      // model, not a fallback chain. A 404 means the model is gone upstream
+      // and trying sibling keys would just produce the same 404; falling
+      // through to the next model in the chain would silently serve the
+      // request from a different model than the one the user pinned, which
+      // is the very behaviour strict pinning is meant to prevent. Surface
+      // a 404/403 to the user so they know to pick a live model instead of
+      // silently getting a stranger.
       if (isModelNotFoundError(err) || isModelAccessForbiddenError(err)) {
+        if (isPinned && route.modelDbId === preferredModel) {
+          publish({ type: 'request.error', id: requestId, error: `Pinned model ${requestedModel} returned ${isModelNotFoundError(err) ? '404 not found' : '403 forbidden'} upstream — no fallback in pin mode.`, at: Date.now() });
+          res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
+          res.setHeader('X-Pinned-Model-Dead', '1');
+          const code = isModelNotFoundError(err) ? 'model_not_found' : 'model_forbidden';
+          res.status(isModelNotFoundError(err) ? 404 : 403).json({
+            error: {
+              message: `Pinned model '${requestedModel}' is ${isModelNotFoundError(err) ? 'no longer available' : 'not accessible on this tier'} upstream. Pick a different model or omit the 'model' field to auto-route.`,
+              type: 'invalid_request_error',
+              code,
+            },
+          });
+          return;
+        }
         skipModels.add(route.modelDbId);
         continue outerLoop;
       }
@@ -1126,7 +1150,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           || msg.includes('unparseable inline tool-call dialect')
           || msg.includes('api error 400');
 
-        if (skipImmediately) {
+        if (skipImmediately && !(isPinned && route.modelDbId === preferredModel)) {
           skipModels.add(route.modelDbId);
           continue outerLoop;
         }
