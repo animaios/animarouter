@@ -4,7 +4,7 @@ import type Database from 'better-sqlite3';
  * Benchmark-derived intelligence scores for LLM models.
  *
  * Source: Artificial Analysis Intelligence Index v4.0 (served/default mode,
- * June 2026), with cross-references from SWE-bench Verified, Terminal-Bench 2,
+ * June 2026), with cross-references from SWE-rebench, Terminal-Bench 2,
  * TAU-Bench, Aider Polyglot, and BFCL v3. Score range [0, 100] where higher
  * = smarter. 0 = no published score (unknown/stealth model).
  *

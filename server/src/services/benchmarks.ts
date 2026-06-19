@@ -1,11 +1,12 @@
 import { getDb } from '../db/index.js';
+import { fetchSWERebenchLeaderboard, normalizeModelName, SWERebenchEntry } from './swe-rebench-parser.js';
 import { fetchLiveBenchmarkScores, BenchmarkFetchResult } from '../db/benchmark-scores.js';
 
 export interface BenchmarkScore {
   modelId: string;
   platform: string;
   score: number;
-  source: 'SWE-bench' | 'HumanEval' | 'MMLU' | 'NIM';
+  source: 'SWE-rebench' | 'HumanEval' | 'MMLU' | 'NIM';
   lastUpdated: Date;
 }
 
@@ -23,8 +24,8 @@ export class BenchmarkService {
   // Available benchmark sources
   private sources: BenchmarkSource[] = [
     {
-      name: 'SWE-bench',
-      apiUrl: 'https://huggingface.co/datasets/princeton-nlp/SWE-bench-lite/resolve/main/swe_bench_lite_leaderboard.json',
+      name: 'SWE-rebench',
+      apiUrl: 'https://swe-rebench.com/', // No public JSON API; scores hardcoded below
       rateLimit: 60 // requests per minute
     },
     {
@@ -39,26 +40,61 @@ export class BenchmarkService {
     }
   ];
 
-  async fetchSWEBenchScores(): Promise<BenchmarkScore[]> {
+  /**
+   * Return SWE-rebench leaderboard scores (resolved rate %).
+   *
+   * Tries to live-scrape https://swe-rebench.com/ first (HTML is SSR).
+   * Falls back to hardcoded scores from the May 2026 window if the fetch fails.
+   */
+  async fetchSWERebenchScores(): Promise<BenchmarkScore[]> {
+    // Try live fetch from the leaderboard page
     try {
-      const response = await fetch(this.sources[0].apiUrl);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      const data = await response.json();
-
-      // Handle the SWE-bench data format
-      return (data as any[]).map((item: any) => ({
-        modelId: item.model,
-        platform: this.extractPlatform(item.model),
-        score: this.normalizeScore(item.score),
-        source: 'SWE-bench' as const,
-        lastUpdated: new Date()
-      }));
-    } catch (error) {
-      console.error('Failed to fetch SWE-bench scores:', error);
-      throw error;
+      const entries = await fetchSWERebenchLeaderboard();
+      const scores = this.entriesToBenchmarkScores(entries);
+      if (scores.length > 0) return scores;
+    } catch (liveError) {
+      console.warn('[SWE-rebench] Live fetch failed, using hardcoded fallback:', (liveError as Error).message);
     }
+
+    // Hardcoded fallback — May 2026 window
+    const fallback: Array<[string, number]> = [
+      ['gpt-5.5', 62.7],
+      ['gpt-5.4', 54.9],
+      ['claude-opus-4.8', 56.5],
+      ['claude-opus-4.7', 53.1],
+      ['claude-sonnet-4.6', 51.3],
+      ['claude-opus-4.6', 47.8],
+      ['gemini-3.1-pro', 51.1],
+      ['gemini-3.5-flash', 49.5],
+      ['glm-5.1', 50.7],
+      ['kimi-k2.6', 46.5],
+      ['minimax-m3', 45.6],
+      ['glm-4.7', 38.2],
+    ];
+
+    return fallback.map(([modelId, score]) => ({
+      modelId,
+      platform: this.extractPlatform(modelId),
+      score: this.normalizeScore(score),
+      source: 'SWE-rebench' as const,
+      lastUpdated: new Date()
+    }));
+  }
+
+  /** Convert parsed SWE-rebench entries into BenchmarkScore objects. */
+  private entriesToBenchmarkScores(entries: SWERebenchEntry[]): BenchmarkScore[] {
+    return entries
+      .filter(e => e.resolvedRate > 0)
+      .map(entry => {
+        const modelId = normalizeModelName(entry.model);
+        return {
+          modelId,
+          platform: this.extractPlatform(modelId),
+          score: this.normalizeScore(entry.resolvedRate),
+          source: 'SWE-rebench' as const,
+          lastUpdated: new Date(),
+        };
+      });
   }
 
   async fetchNIMBenchmarks(): Promise<BenchmarkScore[]> {
@@ -152,38 +188,51 @@ export class BenchmarkService {
         totalUpdated += aaResult.updated;
       }
 
-      // Step 2: Fetch SWE-bench scores for supplement
+      // Step 2: Fetch SWE-rebench scores and upsert (always overwrite with fresh data)
       try {
-        console.log('[Benchmarks] Fetching SWE-bench scores...');
-        const sweBenchScores = await this.fetchSWEBenchScores();
+        console.log('[Benchmarks] Fetching SWE-rebench scores...');
+        const sweRebenchScores = await this.fetchSWERebenchScores();
 
-        // Update SWE-bench scores (only for models that don't have AA scores yet)
         const db = getDb();
         let sweUpdated = 0;
 
-        for (const score of sweBenchScores) {
-          const existing = db.prepare(`
-            SELECT benchmark_score FROM models
-            WHERE platform = ? AND model_id = ? AND benchmark_score IS NULL
-          `).get(score.platform, score.modelId);
+        // Use LIKE-based matching to find models by normalized ID substring.
+        // Always overwrite — keeps scores fresh when leaderboard updates.
+        const upsert = db.prepare(`
+          UPDATE models
+          SET benchmark_score = ?,
+              last_benchmark_update = ?,
+              size_label = CASE
+                WHEN ? >= 45 THEN 'Frontier'
+                WHEN ? >= 26 THEN 'Large'
+                WHEN ? >= 13 THEN 'Medium'
+                ELSE 'Small'
+              END,
+              intelligence_rank = MAX(1, MIN(100, 101 - ?))
+          WHERE LOWER(model_id) LIKE LOWER(?)
+            AND (benchmark_score IS NULL OR benchmark_score != ?)
+        `);
 
-          if (existing) {
-            db.prepare(`
-              UPDATE models
-              SET benchmark_score = ?, last_benchmark_update = ?
-              WHERE platform = ? AND model_id = ?
-            `).run(score.score, score.lastUpdated.toISOString(), score.platform, score.modelId);
-            sweUpdated++;
+        const tx = db.transaction(() => {
+          for (const score of sweRebenchScores) {
+            const likePattern = '%' + score.modelId + '%';
+            const result = upsert.run(
+              score.score, score.lastUpdated.toISOString(),
+              score.score, score.score, score.score, score.score,
+              likePattern, score.score
+            );
+            sweUpdated += result.changes;
           }
-        }
+        });
+        tx();
 
         if (sweUpdated > 0) {
-          console.log(`[Benchmarks] SWE-bench added scores for ${sweUpdated} models`);
+          console.log(`[Benchmarks] SWE-rebench updated ${sweUpdated} models (fresh scores)`);
           totalUpdated += sweUpdated;
         }
       } catch (sweError) {
-        console.warn('[Benchmarks] SWE-bench fetch failed:', sweError);
-        errors.push('SWE-bench failed: ' + (sweError instanceof Error ? sweError.message : 'Unknown error'));
+        console.warn('[Benchmarks] SWE-rebench fetch failed:', sweError);
+        errors.push('SWE-rebench failed: ' + (sweError instanceof Error ? sweError.message : 'Unknown error'));
       }
 
       // Step 3: Fetch NIM scores with fallback (for NIM provider models)
@@ -249,7 +298,7 @@ export class BenchmarkService {
       modelId: row.modelId,
       platform: row.platform,
       score: row.score,
-      source: 'SWE-bench' as const, // Default source, can be enhanced
+      source: 'SWE-rebench' as const, // Default source, can be enhanced
       lastUpdated: new Date(row.lastUpdated)
     }));
   }
@@ -268,7 +317,7 @@ export class BenchmarkService {
       modelId: row.modelId,
       platform,
       score: row.score,
-      source: 'SWE-bench' as const,
+      source: 'SWE-rebench' as const,
       lastUpdated: new Date(row.lastUpdated)
     }));
   }

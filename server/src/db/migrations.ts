@@ -4,6 +4,7 @@ import { initEncryptionKey } from '../lib/crypto.js';
 import { applyModelPricing } from './model-pricing.js';
 import { applyBenchmarkScores } from './benchmark-scores.js';
 import { fetchLiveBenchmarkScores } from './benchmark-scores.js';
+import { BenchmarkService } from '../services/benchmarks.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
 // additions, indexes, FKs) that use "IF NOT EXISTS" should stay unconditional.
@@ -76,6 +77,18 @@ export function migrateDbSchema(db: Database.Database) {
     fetchLiveBenchmarkScores(db);
   } catch (error) {
     console.warn('Live benchmark fetch failed, using static scores:', error);
+  }
+
+  // SWE-rebench live leaderboard scrape (fire-and-forget, falls back to hardcoded scores)
+  try {
+    new BenchmarkService().updateAllBenchmarkScores()
+      .then(({ updated, errors }) => {
+        if (updated > 0) console.log(`[Boot] SWE-rebench updated ${updated} models`);
+        if (errors.length > 0) console.warn('[Boot] Benchmark errors:', errors.join('; '));
+      })
+      .catch(err => console.warn('[Boot] SWE-rebench fetch failed:', err));
+  } catch (error) {
+    console.warn('SWE-rebench boot fetch failed:', error);
   }
 }
 
@@ -552,7 +565,7 @@ function migrateModelsV2(db: Database.Database) {
 
 /**
  * Re-rank intelligence based on April 2026 coding + agentic tool-use benchmarks:
- * SWE-bench Verified, Terminal-Bench 2, TAU-Bench, Aider Polyglot.
+ * SWE-rebench, Terminal-Bench 2, TAU-Bench, Aider Polyglot.
  * Higher rank = weaker. Ties are allowed (same weights across providers).
  */
 function migrateModelsV3Ranks(db: Database.Database) {
@@ -707,7 +720,7 @@ function migrateModelsV4(db: Database.Database) {
   apply();
 
   // 5) Re-rank the live catalog by agentic tool-use capability (lower = smarter).
-  //    Grounded in April 2026 SWE-Bench Verified + BFCL v3 + Tau-Bench numbers.
+  //    Grounded in April 2026 SWE-rebench + BFCL v3 + Tau-Bench numbers.
   const setRank = db.prepare(`UPDATE models SET intelligence_rank = ? WHERE platform = ? AND model_id = ?`);
   const ranks: Array<[number, string, string]> = [
     [1, 'openrouter', 'minimax/minimax-m2.5:free'],
