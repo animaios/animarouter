@@ -7,6 +7,12 @@ export const benchmarksRouter = Router();
 
 // Sync benchmark scores for all models
 benchmarksRouter.post('/sync', requireAuth, async (_req: Request, res: Response) => {
+  // Sync mutex: reject if already in progress
+  if (BenchmarkService.isSyncing) {
+    res.status(409).json({ error: 'Sync already in progress' });
+    return;
+  }
+
   const service = new BenchmarkService();
   const result = await service.updateAllBenchmarkScores();
 

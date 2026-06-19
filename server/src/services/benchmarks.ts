@@ -1,6 +1,13 @@
 import { getDb } from '../db/index.js';
 import { fetchSWERebenchLeaderboard, normalizeModelName, SWERebenchEntry } from './swe-rebench-parser.js';
-import { fetchLiveBenchmarkScores, BenchmarkFetchResult } from '../db/benchmark-scores.js';
+import {
+  fetchAAScores,
+  BenchmarkFetchResult,
+  canonicalizeModelId,
+  recomputeBenchmarkComposite,
+  backfillCanonicalKeys,
+  loadSourceWeights,
+} from '../db/benchmark-scores.js';
 
 export interface BenchmarkScore {
   modelId: string;
@@ -8,6 +15,15 @@ export interface BenchmarkScore {
   score: number;
   source: 'SWE-rebench' | 'HumanEval' | 'MMLU' | 'NIM';
   lastUpdated: Date;
+  confidence?: number; // per-source confidence: 1.0 live, 0.6 hardcoded fallback
+  // Per-source breakdown
+  aaScore?: number | null;
+  sweRebenchScore?: number | null;
+  nimScore?: number | null;
+  // NIM-specific speed/reliability metrics (nullable) — per spec R5.1
+  nimThroughputTps?: number | null;
+  nimAvgResponseMs?: number | null;
+  nimUptimePct?: number | null;
 }
 
 export interface BenchmarkSource {
@@ -21,22 +37,20 @@ export class BenchmarkService {
   private cache = new Map<string, { score: number; timestamp: number }>();
   private readonly CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
-  // Available benchmark sources
+  /** Sync mutex — concurrent sync calls are rejected. */
+  static isSyncing = false;
+
+  // Available benchmark sources (no self-hosted NIM — purged in V34)
   private sources: BenchmarkSource[] = [
     {
       name: 'SWE-rebench',
-      apiUrl: 'https://swe-rebench.com/', // No public JSON API; scores hardcoded below
-      rateLimit: 60 // requests per minute
-    },
-    {
-      name: 'NIM Self-Hosted',
-      apiUrl: 'http://localhost:3000/api/benchmarks', // Self-hosted NIMStats instance
-      rateLimit: 120 // requests per minute
+      apiUrl: 'https://swe-rebench.com/',
+      rateLimit: 60
     },
     {
       name: 'NIM External',
       apiUrl: 'https://nimstats.maurodruwel.be/api/v1/benchmarks',
-      rateLimit: 60 // requests per minute
+      rateLimit: 60
     }
   ];
 
@@ -77,11 +91,14 @@ export class BenchmarkService {
       platform: this.extractPlatform(modelId),
       score: this.normalizeScore(score),
       source: 'SWE-rebench' as const,
-      lastUpdated: new Date()
+      lastUpdated: new Date(),
+      confidence: 0.6, // hardcoded fallback → confidence 0.6 per R2.1b
     }));
   }
 
-  /** Convert parsed SWE-rebench entries into BenchmarkScore objects. */
+  /** Convert parsed SWE-rebench entries into BenchmarkScore objects.
+   *  Live scrape → confidence 1.0 per spec R2.1b.
+   */
   private entriesToBenchmarkScores(entries: SWERebenchEntry[]): BenchmarkScore[] {
     return entries
       .filter(e => e.resolvedRate > 0)
@@ -93,49 +110,36 @@ export class BenchmarkService {
           score: this.normalizeScore(entry.resolvedRate),
           source: 'SWE-rebench' as const,
           lastUpdated: new Date(),
+          confidence: 1.0, // live scrape → confidence 1.0 per R2.1b
         };
       });
   }
 
+  /**
+   * Fetch NIM benchmarks from external source only (no self-hosted).
+   * Returns scores with speed/reliability metrics for logging (Phase 1 — not blended).
+   */
   async fetchNIMBenchmarks(): Promise<BenchmarkScore[]> {
-    const results: BenchmarkScore[] = [];
-
-    // Try self-hosted first
+    const source = this.sources[1]; // NIM External
     try {
-      const scores = await this.fetchFromSource(this.sources[1].name, this.sources[1].apiUrl);
-      results.push(...scores);
-    } catch (error) {
-      console.warn('Self-hosted NIMStats not available, trying external:', (error as Error).message);
-
-      // Fallback to external
-      try {
-        const scores = await this.fetchFromSource(this.sources[2].name, this.sources[2].apiUrl);
-        results.push(...scores);
-      } catch (fallbackError) {
-        console.warn('External NIMStats also not available:', (fallbackError as Error).message);
-      }
-    }
-
-    return results;
-  }
-
-  private async fetchFromSource(sourceName: string, apiUrl: string): Promise<BenchmarkScore[]> {
-    try {
-      const response = await fetch(apiUrl);
+      const response = await fetch(source.apiUrl);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       const data = await response.json();
 
-      // Handle NIMStats data format
+      // Handle NIMStats data format with speed metrics
       if ((data as any)?.models && Array.isArray((data as any).models)) {
         return (data as any).models.map((model: any) => ({
           modelId: model.id,
           platform: this.extractPlatform(model.id),
           score: this.normalizeScore(model.score || 0),
           source: 'NIM' as const,
-          lastUpdated: new Date()
+          lastUpdated: new Date(),
+          nimThroughputTps: model.tps ?? model.tokens_per_second ?? model.throughput_tps ?? null,
+          nimAvgResponseMs: model.ttfb_ms ?? model.ttfb ?? model.avg_response_ms ?? null,
+          nimUptimePct: model.uptime_pct ?? model.uptime ?? null,
         }));
       }
 
@@ -146,24 +150,25 @@ export class BenchmarkService {
           platform: this.extractPlatform(item.model || item.id),
           score: this.normalizeScore(item.score || item.accuracy || 0),
           source: 'NIM' as const,
-          lastUpdated: new Date()
+          lastUpdated: new Date(),
+          nimThroughputTps: item.tps ?? item.tokens_per_second ?? item.throughput_tps ?? null,
+          nimAvgResponseMs: item.ttfb_ms ?? item.ttfb ?? item.avg_response_ms ?? null,
+          nimUptimePct: item.uptime_pct ?? item.uptime ?? null,
         }));
       }
 
-      throw new Error(`Unexpected data format from ${sourceName}`);
+      throw new Error(`Unexpected data format from ${source.name}`);
     } catch (error) {
-      throw new Error(`${sourceName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.warn(`[NIM] External fetch failed:`, (error as Error).message);
+      return [];
     }
   }
 
   private normalizeScore(score: number): number {
     // Keep scores in [0, 100] range for database storage.
-    // intelligenceComposite() expects benchmark_score in [0, 100].
     if (score <= 1) {
-      // Score is in [0, 1] range (e.g., 0.85 = 85%), convert to [0, 100]
       return Math.min(100, Math.max(0, score * 100));
     }
-    // Score is already in [0, 100] range, clamp to valid bounds
     return Math.min(100, Math.max(0, score));
   }
 
@@ -172,110 +177,178 @@ export class BenchmarkService {
     return parts.length > 1 ? parts[0] : 'unknown';
   }
 
+  /**
+   * Fetch and upsert SWE-rebench scores into per-source columns ONLY.
+   * SWE writes to: swe_rebench_score, swe_rebench_score_updated, swe_rebench_confidence.
+   * Uses canonical_model_key for exact matching.
+   * Returns affected model IDs for composite recomputation.
+   */
+  private async upsertSWERebenchScores(): Promise<{ updated: number; affectedIds: Set<number> }> {
+    const affectedIds = new Set<number>();
+    const scores = await this.fetchSWERebenchScores();
+    const db = getDb();
+    let updated = 0;
+
+    const upsert = db.prepare(`
+      UPDATE models
+      SET swe_rebench_score = ?,
+          swe_rebench_score_updated = ?,
+          swe_rebench_confidence = ?
+      WHERE canonical_model_key = ?
+        AND (swe_rebench_score IS NULL OR swe_rebench_score != ?)
+    `);
+
+    const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+
+    const tx = db.transaction(() => {
+      for (const score of scores) {
+        const canonicalKey = canonicalizeModelId(score.modelId);
+        const confidence = score.confidence ?? 1.0;
+        const result = upsert.run(
+          score.score, score.lastUpdated.toISOString(), confidence,
+          canonicalKey, score.score
+        );
+        if (result.changes > 0) {
+          updated += result.changes;
+          const row = findId.get(canonicalKey) as { id: number } | undefined;
+          if (row) affectedIds.add(row.id);
+        }
+      }
+    });
+    tx();
+
+    if (updated > 0) {
+      console.log(`[Benchmarks] SWE-rebench updated ${updated} models`);
+    }
+    return { updated, affectedIds };
+  }
+
+  /**
+   * Fetch and upsert NIM scores into per-source columns ONLY.
+   * NIM writes to: nim_score, nim_score_updated, nim_confidence,
+   *   nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct.
+   * Uses canonical_model_key for matching.
+   * Returns affected model IDs for composite recomputation.
+   */
+  private async upsertNIMScores(): Promise<{ updated: number; affectedIds: Set<number> }> {
+    const affectedIds = new Set<number>();
+    const scores = await this.fetchNIMBenchmarks();
+    const db = getDb();
+    let updated = 0;
+
+    const upsert = db.prepare(`
+      UPDATE models
+      SET nim_score = ?,
+          nim_score_updated = ?,
+          nim_confidence = 1.0,
+          nim_throughput_tps = ?,
+          nim_avg_response_ms = ?,
+          nim_uptime_pct = ?
+      WHERE canonical_model_key = ?
+        AND (nim_score IS NULL OR nim_score != ?)
+    `);
+
+    const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+
+    const tx = db.transaction(() => {
+      for (const score of scores) {
+        const canonicalKey = canonicalizeModelId(score.modelId);
+        const result = upsert.run(
+          score.score, score.lastUpdated.toISOString(),
+          score.nimThroughputTps ?? null, score.nimAvgResponseMs ?? null, score.nimUptimePct ?? null,
+          canonicalKey, score.score
+        );
+        if (result.changes > 0) {
+          updated += result.changes;
+          const row = findId.get(canonicalKey) as { id: number } | undefined;
+          if (row) affectedIds.add(row.id);
+        }
+      }
+    });
+    tx();
+
+    if (updated > 0) {
+      console.log(`[Benchmarks] NIM updated ${updated} models`);
+    }
+    return { updated, affectedIds };
+  }
+
+  /**
+   * Update all benchmark scores from all sources in parallel.
+   * Uses Promise.allSettled() — partial failures don't block other sources.
+   * After all sources complete, recomputes benchmark_score composites
+   * for affected rows only (incremental, not full-table scan).
+   *
+   * Sync mutex: concurrent calls return error immediately.
+   */
   async updateAllBenchmarkScores(): Promise<{ updated: number; errors: string[] }> {
+    // Sync mutex
+    if (BenchmarkService.isSyncing) {
+      return { updated: 0, errors: ['Sync already in progress'] };
+    }
+    BenchmarkService.isSyncing = true;
+
     const errors: string[] = [];
     let totalUpdated = 0;
+    const allAffectedIds = new Set<number>();
 
     try {
-      // Step 1: Fetch live scores from Artificial Analysis (existing system)
-      console.log('[Benchmarks] Starting live benchmark fetch from AA...');
-      const aaResult = await fetchLiveBenchmarkScores(getDb());
+      const db = getDb();
 
-      if (aaResult.errors.length > 0) {
-        errors.push('Artificial Analysis failed: ' + aaResult.errors.join(', '));
-      } else if (aaResult.updated > 0) {
-        console.log(`[Benchmarks] AA updated ${aaResult.updated} models`);
-        totalUpdated += aaResult.updated;
-      }
+      // Ensure canonical keys are populated
+      backfillCanonicalKeys(db);
 
-      // Step 2: Fetch SWE-rebench scores and upsert (always overwrite with fresh data)
-      try {
-        console.log('[Benchmarks] Fetching SWE-rebench scores...');
-        const sweRebenchScores = await this.fetchSWERebenchScores();
-
-        const db = getDb();
-        let sweUpdated = 0;
-
-        // Use LIKE-based matching to find models by normalized ID substring.
-        // Always overwrite — keeps scores fresh when leaderboard updates.
-        const upsert = db.prepare(`
-          UPDATE models
-          SET benchmark_score = ?,
-              last_benchmark_update = ?,
-              size_label = CASE
-                WHEN ? >= 45 THEN 'Frontier'
-                WHEN ? >= 26 THEN 'Large'
-                WHEN ? >= 13 THEN 'Medium'
-                ELSE 'Small'
-              END,
-              intelligence_rank = MAX(1, MIN(100, 101 - ?))
-          WHERE LOWER(model_id) LIKE LOWER(?)
-            AND (benchmark_score IS NULL OR benchmark_score != ?)
-        `);
-
-        const tx = db.transaction(() => {
-          for (const score of sweRebenchScores) {
-            const likePattern = '%' + score.modelId + '%';
-            const result = upsert.run(
-              score.score, score.lastUpdated.toISOString(),
-              score.score, score.score, score.score, score.score,
-              likePattern, score.score
-            );
-            sweUpdated += result.changes;
+      // Fetch all sources in parallel using Promise.allSettled()
+      console.log('[Benchmarks] Starting parallel benchmark fetch...');
+      const results = await Promise.allSettled([
+        // AA source
+        (async () => {
+          console.log('[Benchmarks] Fetching AA scores...');
+          const result = await fetchAAScores(db);
+          if (result.errors.length > 0) {
+            throw new Error('AA: ' + result.errors.join(', '));
           }
-        });
-        tx();
+          return { name: 'AA', updated: result.updated, affectedIds: result.affectedIds };
+        })(),
+        // SWE-rebench source
+        (async () => {
+          console.log('[Benchmarks] Fetching SWE-rebench scores...');
+          const result = await this.upsertSWERebenchScores();
+          return { name: 'SWE-rebench', updated: result.updated, affectedIds: result.affectedIds };
+        })(),
+        // NIM source
+        (async () => {
+          console.log('[Benchmarks] Fetching NIM scores...');
+          const result = await this.upsertNIMScores();
+          return { name: 'NIM', updated: result.updated, affectedIds: result.affectedIds };
+        })(),
+      ]);
 
-        if (sweUpdated > 0) {
-          console.log(`[Benchmarks] SWE-rebench updated ${sweUpdated} models (fresh scores)`);
-          totalUpdated += sweUpdated;
+      // Collect results and errors
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          totalUpdated += r.value.updated;
+          for (const id of r.value.affectedIds) allAffectedIds.add(id);
+        } else {
+          errors.push(r.reason instanceof Error ? r.reason.message : String(r.reason));
         }
-      } catch (sweError) {
-        console.warn('[Benchmarks] SWE-rebench fetch failed:', sweError);
-        errors.push('SWE-rebench failed: ' + (sweError instanceof Error ? sweError.message : 'Unknown error'));
       }
 
-      // Step 3: Fetch NIM scores with fallback (for NIM provider models)
-      try {
-        console.log('[Benchmarks] Fetching NIM scores...');
-        const nimBenchmarks = await this.fetchNIMBenchmarks();
-
-        // Update NIM scores (only for NIM models that don't have scores yet)
-        const db = getDb();
-        let nimUpdated = 0;
-
-        for (const score of nimBenchmarks) {
-          const existing = db.prepare(`
-            SELECT benchmark_score FROM models
-            WHERE platform = ? AND model_id = ? AND benchmark_score IS NULL
-          `).get(score.platform, score.modelId);
-
-          if (existing) {
-            db.prepare(`
-              UPDATE models
-              SET benchmark_score = ?, last_benchmark_update = ?
-              WHERE platform = ? AND model_id = ?
-            `).run(score.score, score.lastUpdated.toISOString(), score.platform, score.modelId);
-            nimUpdated++;
-          }
-        }
-
-        if (nimUpdated > 0) {
-          console.log(`[Benchmarks] NIM added scores for ${nimUpdated} models`);
-          totalUpdated += nimUpdated;
-        }
-      } catch (nimError) {
-        console.warn('[Benchmarks] NIM fetch failed:', nimError);
-        errors.push('NIM failed: ' + (nimError instanceof Error ? nimError.message : 'Unknown error'));
+      // Recompute composites for affected rows only (incremental)
+      if (allAffectedIds.size > 0) {
+        const weights = loadSourceWeights();
+        recomputeBenchmarkComposite(db, allAffectedIds, weights);
       }
 
-      console.log(`[Benchmarks] Total benchmark update completed: ${totalUpdated} models updated`);
+      console.log(`[Benchmarks] Total: ${totalUpdated} models updated, ${allAffectedIds.size} composites recomputed`);
       return { updated: totalUpdated, errors };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       errors.push('General error: ' + errorMessage);
       console.error('Error updating benchmark scores:', errorMessage);
       return { updated: 0, errors };
+    } finally {
+      BenchmarkService.isSyncing = false;
     }
   }
 
@@ -288,7 +361,10 @@ export class BenchmarkService {
     const db = getDb();
     const rows = db.prepare(`
       SELECT model_id as modelId, platform, benchmark_score as score,
-             last_benchmark_update as lastUpdated
+             last_benchmark_update as lastUpdated,
+             aa_score as aaScore, swe_rebench_score as sweRebenchScore,
+             nim_score as nimScore,
+             nim_throughput_tps as nimThroughputTps, nim_avg_response_ms as nimAvgResponseMs, nim_uptime_pct as nimUptimePct
       FROM models
       WHERE benchmark_score IS NOT NULL
       ORDER BY benchmark_score DESC
@@ -298,8 +374,14 @@ export class BenchmarkService {
       modelId: row.modelId,
       platform: row.platform,
       score: row.score,
-      source: 'SWE-rebench' as const, // Default source, can be enhanced
-      lastUpdated: new Date(row.lastUpdated)
+      source: 'SWE-rebench' as const,
+      lastUpdated: row.lastUpdated ? new Date(row.lastUpdated) : new Date(),
+      aaScore: row.aaScore,
+      sweRebenchScore: row.sweRebenchScore,
+      nimScore: row.nimScore,
+      nimThroughputTps: row.nimThroughputTps,
+      nimAvgResponseMs: row.nimAvgResponseMs,
+      nimUptimePct: row.nimUptimePct,
     }));
   }
 
@@ -307,7 +389,10 @@ export class BenchmarkService {
     const db = getDb();
     const rows = db.prepare(`
       SELECT model_id as modelId, benchmark_score as score,
-             last_benchmark_update as lastUpdated
+             last_benchmark_update as lastUpdated,
+             aa_score as aaScore, swe_rebench_score as sweRebenchScore,
+             nim_score as nimScore,
+             nim_throughput_tps as nimThroughputTps, nim_avg_response_ms as nimAvgResponseMs, nim_uptime_pct as nimUptimePct
       FROM models
       WHERE platform = ? AND benchmark_score IS NOT NULL
       ORDER BY benchmark_score DESC
@@ -318,7 +403,13 @@ export class BenchmarkService {
       platform,
       score: row.score,
       source: 'SWE-rebench' as const,
-      lastUpdated: new Date(row.lastUpdated)
+      lastUpdated: row.lastUpdated ? new Date(row.lastUpdated) : new Date(),
+      aaScore: row.aaScore,
+      sweRebenchScore: row.sweRebenchScore,
+      nimScore: row.nimScore,
+      nimThroughputTps: row.nimThroughputTps,
+      nimAvgResponseMs: row.nimAvgResponseMs,
+      nimUptimePct: row.nimUptimePct,
     }));
   }
 }

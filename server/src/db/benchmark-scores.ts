@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { getDb } from './index.js';
 
 /**
  * Benchmark-derived intelligence scores for LLM models.
@@ -17,10 +18,204 @@ import type Database from 'better-sqlite3';
  * same pattern as applyModelPricing(). This ensures newly auto-synced models
  * from any provider pick up their score automatically.
  */
+
+// ─── CANONICAL MODEL KEY ──────────────────────────────────────────────────
+// Deterministic, source-agnostic model key normalization. Used for ALL
+// benchmark source matching via canonical_model_key.
+//
+// Algorithm:
+//   1. Take last segment after '/' (strip provider prefix)
+//   2. Lowercase
+//   3. Remove common fine-tune suffixes (-instruct, -chat, -base, etc.)
+//   4. Replace dots with dashes (3.3 → 3-3)
+//
+// canonicalizeModelId('meta/llama-3.3-70b-instruct') === 'llama-3-3-70b'
+export function canonicalizeModelId(modelId: string): string {
+  // Per spec R10.2: exact algorithm from TASKS.md Task 1.2
+  return modelId
+    .toLowerCase()
+    .replace(/^[a-z0-9-]+\//, '')       // strip "provider/" prefix
+    .replace(/[-_]/g, '-')              // normalize separators
+    .replace(/-(instruct|chat|it|hf)$/, '')  // strip common suffixes
+    .replace(/\.(\d+)(?=\D|$)/g, '-$1'); // normalize version dots
+}
+
+// ─── SOURCE WEIGHT LOADING (with in-memory cache) ─────────────────────────
+// Loads configurable weights from the benchmark_source_weights DB table.
+// Cached in memory; call invalidateSourceWeightsCache() to refresh.
+interface SourceWeight {
+  name: string;
+  weight: number;
+  enabled: boolean;
+}
+
+let sourceWeightsCache: Map<string, SourceWeight> | null = null;
+
+export function invalidateSourceWeightsCache(): void {
+  sourceWeightsCache = null;
+}
+
+export function loadSourceWeights(): Map<string, SourceWeight> {
+  if (sourceWeightsCache) return sourceWeightsCache;
+
+  const db = getDb();
+  const rows = db.prepare(
+    'SELECT name, weight, enabled FROM benchmark_source_weights'
+  ).all() as Array<{ name: string; weight: number; enabled: number }>;
+
+  sourceWeightsCache = new Map();
+  for (const r of rows) {
+    sourceWeightsCache.set(r.name, {
+      name: r.name,
+      weight: r.weight,
+      enabled: r.enabled === 1,
+    });
+  }
+  return sourceWeightsCache;
+}
+
+// ─── STALENESS DECAY ──────────────────────────────────────────────────────
+// Continuous exponential decay: weight = pow(0.5, ageDays / 10).
+// NOT a step function. A score from 10 days ago weighs 50 %; 20 days = 25 %.
+export function stalenessDecay(updatedIso: string | null | undefined): number {
+  if (!updatedIso) return 0;
+  const ageMs = Date.now() - new Date(updatedIso).getTime();
+  if (ageMs < 0) return 1; // future timestamp → treat as fresh
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  return Math.pow(0.5, ageDays / 10);
+}
+
+// ─── CANARY VALIDATION ────────────────────────────────────────────────────
+// Rejects NaN, Infinity, <0, >100 composites. Invalid → logged + skipped.
+export function validateComposite(score: number): boolean {
+  if (!Number.isFinite(score)) return false;
+  if (score < 0 || score > 100) return false;
+  return true;
+}
+
+// ─── RECOMPUTE BENCHMARK COMPOSITE (incremental) ─────────────────────────
+// Only processes rows in affectedIds. For each:
+//   1. Load per-source scores + staleness decay
+//   2. Apply source weights from benchmark_source_weights
+//   3. Weighted average → benchmark_score
+//   4. Canary-validate before writing
+export function recomputeBenchmarkComposite(
+  db: Database.Database,
+  affectedIds: Set<number>,
+  weights: Map<string, SourceWeight>,
+): number {
+  let recomputed = 0;
+
+  const select = db.prepare(`
+    SELECT id, aa_score, aa_score_updated, aa_confidence,
+           swe_rebench_score, swe_rebench_score_updated, swe_rebench_confidence,
+           nim_score, nim_score_updated, nim_confidence
+    FROM models WHERE id = ?
+  `);
+
+  const update = db.prepare(`
+    UPDATE models SET
+      benchmark_score = ?,
+      last_benchmark_update = ?,
+      size_label = ?,
+      intelligence_rank = ?,
+      benchmark_composite_version = ?
+    WHERE id = ?
+  `);
+
+  const tx = db.transaction(() => {
+    for (const id of affectedIds) {
+      const row = select.get(id) as any;
+      if (!row) continue;
+
+      let totalWeightedScore = 0;
+      let totalWeight = 0;
+
+      // Helper: effective weight with staleness decay + confidence
+      const effectiveWeight = (
+        baseWeight: number,
+        updatedIso: string | null,
+        confidence: number | null,
+        sourceName: string,
+      ): number => {
+        const decay = stalenessDecay(updatedIso);
+        const conf = confidence ?? 1;
+        const w = baseWeight * decay * conf;
+        // R9.3: Log when decay reduces weight by >25% relative to base
+        if (decay < 0.75 && baseWeight > 0) {
+          console.log(
+            `[Benchmarks] Staleness decay applied: model id=${id}, source=${sourceName}` +
+            `, decay=${decay.toFixed(2)}, effectiveWeight=${w.toFixed(3)}`
+          );
+        }
+        return w;
+      };
+
+      // AA source
+      const aaW = weights.get('aa');
+      if (aaW?.enabled && row.aa_score != null) {
+        const w = effectiveWeight(aaW.weight, row.aa_score_updated, row.aa_confidence, 'aa');
+        totalWeightedScore += row.aa_score * w;
+        totalWeight += w;
+      }
+
+      // SWE-rebench source
+      const sweW = weights.get('swe_rebench');
+      if (sweW?.enabled && row.swe_rebench_score != null) {
+        const w = effectiveWeight(sweW.weight, row.swe_rebench_score_updated, row.swe_rebench_confidence, 'swe_rebench');
+        totalWeightedScore += row.swe_rebench_score * w;
+        totalWeight += w;
+      }
+
+      // NIM source
+      const nimW = weights.get('nim');
+      if (nimW?.enabled && row.nim_score != null) {
+        const w = effectiveWeight(nimW.weight, row.nim_score_updated, row.nim_confidence, 'nim');
+        totalWeightedScore += row.nim_score * w;
+        totalWeight += w;
+      }
+
+      if (totalWeight <= 0) continue; // no valid sources (R4.4)
+
+      const composite = totalWeightedScore / totalWeight;
+
+      // Canary: reject NaN, Infinity, <0, >100 (R8.1b)
+      if (!validateComposite(composite)) {
+        console.warn(`[Benchmarks] Invalid composite for model id=${id}: ${composite} — skipping`);
+        continue;
+      }
+
+      // Composite timestamp = max of available source timestamps
+      const timestamps = [row.aa_score_updated, row.swe_rebench_score_updated, row.nim_score_updated]
+        .filter((t: string | null) => t != null)
+        .map((t: string) => new Date(t).getTime());
+      const lastUpdate = timestamps.length > 0
+        ? new Date(Math.max(...timestamps)).toISOString()
+        : null;
+
+      update.run(
+        composite,
+        lastUpdate,
+        scoreToTier(composite),
+        scoreToIntelligenceRank(composite),
+        1, // COMPOSITE_VERSION
+        id,
+      );
+      recomputed++;
+    }
+  });
+  tx();
+
+  if (recomputed > 0) {
+    console.log(`[Composite] Recomputed ${recomputed} benchmark composites`);
+  }
+  return recomputed;
+}
+
 type BenchmarkRow = [string, number]; // [model_id_pattern, aa_index_score]
 
 // ─── BENCHMARK SCORE TABLE ──────────────────────────────────────────────────
-// Patterns are checked with LOWER(model_id) LIKE pattern.
+// Patterns are matched via canonical_model_key lookup.
 // Order matters for overlapping patterns — more specific patterns should
 // come first (e.g. 'gemini-3.1-pro%' before 'gemini-3%').
 const BENCHMARK_SCORES: BenchmarkRow[] = [
@@ -179,34 +374,44 @@ export function applyBenchmarkScores(db: Database.Database): void {
   const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
   if (!columns.some(c => c.name === 'benchmark_score')) return;
 
-  const updateScore = db.prepare(`
-    UPDATE models SET benchmark_score = ?
-    WHERE (benchmark_score IS NULL OR benchmark_score != ?)
-      AND LOWER(model_id) LIKE ?
-  `);
+  // Backfill canonical_model_key for any models missing it
+  backfillCanonicalKeys(db);
 
-  const updateTier = db.prepare(`
-    UPDATE models SET size_label = ?
-    WHERE benchmark_score = ? AND benchmark_score > 0
-      AND (size_label = '' OR size_label = 'Custom' OR size_label IS NULL)
-      AND LOWER(model_id) LIKE ?
-  `);
-
-  const updateRank = db.prepare(`
-    UPDATE models SET intelligence_rank = ?
-    WHERE benchmark_score = ? AND benchmark_score > 0
-      AND (intelligence_rank = 50 OR intelligence_rank >= 90)
-      AND LOWER(model_id) LIKE ?
+  // Write AA scores to aa_score column (NOT benchmark_score directly).
+  // Uses canonical_model_key for exact matching.
+  const updateAAScore = db.prepare(`
+    UPDATE models SET aa_score = ?, aa_score_updated = ?, aa_confidence = 1.0
+    WHERE canonical_model_key = ?
+      AND (aa_score IS NULL OR aa_score != ?)
   `);
 
   const apply = db.transaction(() => {
     for (const [pattern, score] of BENCHMARK_SCORES) {
-      updateScore.run(score, score, pattern);
-      updateTier.run(scoreToTier(score), score, pattern);
-      updateRank.run(scoreToIntelligenceRank(score), score, pattern);
+      // Strip SQL LIKE wildcards to derive the canonical key
+      const canonicalKey = canonicalizeModelId(pattern.replace(/%/g, ''));
+      updateAAScore.run(score, new Date().toISOString(), canonicalKey, score);
     }
   });
   apply();
+}
+
+// ─── CANONICAL KEY BACKFILL ────────────────────────────────────────────────
+// Populates canonical_model_key for all models that don't have one yet.
+export function backfillCanonicalKeys(db: Database.Database): number {
+  const rows = db.prepare('SELECT id, model_id FROM models WHERE canonical_model_key IS NULL').all() as
+    Array<{ id: number; model_id: string }>;
+
+  const update = db.prepare('UPDATE models SET canonical_model_key = ? WHERE id = ?');
+  let count = 0;
+  const tx = db.transaction(() => {
+    for (const r of rows) {
+      update.run(canonicalizeModelId(r.model_id), r.id);
+      count++;
+    }
+  });
+  tx();
+  if (count > 0) console.log(`[Canonical] Backfilled ${count} model keys`);
+  return count;
 }
 
 // ─── LIVE FETCH (Artificial Analysis leaderboard) ──────────────────────────
@@ -230,20 +435,22 @@ export interface BenchmarkFetchResult {
 }
 
 /**
- * Fetch live benchmark scores from Artificial Analysis and update the DB.
- * Safe to call on boot — network timeout is short, and failure is graceful.
+ * Fetch live AA scores from Artificial Analysis and update the DB.
+ * AA writes ONLY to aa_score, aa_score_updated, aa_confidence.
+ * Uses canonical_model_key for matching. Returns affected IDs for composite.
  */
-export async function fetchLiveBenchmarkScores(db: Database.Database): Promise<BenchmarkFetchResult> {
+export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFetchResult & { affectedIds: Set<number> }> {
+  const affectedIds = new Set<number>();
+
   // Return cached result if recently fetched
   if (Date.now() - lastFetchTime < FETCH_CACHE_TTL_MS && lastFetchResult.updated >= 0) {
-    return { ...lastFetchResult, source: 'cache' };
+    return { ...lastFetchResult, source: 'cache', affectedIds };
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    // Try the API endpoint first; fall back to scraping if needed.
     const res = await fetch(AA_API_URL, {
       signal: controller.signal,
       headers: {
@@ -256,26 +463,26 @@ export async function fetchLiveBenchmarkScores(db: Database.Database): Promise<B
       const msg = `AA API returned ${res.status}`;
       lastFetchResult = { updated: 0, errors: [msg] };
       lastFetchTime = Date.now();
-      return { ...lastFetchResult, source: 'live' };
+      return { ...lastFetchResult, source: 'live', affectedIds };
     }
 
     const body = await res.json() as any;
-    // AA API returns { models: [{ model_id, score, ... }, ...] } or similar
     const models = Array.isArray(body) ? body : (body?.models ?? body?.data ?? []);
 
     if (!Array.isArray(models) || models.length === 0) {
       lastFetchResult = { updated: 0, errors: ['No models in AA response'] };
       lastFetchTime = Date.now();
-      return { ...lastFetchResult, source: 'live' };
+      return { ...lastFetchResult, source: 'live', affectedIds };
     }
 
+    // AA writes ONLY to aa_score columns. Uses canonical_model_key.
     const updateScore = db.prepare(`
-      UPDATE models SET benchmark_score = ?,
-                        size_label = ?,
-                        intelligence_rank = ?
-      WHERE LOWER(model_id) LIKE LOWER(?)
-        AND (models.benchmark_score IS NULL OR models.benchmark_score != ?)
+      UPDATE models SET aa_score = ?, aa_score_updated = ?, aa_confidence = 1.0
+      WHERE canonical_model_key = ?
+        AND (aa_score IS NULL OR aa_score != ?)
     `);
+
+    const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
 
     let updated = 0;
     const tx = db.transaction(() => {
@@ -284,26 +491,37 @@ export async function fetchLiveBenchmarkScores(db: Database.Database): Promise<B
         const score = Number(m.score ?? m.intelligence_index ?? m.intelligence_score ?? 0);
         if (!modelId || score <= 0 || score > 100) continue;
 
-        const tier = scoreToTier(score);
-        const rank = scoreToIntelligenceRank(score);
-        const result = updateScore.run(score, tier, rank, modelId, score);
-        updated += result.changes;
+        const canonicalKey = canonicalizeModelId(modelId);
+        const result = updateScore.run(score, new Date().toISOString(), canonicalKey, score);
+        if (result.changes > 0) {
+          updated += result.changes;
+          const row = findId.get(canonicalKey) as { id: number } | undefined;
+          if (row) affectedIds.add(row.id);
+        }
       }
     });
     tx();
 
     lastFetchResult = { updated, errors: [] };
     lastFetchTime = Date.now();
-    console.log(`[Benchmarks] Live fetch: ${updated} models updated from AA leaderboard`);
+    console.log(`[Benchmarks] AA fetch: ${updated} models updated`);
 
-    return { ...lastFetchResult, source: 'live' };
+    return { ...lastFetchResult, source: 'live', affectedIds };
   } catch (err: any) {
     const msg = err.name === 'AbortError' ? 'timeout' : err.message;
-    console.log(`[Benchmarks] Live fetch failed: ${msg} (static table still active)`);
+    console.log(`[Benchmarks] AA fetch failed: ${msg} (static table still active)`);
     lastFetchResult = { updated: 0, errors: [msg] };
     lastFetchTime = Date.now();
-    return { ...lastFetchResult, source: 'live' };
+    return { ...lastFetchResult, source: 'live', affectedIds };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * @deprecated Use fetchAAScores instead. Kept for backward compatibility.
+ */
+export async function fetchLiveBenchmarkScores(db: Database.Database): Promise<BenchmarkFetchResult> {
+  const result = await fetchAAScores(db);
+  return { updated: result.updated, errors: result.errors, source: result.source };
 }

@@ -243,6 +243,64 @@ function createTables(db: Database.Database) {
   ensureSessionsLastUsedColumn(db);
   ensureCustomProvidersStickySessionsColumn(db);
   ensureModelsBenchmarkColumns(db);
+  ensureBenchmarkUnificationColumns(db);
+  ensureBenchmarkSourceWeightsTable(db);
+}
+
+// ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
+// Adds per-source score columns (aa_*, swe_rebench_*, nim_*) so each source
+// writes ONLY its own columns. The composite step derives benchmark_score.
+// Also adds canonical_model_key for deterministic cross-source matching.
+function ensureBenchmarkUnificationColumns(db: Database.Database) {
+  const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
+
+  const newColumns: Array<[string, string]> = [
+    ['canonical_model_key', 'TEXT'],
+    ['aa_score', 'REAL'],
+    ['aa_score_updated', 'TEXT'],
+    ['aa_confidence', 'REAL'],
+    ['swe_rebench_score', 'REAL'],
+    ['swe_rebench_score_updated', 'TEXT'],
+    ['swe_rebench_confidence', 'REAL'],
+    ['nim_score', 'REAL'],
+    ['nim_score_updated', 'TEXT'],
+    ['nim_confidence', 'REAL'],
+    ['nim_throughput_tps', 'REAL'],
+    ['nim_avg_response_ms', 'REAL'],
+    ['nim_uptime_pct', 'REAL'],
+    ['benchmark_composite_version', 'INTEGER'],
+  ];
+
+  for (const [name, type] of newColumns) {
+    if (!columns.some(c => c.name === name)) {
+      db.prepare(`ALTER TABLE models ADD COLUMN ${name} ${type}`).run();
+    }
+  }
+
+  // Index for fast canonical lookups
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_models_canonical_key ON models(canonical_model_key)').run();
+}
+
+// ── V34: benchmark_source_weights table (2026-06) ─────────────────────
+// Configurable source weights for composite scoring. Loaded at runtime
+// via loadSourceWeights() with in-memory cache. NOT hardcoded constants.
+function ensureBenchmarkSourceWeightsTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS benchmark_source_weights (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      weight REAL NOT NULL DEFAULT 1.0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Seed default weights (idempotent) — per spec R4.1: aa=0.50, swe=0.30, nim=0.15
+  const insert = db.prepare(`INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES (?, ?, 1)`);
+  insert.run('aa', 0.50);
+  insert.run('swe_rebench', 0.30);
+  insert.run('nim', 0.15);
 }
 
 // `requested_model` is the model id the CLIENT pinned in the request body.

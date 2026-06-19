@@ -192,7 +192,7 @@ function AddPlatformModal({
   const [maxParallelRequests, setMaxParallelRequests] = useState(4)
   const [stickySessionsEnabled, setStickySessionsEnabled] = useState(false)
   const [keyless, setKeyless] = useState(false)
-  const [autoDiscover, setAutoDiscover] = useState(true)
+  const [_autoDiscover, _setAutoDiscover] = useState(true)
   const [autoEnableModels, setAutoEnableModels] = useState(false)
   const [apiFormat, setApiFormat] = useState<'openai' | 'anthropic'>('openai')
 
