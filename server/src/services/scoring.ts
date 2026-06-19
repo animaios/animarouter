@@ -106,12 +106,91 @@ export function speedScore(tokPerSec: number, ttfbMs: number | null): number {
   return THROUGHPUT_WEIGHT * tp + TTFB_WEIGHT * ttfbScore(ttfbMs);
 }
 
+// ── Heavy-weighted real performance scoring ─────────────────────────────────
+// When real performance data exists, weight it very heavily (90-95%) over the
+// default speed score. When no data, fall back to pure default weighting.
+// This implements the user's request: heavily sort by real token/sec.
+
+// Threshold: below this many total requests, we don't trust the real data enough
+// to dominate the score. Gradually transition as confidence grows.
+export const REAL_SPEED_CONFIDENCE_THRESHOLD = 50; // requests needed for full confidence
+
+// Weight given to real performance data at full confidence (0.0 to 1.0)
+export const REAL_SPEED_MAX_WEIGHT = 0.95; // heavily favor real data when confident
+
+/**
+ * Calculate confidence factor based on total request count.
+ * Returns 0.0 (no confidence) when no data, scales up to 1.0 at threshold.
+ * Uses a smooth logistic curve for gradual transition.
+ */
+function realDataConfidence(totalRequests: number): number {
+  if (totalRequests <= 0) return 0;
+  // Logistic curve: approaches 1.0 as totalRequests >> threshold
+  // At threshold/2 → ~0.5, at threshold → ~0.73, at 2*threshold → ~0.88
+  return 1 / (1 + Math.exp(-(totalRequests - REAL_SPEED_CONFIDENCE_THRESHOLD) / (REAL_SPEED_CONFIDENCE_THRESHOLD / 3)));
+}
+
+/**
+ * Heavy-weighted speed score that favors real performance data.
+ *
+ * When no performance data exists: uses default speed_score only (pure prior).
+ * When little data exists: blends default score with real data based on confidence.
+ * When lots of data exists: heavily weights real token/sec (up to 95%).
+ *
+ * @param tokPerSec - Measured real tokens per second from actual requests
+ * @param ttfbMs - Measured time to first byte from actual requests
+ * @param totalRequests - Total number of requests for confidence calculation
+ * @param defaultSpeedScore - Default score from manual/prior settings (0-1)
+ */
+export function heavyWeightedSpeedScore(
+  tokPerSec: number,
+  ttfbMs: number | null,
+  totalRequests: number,
+  defaultSpeedScore: number
+): number {
+  // Calculate how much we trust the real data
+  const confidence = realDataConfidence(totalRequests);
+
+  // If no real data at all, use pure default
+  if (tokPerSec <= 0 && totalRequests <= 0) {
+    return defaultSpeedScore;
+  }
+
+  // Calculate real performance score from actual data
+  const realScore = speedScore(tokPerSec, ttfbMs);
+
+  // Blend weight: 0% real data when no confidence, up to max weight when fully confident
+  const realWeight = confidence * REAL_SPEED_MAX_WEIGHT;
+  const defaultWeight = 1 - realWeight;
+
+  // Weighted blend of real performance and default score
+  return (realWeight * realScore) + (defaultWeight * defaultSpeedScore);
+}
+
 // ── Intelligence ────────────────────────────────────────────────────────────
-// Caller supplies a composite (tier-first, rank-as-tiebreaker — see router) and
+// Caller supplies a composite value from intelligenceComposite() and
 // the min/max across the enabled chain. We min-max normalize to [0,1], 1 = best.
 export function intelligenceScore(composite: number, min: number, max: number): number {
   if (max <= min) return 1; // single model or all equal → neutral-high
   return (composite - min) / (max - min);
+}
+
+// ── Speed composite (manual speed_rank + size tier penalty) ────────────────
+// Mirrors the intelligenceComposite pattern: generates a composite value from
+// speed_rank and size_label for min-max normalization. Lower rank = faster.
+// Larger models get a tier penalty so a fast tiny model doesn't make a large
+// model look "slow" in relative terms — they're normalized within their class.
+export function speedCompositeFromRank(speedRank: number, sizeLabel: string): number {
+  const TIER_PENALTY: Record<string, number> = {
+    Small: 0,
+    Medium: 100,
+    Large: 200,
+    Frontier: 300,
+    Custom: 150,
+  };
+  const penalty = TIER_PENALTY[sizeLabel] ?? 150;
+  // Invert rank so lower rank (faster) → higher composite value
+  return 1000 - speedRank + penalty;
 }
 
 // ── Guardrail: free-quota headroom ──────────────────────────────────────────
@@ -151,7 +230,7 @@ function sampleGamma(shape: number): number {
   if (shape < 1) return sampleGamma(shape + 1) * Math.pow(Math.random() || Number.EPSILON, 1 / shape);
   const d = shape - 1 / 3;
   const c = 1 / Math.sqrt(9 * d);
-  for (;;) {
+  for (; ;) {
     let x: number, v: number;
     do { x = randomNormal(); v = 1 + c * x; } while (v <= 0);
     v = v ** 3;

@@ -15,6 +15,7 @@ import { settingsRouter } from './routes/settings.js';
 import { authRouter } from './routes/auth.js';
 import { eventsRouter } from './routes/events.js';
 import { customRouter } from './routes/custom.js';
+import { benchmarksRouter } from './routes/benchmarks.js';
 import { requireAuth } from './middleware/requireAuth.js';
 import { createProxyRateLimiter } from './middleware/rateLimit.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -78,6 +79,7 @@ export function createApp() {
   app.use('/api/analytics', requireAuth, analyticsRouter);
   app.use('/api/health', requireAuth, healthRouter);
   app.use('/api/settings', requireAuth, settingsRouter);
+  app.use('/api/benchmarks', requireAuth, benchmarksRouter);
   // Custom providers + their models. The router declares its own
   // `/api/custom-providers` paths. We mount the router at root, but
   // requireAuth only runs for matching paths via a conditional. This

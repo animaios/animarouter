@@ -32,6 +32,7 @@ const createProviderSchema = z.object({
   keyless: z.boolean().optional(),
   apiFormat: z.enum(['openai', 'anthropic']).optional(),
   stickySessionsEnabled: z.boolean().optional(),
+  autoEnableModels: z.boolean().optional(),
 });
 
 const updateProviderSchema = z.object({
@@ -107,9 +108,14 @@ export type ProviderSyncResult = {
   error?: string
 }
 
-export async function syncModelsFromProvider(baseUrl: string, slug: string): Promise<ProviderSyncResult> {
+export async function syncModelsFromProvider(baseUrl: string, slug: string, autoEnableModels = true): Promise<ProviderSyncResult> {
   // Skip auto-discovery in test environments — fake provider URLs won't respond.
   if (process.env.VITEST) return { fetched: 0, added: [] };
+
+  // Auto-discover models from the provider's /models endpoint. The autoEnableModels parameter controls:
+  // - true: models are inserted with enabled=1 (automatically active)
+  // - false: models are inserted with enabled=0 (must be manually enabled by user)
+  // Default behavior (when not specified): true (models auto-enabled by default)
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -141,9 +147,9 @@ export async function syncModelsFromProvider(baseUrl: string, slug: string): Pro
         (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
          rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, context_window,
          enabled, supports_vision, supports_tools, max_output_tokens, key_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, NULL)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
     `);
-    const insertFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
+    const insertFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, ?)');
 
     const tx = db.transaction(() => {
       for (const m of models) {
@@ -163,9 +169,10 @@ export async function syncModelsFromProvider(baseUrl: string, slug: string): Pro
           MODEL_DEFAULTS.intelligenceRank, MODEL_DEFAULTS.speedRank, MODEL_DEFAULTS.sizeLabel,
           MODEL_DEFAULTS.rpmLimit, MODEL_DEFAULTS.rpdLimit, MODEL_DEFAULTS.tpmLimit, MODEL_DEFAULTS.tpdLimit,
           MODEL_DEFAULTS.monthlyTokenBudget, null, // context_window = unknown
+          autoEnableModels ? 1 : 0, // enabled/disabled based on user choice
           MODEL_DEFAULTS.supportsVision ? 1 : 0, MODEL_DEFAULTS.supportsTools ? 1 : 0,
         );
-        insertFb.run(Number(result.lastInsertRowid), maxPriority + added.length + 1);
+        insertFb.run(Number(result.lastInsertRowid), maxPriority + added.length + 1, autoEnableModels ? 1 : 0);
         added.push(modelId);
       }
     });
@@ -280,7 +287,7 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
       tx();
 
       clearPlatformCaches(slug);
-      const sync = await syncModelsFromProvider(baseUrl, slug);
+      const sync = await syncModelsFromProvider(baseUrl, slug, parsed.data.autoEnableModels === true);
       res.json({
         id: existing.id, slug, displayName: displayName.trim(), baseUrl,
         rpmLimit: rpmLimit ?? null, rpdLimit: rpdLimit ?? null,
@@ -300,8 +307,8 @@ customRouter.post('/api/custom-providers', async (req: Request, res: Response) =
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(slug, displayName.trim(), baseUrl, rpmLimit ?? null, rpdLimit ?? null, tpmLimit ?? null, tpdLimit ?? null, maxParallelRequests ?? null, keyless ? 1 : 0, apiFormat, stickySessionsEnabled ? 1 : 0);
 
-  // Auto-discover models from the provider's /models endpoint.
-  const sync = await syncModelsFromProvider(baseUrl, slug);
+  // Auto-discover models from the provider's /models endpoint (always enabled by default).
+  const sync = await syncModelsFromProvider(baseUrl, slug, parsed.data.autoEnableModels !== false);
 
   res.status(201).json({
     id: result.lastInsertRowid,
@@ -463,6 +470,8 @@ customRouter.post('/api/custom-providers/:slug/sync-models', async (req: Request
     return;
   }
 
+  const autoEnableModels = req.query.autoEnable === 'true';
+
   // Resolve base URL: custom providers have it in the DB; built-in providers
   // expose it via BaseProvider.baseUrl.
   const customRow = getDb().prepare('SELECT base_url FROM custom_providers WHERE slug = ?').get(slug) as { base_url: string } | undefined;
@@ -478,7 +487,7 @@ customRouter.post('/api/custom-providers/:slug/sync-models', async (req: Request
     return;
   }
 
-  const result = await syncModelsFromProvider(baseUrl, slug);
+  const result = await syncModelsFromProvider(baseUrl, slug, autoEnableModels);
 
   res.json({ success: true, slug, fetched: result.fetched, error: result.error });
 });

@@ -192,6 +192,8 @@ function AddPlatformModal({
   const [maxParallelRequests, setMaxParallelRequests] = useState(4)
   const [stickySessionsEnabled, setStickySessionsEnabled] = useState(false)
   const [keyless, setKeyless] = useState(false)
+  const [autoDiscover, setAutoDiscover] = useState(true)
+  const [autoEnableModels, setAutoEnableModels] = useState(false)
   const [apiFormat, setApiFormat] = useState<'openai' | 'anthropic'>('openai')
 
   const create = useMutation<{ slug: string }, Error, Record<string, unknown>>({
@@ -211,6 +213,7 @@ function AddPlatformModal({
       setParallelEnabled(false)
       setStickySessionsEnabled(false)
       setKeyless(false)
+      setAutoEnableModels(false)
       setApiFormat('openai')
     },
   })
@@ -230,7 +233,7 @@ function AddPlatformModal({
             <h3 className="text-sm font-medium">Add a custom platform</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
               Point at any OpenAI-compatible endpoint: Ollama, LM Studio, llama.cpp, vLLM, a remote gateway.
-              Models are added separately once the provider exists.
+              Models are auto-discovered by default. Uncheck 'Auto-enable' to have them disabled initially.
             </p>
           </div>
           <Button variant="ghost" size="xs" onClick={onClose}>
@@ -240,7 +243,7 @@ function AddPlatformModal({
         <form
           onSubmit={e => {
             e.preventDefault()
-            const body: Record<string, unknown> = { slug: slug.trim(), displayName: displayName.trim(), baseUrl: baseUrl.trim(), keyless, apiFormat }
+            const body: Record<string, unknown> = { slug: slug.trim(), displayName: displayName.trim(), baseUrl: baseUrl.trim(), keyless, apiFormat, autoEnableModels: autoEnableModels }
             if (showAdvanced) {
               if (rpmLimit) body.rpmLimit = parseInt(rpmLimit, 10)
               if (rpdLimit) body.rpdLimit = parseInt(rpdLimit, 10)
@@ -355,6 +358,15 @@ function AddPlatformModal({
             </div>
             </>
           )}
+          <div className="flex items-center gap-2 pt-1">
+            <Switch checked={autoEnableModels} onCheckedChange={setAutoEnableModels} />
+            <span className="text-xs text-muted-foreground">
+              Auto-enable discovered models
+              {autoEnableModels && (
+                <span className="ml-1 text-primary">✓</span>
+              )}
+            </span>
+          </div>
           <div className="flex items-center gap-2 pt-1">
             <Switch checked={keyless} onCheckedChange={setKeyless} />
             <span className="text-xs text-muted-foreground">No API key required (anonymous/sentinel)</span>

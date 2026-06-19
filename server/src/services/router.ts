@@ -7,7 +7,7 @@ import { isExhausted, getExhaustedKeysForModel } from './key-exhaustion.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
-  speedScore, intelligenceScore, headroomFactor, rateLimitFactor, combineScore,
+  speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, headroomFactor, rateLimitFactor, combineScore,
   MAX_PENALTY,
 } from './scoring.js';
 import { parseBudget } from '../lib/budget.js';
@@ -34,6 +34,7 @@ interface ChainRow {
   model_id: string;
   display_name: string;
   intelligence_rank: number;
+  speed_rank: number;
   size_label: string;
   monthly_token_budget: string;
   rpm_limit: number | null;
@@ -53,6 +54,10 @@ interface ChainRow {
   // Custom models bind to the api_keys row carrying their endpoint (#212);
   // NULL for built-in platforms.
   key_id: number | null;
+  /** Benchmark-derived intelligence score [0, 100] from Artificial Analysis
+   * Intelligence Index. NULL = no published score. When available, this is a
+   * much better cross-provider intelligence signal than size_label + rank. */
+  benchmark_score: number | null;
 }
 
 export interface RouteResult {
@@ -295,6 +300,9 @@ function decayWeight(ageDays: number): number {
 export function refreshStatsCache(db: Database, force = false): void {
   if (!force && statsCache && Date.now() - statsCacheTime < CACHE_TTL_MS) return;
 
+  // Clear the temporary table
+  db.prepare('DELETE FROM model_stats_temp').run();
+
   const since = new Date(Date.now() - WINDOW_MS).toISOString();
   const buckets = db.prepare(`
     SELECT platform, model_id,
@@ -335,26 +343,54 @@ export function refreshStatsCache(db: Database, force = false): void {
     SELECT platform, model_id, COALESCE(SUM(input_tokens + output_tokens), 0) AS used
     FROM requests
     WHERE created_at >= datetime('now', 'start of month')
-      AND request_type = 'chat'
     GROUP BY platform, model_id
   `).all() as Array<{ platform: string; model_id: string; used: number }>;
   const usageMap = new Map(usageRows.map(r => [`${r.platform}:${r.model_id}`, r.used]));
 
-  const next = new Map<string, ModelStats>();
+  // Populate the temporary table with real statistics
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO model_stats_temp
+    (platform, model_id, successes, failures, tokPerSec, avgTtfbMs, monthlyUsedTokens)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+
   for (const [key, a] of acc) {
-    next.set(key, {
-      successes: a.wSucc,
-      failures: a.wFail,
-      tokPerSec: a.wLat > 0 ? (a.wOut * 1000) / a.wLat : 0,
-      avgTtfbMs: a.wTtfbCnt > 0 ? a.wTtfbSum / a.wTtfbCnt : null,
-      monthlyUsedTokens: usageMap.get(key) ?? 0,
-    });
+    const [platform, model_id] = key.split(':');
+    const tokPerSec = a.wLat > 0 ? (a.wOut * 1000) / a.wLat : 0;
+    const avgTtfbMs = a.wTtfbCnt > 0 ? a.wTtfbSum / a.wTtfbCnt : null;
+    const monthlyUsedTokens = usageMap.get(key) ?? 0;
+
+    insert.run(
+      platform,
+      model_id,
+      Math.round(a.wSucc),
+      Math.round(a.wFail),
+      tokPerSec,
+      avgTtfbMs,
+      monthlyUsedTokens
+    );
   }
+
   // Models with month usage but no recent window data still need a headroom number.
   for (const [key, used] of usageMap) {
-    if (!next.has(key)) {
-      next.set(key, { successes: 0, failures: 0, tokPerSec: 0, avgTtfbMs: null, monthlyUsedTokens: used });
+    const [platform, model_id] = key.split(':');
+    const existing = db.prepare('SELECT 1 FROM model_stats_temp WHERE platform = ? AND model_id = ?').get(platform, model_id);
+    if (!existing) {
+      insert.run(platform, model_id, 0, 0, 0, null, used);
     }
+  }
+
+  // Also update the in-memory cache for existing functionality
+  const next = new Map<string, ModelStats>();
+  const statsRows = db.prepare('SELECT platform, model_id, successes, failures, tokPerSec, avgTtfbMs, monthlyUsedTokens FROM model_stats_temp').all();
+  for (const row of statsRows as any[]) {
+    next.set(`${row.platform}:${row.model_id}`, {
+      successes: row.successes,
+      failures: row.failures,
+      tokPerSec: row.tokPerSec,
+      avgTtfbMs: row.avgTtfbMs,
+      monthlyUsedTokens: row.monthlyUsedTokens,
+    });
   }
 
   statsCache = next;
@@ -364,8 +400,22 @@ export function refreshStatsCache(db: Database, force = false): void {
 // Composite intelligence: size_label is the cross-provider capability tier
 // (issue #135 — intelligence_rank is only meaningful within one provider), so
 // tier dominates and intelligence_rank breaks ties inside a tier.
+//
+// When benchmark_score is available (populated from Artificial Analysis
+// Intelligence Index), it's used directly — it's a better cross-provider
+// signal because it's derived from actual benchmark performance rather than
+// manual tier labels. The score [0, 100] is scaled to tier*1000 range so it
+// composes cleanly with the existing min-max normalization.
 const TIER_VALUE: Record<string, number> = { Frontier: 4, Large: 3, Medium: 2, Small: 1 };
-function intelligenceComposite(sizeLabel: string, intelligenceRank: number): number {
+function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benchmarkScore: number | null): number {
+  // Benchmark score is the preferred signal — it's empirically grounded
+  // and directly comparable across providers.
+  if (benchmarkScore != null && benchmarkScore > 0) {
+    // Scale to same range as tier-based composite (~0–4000) so the
+    // scores blend naturally with any unscored models in the chain.
+    // A score of 60 maps to 4000 (frontier-class), 3 maps to 200 (tiny).
+    return benchmarkScore * (4000 / 60);
+  }
   const tier = TIER_VALUE[sizeLabel] ?? 0;
   // tier*1000 keeps tiers strictly separated; -rank prefers lower rank in-tier.
   return tier * 1000 - intelligenceRank;
@@ -385,6 +435,8 @@ function scoreChainEntry(
   weights: RoutingWeights,
   intelMin: number,
   intelMax: number,
+  speedMin: number,
+  speedMax: number,
   sampled: boolean,
 ): ScoredEntry {
   const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
@@ -399,9 +451,26 @@ function scoreChainEntry(
     reliability = expectedReliability(successes, failures);
   }
 
-  const speed = speedScore(stats?.tokPerSec ?? 0, stats?.avgTtfbMs ?? null);
+  // Compute a default speed score from the manual speed_rank so we have a
+  // fallback when no real perf data exists yet. Uses the same min-max
+  // normalisation pattern as intelligenceScore.
+  const speedComposite = speedCompositeFromRank(entry.speed_rank, entry.size_label);
+  const defaultSpeed = speedMax > speedMin
+    ? (speedComposite - speedMin) / (speedMax - speedMin)
+    : 1; // single model or all equal → neutral-high
+
+  // Heavy-weight the real measured tok/sec over the manual default.
+  // When we have no data → pure default. Lots of data → 95 % real.
+  const totalRequests = Math.round(successes + failures);
+  const speed = heavyWeightedSpeedScore(
+    stats?.tokPerSec ?? 0,
+    stats?.avgTtfbMs ?? null,
+    totalRequests,
+    defaultSpeed,
+  );
+
   const intelligence = intelligenceScore(
-    intelligenceComposite(entry.size_label, entry.intelligence_rank), intelMin, intelMax,
+    intelligenceComposite(entry.size_label, entry.intelligence_rank, entry.benchmark_score), intelMin, intelMax,
   );
 
   const budget = parseBudget(entry.monthly_token_budget);
@@ -428,12 +497,18 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
       .map(x => x.e);
   }
 
-  const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank));
-  const intelMin = composites.length ? Math.min(...composites) : 0;
-  const intelMax = composites.length ? Math.max(...composites) : 0;
+  // Intelligence composites for min-max normalization
+  const intelComposites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score));
+  const intelMin = intelComposites.length ? Math.min(...intelComposites) : 0;
+  const intelMax = intelComposites.length ? Math.max(...intelComposites) : 0;
+
+  // Speed composites for min-max normalization
+  const speedComposites = chain.map(e => speedCompositeFromRank(e.speed_rank, e.size_label));
+  const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
+  const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
   return chain
-    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, true).score }))
+    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, speedMin, speedMax, true).score }))
     // Higher score first; manual priority breaks ties so the chain still matters.
     .sort((a, b) => b.s - a.s || a.e.priority - b.e.priority)
     .map(x => x.e);
@@ -474,9 +549,10 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   const chain = db.prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.size_label, m.monthly_token_budget,
+           m.speed_rank, m.size_label, m.monthly_token_budget,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.max_output_tokens, m.key_id
+           m.supports_tools, m.context_window, m.max_output_tokens, m.key_id,
+           m.benchmark_score
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
     WHERE fc.enabled = 1
@@ -731,10 +807,10 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
 
   const chain = db.prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
+           m.platform, m.model_id, m.display_name, m.intelligence_rank, m.speed_rank,
            m.size_label, m.monthly_token_budget,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.max_output_tokens
+           m.supports_tools, m.benchmark_score, m.context_window, m.max_output_tokens
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE m.enabled = 1
@@ -743,12 +819,17 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
   // For display we score under 'balanced' weights when in priority mode, so the
   // table still shows a meaningful ranking even with the bandit turned off.
   const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-  const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank));
+  const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score));
   const intelMin = composites.length ? Math.min(...composites) : 0;
   const intelMax = composites.length ? Math.max(...composites) : 0;
 
+  // Speed composites for min-max normalization
+  const speedComposites = chain.map(e => speedCompositeFromRank(e.speed_rank, e.size_label));
+  const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
+  const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
+
   const scores: RoutingScore[] = chain.map(entry => {
-    const scored = scoreChainEntry(entry, weights, intelMin, intelMax, false);
+    const scored = scoreChainEntry(entry, weights, intelMin, intelMax, speedMin, speedMax, false);
     const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
     return {
       modelDbId: entry.model_db_id,

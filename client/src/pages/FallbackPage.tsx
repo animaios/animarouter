@@ -53,6 +53,12 @@ interface FallbackEntry {
   supportsVision: boolean
   supportsTools: boolean
   keyCount: number
+  // Real performance metrics
+  actualTokPerSec?: number
+  actualAvgTtfbMs?: number | null
+  totalRequests?: number
+  successRate?: number
+  monthlyUsedTokens?: number
 }
 
 type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
@@ -519,7 +525,31 @@ function RowContent({
         </div>
       </td>
       <td className="py-2 pr-3 align-middle"><AxisBar value={row.reliability} color="#22c55e" /></td>
-      <td className="py-2 pr-3 align-middle"><AxisBar value={row.speed} color="#3b82f6" /></td>
+      <td className="py-2 pr-3 align-middle">
+        <div className="flex flex-col gap-1">
+          <div className="text-xs font-mono text-muted-foreground">
+            {row.actualTokPerSec !== undefined && row.actualTokPerSec > 0
+              ? `${row.actualTokPerSec.toFixed(1)} tok/s real`
+              : row.totalRequests !== undefined && row.totalRequests > 0
+                ? `${(row.successRate ?? 0).toFixed(0)}% success`
+                : 'No data'
+            }
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="h-1.5 w-12 rounded-full bg-muted overflow-hidden">
+              <div className="h-full rounded-full" style={{ width: `${Math.round((row.speed ?? 0) * 100)}%`, backgroundColor: '#3b82f6' }} />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="font-mono text-[11px] text-muted-foreground tabular-nums w-7 text-right">
+                {Math.round((row.speed ?? 0) * 100)}
+              </span>
+              {row.actualAvgTtfbMs && (
+                <span className="text-[10px] text-muted-foreground">{row.actualAvgTtfbMs}ms ttfb</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </td>
       <td className="py-2 pr-3 align-middle"><AxisBar value={row.intelligence} color="#a855f7" /></td>
       <td className="py-2 pr-3 align-middle font-mono text-[11px] text-muted-foreground tabular-nums">
         {guard < 0.999 ? `×${guard.toFixed(2)}` : '—'}
@@ -583,6 +613,21 @@ export default function FallbackPage() {
     queryFn: () => apiFetch('/api/fallback'),
   })
 
+  const { data: performanceData = [] } = useQuery<Array<{
+    modelDbId: number
+    platform: string
+    modelId: string
+    displayName: string
+    actualTokPerSec: number
+    actualAvgTtfbMs: number | null
+    totalRequests: number
+    successRate: number
+    monthlyUsedTokens: number
+  }>>({
+    queryKey: ['fallback', 'performance'],
+    queryFn: () => apiFetch('/api/fallback/performance'),
+  })
+
   const { data: tokenUsage } = useQuery<TokenUsageData>({
     queryKey: ['fallback', 'token-usage'],
     queryFn: () => apiFetch('/api/fallback/token-usage'),
@@ -628,6 +673,7 @@ export default function FallbackPage() {
   // Live search filter on the configured rows. Cheap (~750 entries,
   // <100-char string compares), so no debounce — runs on every keystroke.
   const [query, setQuery] = useState('')
+  const [sortByRealSpeed, setSortByRealSpeed] = useState(false)
   const filteredConfigured = useMemo(
     () => configured.filter(e =>
       matchesModelQuery(query, { displayName: e.displayName, modelId: e.modelId, platform: e.platform }),
@@ -635,18 +681,34 @@ export default function FallbackPage() {
     [configured, query],
   )
 
+  // Merge performance data with entries
+  const entriesWithPerformance = useMemo(() => {
+    const performanceMap = new Map(performanceData.map(p => p.modelDbId));
+    return entries.map(entry => ({
+      ...entry,
+      ...performanceMap.get(entry.modelDbId)
+    }));
+  }, [entries, performanceData])
+
   // Entry fields win on overlap: the routing snapshot also carries `enabled`
   // (and identity fields), which would otherwise clobber unsaved local toggles.
-  const rows: Row[] = filteredConfigured.map(e => ({ ...(scoreById.get(e.modelDbId) ?? {}), ...e }))
+  const rows: Row[] = filteredConfigured.map(e => ({
+    ...(scoreById.get(e.modelDbId) ?? {}),
+    ...entriesWithPerformance.find(p => p.modelDbId === e.modelDbId),
+    ...e
+  }))
   // The unfiltered set is what drag-reorder operates on. If we let drag
   // fire on a filtered slice, `setLocalEntries` would persist that *slice*
   // and silently drop the rows the user hadn't seen. So when a query is
   // active, drag is disabled at the row level (see `draggable` prop) and
   // `ordered` falls back to the unfiltered list.
   // Manual → the order you set (by priority). Bandit → ranked by live score.
+  // Real speed → sorted by actual token/sec from collected data
   const ordered = isManual
     ? [...rows].sort((a, b) => a.priority - b.priority)
-    : [...rows].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    : sortByRealSpeed
+      ? [...rows].sort((a, b) => (b.actualTokPerSec ?? 0) - (a.actualTokPerSec ?? 0))
+      : [...rows].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -771,7 +833,21 @@ export default function FallbackPage() {
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#22c55e' }} />Reliability</span>
         </th>
         <th className="py-2 pr-3 font-medium">
-          <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#3b82f6' }} />Speed</span>
+          <div className="flex items-center gap-1">
+            <span className="inline-flex items-center gap-1">
+              <span className="size-2 rounded-sm" style={{ background: '#3b82f6' }} />
+              <span>Speed</span>
+            </span>
+            <Button
+              variant={sortByRealSpeed ? "default" : "outline"}
+              size="sm"
+              onClick={() => setSortByRealSpeed(!sortByRealSpeed)}
+              className="h-6 text-xs"
+              title={sortByRealSpeed ? "Showing actual token/sec (click to show normalized score)" : "Show actual token/sec from collected data"}
+            >
+              {sortByRealSpeed ? "Real T/s" : "T/s"}
+            </Button>
+          </div>
         </th>
         <th className="py-2 pr-3 font-medium">
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#a855f7' }} />Intelligence</span>

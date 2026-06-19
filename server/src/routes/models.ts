@@ -13,7 +13,7 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     SELECT m.*, fc.priority, fc.enabled as fallback_enabled
     FROM models m
     LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
-    ORDER BY COALESCE(fc.priority, m.intelligence_rank) ASC
+    ORDER BY COALESCE(fc.priority, m.benchmark_score, m.intelligence_rank) ASC
   `).all() as any[];
 
   // Count keys per platform
@@ -32,6 +32,7 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     modelId: `${m.platform}/${m.model_id}`,
     displayName: m.display_name,
     intelligenceRank: m.intelligence_rank,
+    benchmarkScore: m.benchmark_score,
     speedRank: m.speed_rank,
     sizeLabel: m.size_label,
     rpmLimit: m.rpm_limit,
@@ -85,7 +86,7 @@ modelsRouter.post('/sync-all', async (_req: Request, res: Response) => {
   const added_by_provider: Record<string, string[]> = {};
 
   for (const t of targets) {
-    const result = await syncModelsFromProvider(t.baseUrl, t.slug);
+    const result = await syncModelsFromProvider(t.baseUrl, t.slug, true); // Auto-enable in bulk sync
     totalFetched += result.fetched;
     if (result.error) {
       errors.push({ slug: t.slug, error: result.error });

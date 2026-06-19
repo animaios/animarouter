@@ -356,7 +356,7 @@ The built-in provider list is a starting point, not a boundary. From the Keys pa
 - **Rate limits** (optional) — RPM, RPD, TPM, TPD caps enforced per-provider. A local Ollama that can handle 200 RPM gets different treatment than a free-tier cloud endpoint limited to 4.
 - **Max parallel requests** (optional) — concurrency ceiling so this provider never hogs all connection slots.
 
-Once a platform exists, its models are auto-discovered from the endpoint's `/v1/models` during creation. You can also re-run discovery at any time via `POST /api/custom-providers/:slug/sync-models`. Or use the **Add a model** form to register models manually:
+Once a platform exists, its models are automatically discovered from the endpoint's `/v1/models` during creation by default. However, discovered models are **disabled by default** and must be manually enabled. You can also re-run discovery at any time via `POST /api/custom-providers/:slug/sync-models`, and there's an option to auto-enable discovered models during creation.
 
 - **Model ID** and **Display name** — required.
 - **Context window**, **Supports tools**, **Supports vision** — basic flags.

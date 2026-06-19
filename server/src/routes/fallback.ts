@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
-import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, getGlobalRetryLimit, setGlobalRetryLimit } from '../services/router.js';
+import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, getGlobalRetryLimit, setGlobalRetryLimit, refreshStatsCache } from '../services/router.js';
 import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
 import { parseBudget } from '../lib/budget.js';
 
@@ -33,6 +33,77 @@ fallbackRouter.put('/retry-limit', (req: Request, res: Response) => {
 //                 intelligence + guardrails).
 fallbackRouter.get('/routing', (_req: Request, res: Response) => {
   res.json({ ...getRoutingScores(), customWeights: getCustomWeights() });
+});
+
+// Get real performance data with actual token/sec values and sorting
+// Returns models sorted by actual token/sec performance from real data
+fallbackRouter.get('/performance', (_req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    refreshStatsCache(db, true);
+
+    const rows = db.prepare(`
+      SELECT m.id, m.platform, m.model_id, m.display_name,
+             m.intelligence_rank, m.speed_rank, m.size_label,
+             m.monthly_token_budget, m.rpm_limit, m.rpd_limit,
+             m.tpm_limit, m.tpd_limit, m.context_window, m.max_output_tokens,
+             m.supports_vision, m.supports_tools, m.enabled,
+             fc.priority, fc.enabled as chain_enabled,
+             s.successes, s.failures, s.tokPerSec, s.avgTtfbMs, s.monthlyUsedTokens
+      FROM models m
+      LEFT JOIN fallback_config fc ON m.id = fc.model_db_id
+      LEFT JOIN model_stats_cache s ON m.platform = s.platform AND m.model_id = s.model_id
+      WHERE m.enabled = 1
+      ORDER BY s.tokPerSec DESC NULLS LAST, m.intelligence_rank ASC
+    `).all() as Array<{
+      id: number; platform: string; model_id: string; display_name: string;
+      intelligence_rank: number; speed_rank: number; size_label: string;
+      monthly_token_budget: string; rpm_limit: number | null; rpd_limit: number | null;
+      tpm_limit: number | null; tpd_limit: number | null; context_window: number | null;
+      max_output_tokens: number | null; supports_vision: boolean; supports_tools: boolean;
+      enabled: boolean; priority: number; chain_enabled: boolean;
+      successes: number; failures: number; tokPerSec: number; avgTtfbMs: number | null;
+      monthlyUsedTokens: number;
+    }>;
+
+    const performanceData = rows.map(row => ({
+      modelDbId: row.id,
+      platform: row.platform,
+      modelId: row.model_id,
+      displayName: row.display_name,
+      intelligenceRank: row.intelligence_rank,
+      speedRank: row.speed_rank,
+      sizeLabel: row.size_label,
+      monthlyTokenBudget: row.monthly_token_budget,
+      rpmLimit: row.rpm_limit,
+      rpdLimit: row.rpd_limit,
+      tpmLimit: row.tpm_limit,
+      tpdLimit: row.tpd_limit,
+      contextWindow: row.context_window,
+      maxOutputTokens: row.max_output_tokens,
+      supportsVision: row.supports_vision,
+      supportsTools: row.supports_tools,
+      enabled: row.enabled,
+      priority: row.priority,
+      chainEnabled: row.chain_enabled,
+      // Real performance metrics
+      actualTokPerSec: row.tokPerSec || 0,
+      actualAvgTtfbMs: row.avgTtfbMs,
+      totalRequests: row.successes + row.failures,
+      successRate: row.failures > 0 ? (row.successes / (row.successes + row.failures)) * 100 : 100,
+      monthlyUsedTokens: row.monthlyUsedTokens
+    }));
+
+    res.json(performanceData);
+  } catch (error) {
+    console.error('[Fallback] Performance endpoint error:', error);
+    res.status(500).json({
+      error: {
+        message: 'Failed to fetch performance data',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      }
+    });
+  }
 });
 
 const routingSchema = z.object({
@@ -163,18 +234,37 @@ const SORT_PRESETS: Record<string, string> = {
   intelligence: `${INTELLIGENCE_TIER} ASC, m.intelligence_rank ASC`,
   speed: 'm.speed_rank ASC',
   budget: "CASE m.monthly_token_budget WHEN '~120M' THEN 1 WHEN '~50-100M' THEN 2 WHEN '~30M' THEN 3 WHEN '~18-45M' THEN 4 WHEN '~18M' THEN 5 WHEN '~15M' THEN 6 WHEN '~12M' THEN 7 WHEN '~6M' THEN 8 WHEN '~5-10M' THEN 9 WHEN '~4M' THEN 10 ELSE 11 END ASC",
+  // Sort by actual real token/sec performance from collected data
+  real_speed: 's.tokPerSec DESC NULLS LAST, m.intelligence_rank ASC',
 };
 
 fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   const preset = String(req.params.preset);
   const orderBy = SORT_PRESETS[preset];
   if (!orderBy) {
-    res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, budget` } });
+    res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, budget, real_speed` } });
     return;
   }
 
   const db = getDb();
-  const models = db.prepare(`SELECT m.id FROM models m ORDER BY ${orderBy}`).all() as { id: number }[];
+
+  // For real_speed sorting, we need to join with performance data
+  let query;
+  if (preset === 'real_speed') {
+    // Refresh stats to ensure we have the latest performance data
+    refreshStatsCache(db, true);
+    query = `
+      SELECT m.id
+      FROM models m
+      LEFT JOIN model_stats_cache s ON m.platform = s.platform AND m.model_id = s.model_id
+      WHERE m.enabled = 1
+      ORDER BY ${orderBy}
+    `;
+  } else {
+    query = `SELECT m.id FROM models m ORDER BY ${orderBy}`;
+  }
+
+  const models = db.prepare(query).all() as { id: number }[];
 
   const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
   const reorder = db.transaction(() => {
