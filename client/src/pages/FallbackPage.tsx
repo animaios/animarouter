@@ -355,7 +355,6 @@ function EditModelModal({
   const [sizeLabel, setSizeLabel] = useState(model.sizeLabel)
   const [supportsTools, setSupportsTools] = useState(model.supportsTools)
   const [supportsVision, setSupportsVision] = useState(model.supportsVision)
-  const [monthlyTokenBudget, setMonthlyTokenBudget] = useState(model.monthlyTokenBudget)
   const [rpmLimit, setRpmLimit] = useState(model.rpmLimit ?? null)
   const [rpdLimit, setRpdLimit] = useState(model.rpdLimit ?? null)
   const [tpmLimit, setTpmLimit] = useState(model.tpmLimit ?? null)
@@ -372,7 +371,6 @@ function EditModelModal({
       sizeLabel,
       supportsTools,
       supportsVision,
-      monthlyTokenBudget,
       rpmLimit,
       rpdLimit,
       tpmLimit,
@@ -437,10 +435,7 @@ function EditModelModal({
               Supports vision
             </label>
           </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">Monthly token budget</Label>
-            <Input value={monthlyTokenBudget} onChange={e => setMonthlyTokenBudget(e.target.value)} className="font-mono text-xs" />
-          </div>
+          {/* monthly token budget field removed — system disabled */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label className="text-xs">RPM limit</Label>
@@ -484,7 +479,7 @@ function RowContent({
   onToggle: (modelDbId: number, enabled: boolean) => void
   onEdit: (row: Row) => void
 }) {
-  const guard = (row.headroom ?? 1) * (row.rateLimit ?? 1)
+  const guard = row.rateLimit ?? 1
   return (
     <>
       <td className="py-2 pl-3 pr-1 w-6 align-middle">
@@ -519,9 +514,10 @@ function RowContent({
           )}
         </div>
         <div className="text-[11px] text-muted-foreground/70 tabular-nums mt-0.5">
-          {row.monthlyTokenBudget} tok/mo
-          {row.rpmLimit ? ` · ${row.rpmLimit} rpm` : ''}
-          {row.rpdLimit ? ` · ${row.rpdLimit} rpd` : ''}
+          {row.rpmLimit ? `${row.rpmLimit} rpm` : ''}
+          {row.rpmLimit && row.rpdLimit ? ' · ' : ''}
+          {row.rpdLimit ? `${row.rpdLimit} rpd` : ''}
+          {!row.rpmLimit && !row.rpdLimit ? '—' : ''}
         </div>
       </td>
       <td className="py-2 pr-3 align-middle"><AxisBar value={row.reliability} color="#22c55e" /></td>
@@ -626,11 +622,6 @@ export default function FallbackPage() {
   }>>({
     queryKey: ['fallback', 'performance'],
     queryFn: () => apiFetch('/api/fallback/performance'),
-  })
-
-  const { data: tokenUsage } = useQuery<TokenUsageData>({
-    queryKey: ['fallback', 'token-usage'],
-    queryFn: () => apiFetch('/api/fallback/token-usage'),
   })
 
   const { data: routing } = useQuery<RoutingData>({
@@ -853,12 +844,12 @@ export default function FallbackPage() {
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#a855f7' }} />Intelligence</span>
         </th>
         <th className="py-2 pr-3 font-medium">
-          <Tooltip text="Always-on guardrails: free-quota headroom × live rate-limit penalty. Below 1.0 means the model is being held back.">
+          <Tooltip text="Live rate-limit penalty. Below 1.0 means the model is being demoted due to recent 429s.">
             <span className="underline decoration-dotted underline-offset-2 cursor-help">Guardrails</span>
           </Tooltip>
         </th>
         <th className="py-2 pr-3 font-medium text-right">
-          <Tooltip text="Final routing score = weighted average of the three axes, multiplied by the guardrails. Higher routes first.">
+          <Tooltip text="Final routing score = weighted average of reliability, speed and intelligence, multiplied by the rate-limit guardrail. Higher routes first.">
             <span className="underline decoration-dotted underline-offset-2 cursor-help">Score</span>
           </Tooltip>
         </th>
@@ -885,8 +876,7 @@ export default function FallbackPage() {
       />
 
       <div className="space-y-6">
-        {/* Monthly token budget — moved to the top */}
-        {tokenUsage && tokenUsage.totalBudget > 0 && <TokenUsageBar data={tokenUsage} />}
+        {/* token budget bar removed — system disabled */}
 
         {/* Strategy selector */}
         <section className="rounded-3xl border bg-card p-5">

@@ -11,10 +11,10 @@
 // Two always-on GUARDRAILS then multiply the base — they never reorder good
 // models against each other, they only pull a model down as it gets dangerous:
 //
-//   effective = base × headroomFactor × rateLimitFactor
+//   effective = base × rateLimitFactor
 //
-//   headroomFactor  → protects a model that is nearly out of its free quota
 //   rateLimitFactor → demotes a model that is currently throwing 429s
+//   (headroomFactor was removed — token budget system disabled)
 //
 // Reliability is drawn from a Beta posterior (Thompson sampling) so exploration
 // is automatic and proportional to uncertainty — a model is never permanently
@@ -193,19 +193,15 @@ export function speedCompositeFromRank(speedRank: number, sizeLabel: string): nu
   return 1000 - speedRank + penalty;
 }
 
-// ── Guardrail: free-quota headroom ──────────────────────────────────────────
-// Multiplier that stays at 1 while a model has comfortable monthly headroom and
-// ramps down to a floor as it approaches its free-tier cap, so we stop steering
-// traffic at a model we're about to burn out. Unknown budget (0) → no opinion.
+// ── Guardrail: free-quota headroom (DISABLED) ──────────────────────────────
+// Token budget system removed — headroom factor is always 1 (no influence).
+// Kept as a stub so callers don't need to change.
 export const HEADROOM_FLOOR = 0.1;
-export const HEADROOM_RAMP_START = 0.2; // start protecting at 20% remaining
+export const HEADROOM_RAMP_START = 0.2;
 
-export function headroomFactor(usedTokens: number, budgetTokens: number): number {
-  if (!budgetTokens || budgetTokens <= 0) return 1; // unknown budget → no opinion
-  const remaining = Math.max(0, 1 - usedTokens / budgetTokens);
-  if (remaining >= HEADROOM_RAMP_START) return 1;
-  // Linear from (0 remaining → floor) to (RAMP_START remaining → 1).
-  return HEADROOM_FLOOR + (1 - HEADROOM_FLOOR) * (remaining / HEADROOM_RAMP_START);
+export function headroomFactor(_usedTokens: number, _budgetTokens: number): number {
+  // budget system removed — no headroom influence
+  return 1;
 }
 
 // ── Guardrail: live rate-limit penalty ──────────────────────────────────────
@@ -252,14 +248,15 @@ export interface ScoreInputs {
   reliability: number;   // [0,1] — sampled (routing) or expected (display)
   speed: number;         // [0,1]
   intelligence: number;  // [0,1]
-  headroom: number;      // [floor,1] multiplier
+  headroom: number;      // [floor,1] multiplier (disabled — always 1)
   rateLimit: number;     // [floor,1] multiplier
 }
 
 /**
- * Convex base (∈[0,1]) × the two guardrail multipliers. The weights are assumed
- * to sum to 1; if a caller passes a non-normalized vector we renormalize so the
- * base never escapes [0,1].
+ * Convex base (∈[0,1]) × rate-limit guardrail. Headroom multiplier is no
+ * longer applied (token budget system removed). The weights are assumed
+ * to sum to 1; if a caller passes a non-normalized vector we renormalize so
+ * the base never escapes [0,1].
  */
 export function combineScore(inputs: ScoreInputs, weights: RoutingWeights): number {
   const wSum = weights.reliability + weights.speed + weights.intelligence || 1;
@@ -267,5 +264,6 @@ export function combineScore(inputs: ScoreInputs, weights: RoutingWeights): numb
     (weights.reliability * inputs.reliability +
       weights.speed * inputs.speed +
       weights.intelligence * inputs.intelligence) / wSum;
-  return base * inputs.headroom * inputs.rateLimit;
+  // budget system removed — headroom no longer applied
+  return base * inputs.rateLimit;
 }

@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, getGlobalRetryLimit, setGlobalRetryLimit, refreshStatsCache } from '../services/router.js';
 import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
-import { parseBudget } from '../lib/budget.js';
 
 export const fallbackRouter = Router();
 
@@ -233,7 +232,7 @@ const INTELLIGENCE_TIER =
 const SORT_PRESETS: Record<string, string> = {
   intelligence: `${INTELLIGENCE_TIER} ASC, m.intelligence_rank ASC`,
   speed: 'm.speed_rank ASC',
-  budget: "CASE m.monthly_token_budget WHEN '~120M' THEN 1 WHEN '~50-100M' THEN 2 WHEN '~30M' THEN 3 WHEN '~18-45M' THEN 4 WHEN '~18M' THEN 5 WHEN '~15M' THEN 6 WHEN '~12M' THEN 7 WHEN '~6M' THEN 8 WHEN '~5-10M' THEN 9 WHEN '~4M' THEN 10 ELSE 11 END ASC",
+  // budget sort removed — token system disabled
   // Sort by actual real token/sec performance from collected data
   real_speed: 's.tokPerSec DESC NULLS LAST, m.intelligence_rank ASC',
 };
@@ -242,7 +241,7 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   const preset = String(req.params.preset);
   const orderBy = SORT_PRESETS[preset];
   if (!orderBy) {
-    res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, budget, real_speed` } });
+    res.status(400).json({ error: { message: `Unknown preset: ${preset}. Use: intelligence, speed, real_speed` } });
     return;
   }
 
@@ -277,51 +276,12 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   res.json({ success: true, preset });
 });
 
-// Token usage per model for the stacked bar
+// Token usage per model for the stacked bar — DISABLED (token budget system removed).
+// Returns zero budget so the UI hides the bar. Kept as a stub for API compat.
 fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
-  const db = getDb();
-
-  // Get platforms that have enabled keys
-  const platforms = db.prepare(`
-    SELECT DISTINCT ak.platform
-    FROM api_keys ak
-    WHERE ak.enabled = 1
-  `).all() as { platform: string }[];
-  const platformSet = new Set(platforms.map(p => p.platform));
-
-  // Get monthly budget per model, ordered by fallback priority
-  const models = db.prepare(`
-    SELECT m.platform, m.model_id, m.display_name, m.monthly_token_budget,
-           fc.priority
-    FROM models m
-    JOIN fallback_config fc ON fc.model_db_id = m.id
-    WHERE m.enabled = 1
-    ORDER BY fc.priority ASC
-  `).all() as { platform: string; model_id: string; display_name: string; monthly_token_budget: string; priority: number }[];
-
-  // Build per-model breakdown (only platforms with keys)
-  const modelBudgets = models
-    .filter(m => platformSet.has(m.platform))
-    .map(m => ({
-      displayName: m.display_name,
-      platform: m.platform,
-      budget: parseBudget(m.monthly_token_budget),
-    }));
-
-  const totalBudget = modelBudgets.reduce((s, m) => s + m.budget, 0);
-
-  // Tokens used this month
-  const usage = db.prepare(`
-    SELECT
-      COALESCE(SUM(input_tokens + output_tokens), 0) as total_used
-    FROM requests
-    WHERE created_at >= datetime('now', 'start of month')
-      AND request_type = 'chat'
-  `).get() as { total_used: number };
-
   res.json({
-    totalBudget,
-    totalUsed: usage.total_used,
-    models: modelBudgets,
+    totalBudget: 0,
+    totalUsed: 0,
+    models: [],
   });
 });

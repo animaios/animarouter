@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   BANDIT_PRESETS, combineScore, speedScore, intelligenceScore,
   headroomFactor, rateLimitFactor, sampleBeta, reliabilityPosterior,
-  expectedReliability, SPEED_PRIOR, HEADROOM_FLOOR,
+  expectedReliability, SPEED_PRIOR,
 } from '../../services/scoring.js';
 
 describe('scoring: reliability posterior', () => {
@@ -59,14 +59,9 @@ describe('scoring: intelligence axis', () => {
 });
 
 describe('scoring: guardrails', () => {
-  it('headroom is 1 with plenty left and ramps to the floor when exhausted', () => {
+  it('headroom is always 1 (budget system removed)', () => {
     expect(headroomFactor(0, 1_000_000)).toBe(1);
-    expect(headroomFactor(500_000, 1_000_000)).toBe(1);   // 50% left → no opinion
-    expect(headroomFactor(1_000_000, 1_000_000)).toBeCloseTo(HEADROOM_FLOOR, 5); // fully used
-    expect(headroomFactor(900_000, 1_000_000)).toBeLessThan(1); // 10% left → protecting
-  });
-
-  it('unknown budget yields no opinion (factor 1)', () => {
+    expect(headroomFactor(1_000_000, 1_000_000)).toBe(1);
     expect(headroomFactor(123, 0)).toBe(1);
   });
 

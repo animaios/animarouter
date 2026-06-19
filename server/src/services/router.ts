@@ -7,10 +7,9 @@ import { isExhausted, getExhaustedKeysForModel } from './key-exhaustion.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
-  speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, headroomFactor, rateLimitFactor, combineScore,
+  speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, rateLimitFactor, combineScore,
   MAX_PENALTY,
 } from './scoring.js';
-import { parseBudget } from '../lib/budget.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Database } from 'better-sqlite3';
 
@@ -473,8 +472,8 @@ function scoreChainEntry(
     intelligenceComposite(entry.size_label, entry.intelligence_rank, entry.benchmark_score), intelMin, intelMax,
   );
 
-  const budget = parseBudget(entry.monthly_token_budget);
-  const headroom = headroomFactor(stats?.monthlyUsedTokens ?? 0, budget);
+  // budget system removed — headroom is always 1
+  const headroom = 1;
   const rl = rateLimitFactor(getPenalty(entry.model_db_id));
 
   const score = combineScore({ reliability, speed, intelligence, headroom, rateLimit: rl }, weights);

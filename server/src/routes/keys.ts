@@ -187,7 +187,21 @@ keysRouter.patch('/platform/:platform', (req: Request, res: Response) => {
   const db = getDb();
   const result = db.prepare('UPDATE api_keys SET enabled = ? WHERE platform = ?').run(enabled ? 1 : 0, platform);
 
-  res.json({ success: true, enabled, updatedKeys: result.changes });
+  // OpenRouter / OpenCode enforcement: when toggling either ON, disable any
+  // non-free models so only free-tier models remain routable.
+  // SQL LIKE is case-insensitive in SQLite, so '%free%' matches Free/FREE/etc.
+  let disabledNonFree = 0;
+  if ((platform === 'openrouter' || platform === 'opencode') && enabled) {
+    const disableResult = db.prepare(`
+      UPDATE models SET enabled = 0
+      WHERE platform = ?
+        AND enabled = 1
+        AND model_id NOT LIKE '%free%'
+    `).run(platform);
+    disabledNonFree = disableResult.changes;
+  }
+
+  res.json({ success: true, enabled, updatedKeys: result.changes, disabledNonFreeModels: disabledNonFree });
 });
 
 // Update key (toggle enable/disable or edit label)

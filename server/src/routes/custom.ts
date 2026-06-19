@@ -163,16 +163,23 @@ export async function syncModelsFromProvider(baseUrl: string, slug: string, auto
         // Use the model id as display name (user can rename later).
         // Defaults match MODEL_DEFAULTS: middle ranks, no rate limits,
         // tools=true, vision=false, unknown context window.
+        // OpenRouter / OpenCode enforcement: non-free models are always disabled
+        // regardless of the autoEnableModels setting — only free-tier models
+        // may be active. Case-insensitive match (free / Free / FREE all count).
+        const isFreeOnlyProvider = slug === 'openrouter' || slug === 'opencode';
+        const isNonFree = isFreeOnlyProvider && !modelId.toLowerCase().includes('free');
+        const enabledFlag = isNonFree ? 0 : (autoEnableModels ? 1 : 0);
+
         const displayName = modelId;
         const result = insertModel.run(
           slug, modelId, displayName,
           MODEL_DEFAULTS.intelligenceRank, MODEL_DEFAULTS.speedRank, MODEL_DEFAULTS.sizeLabel,
           MODEL_DEFAULTS.rpmLimit, MODEL_DEFAULTS.rpdLimit, MODEL_DEFAULTS.tpmLimit, MODEL_DEFAULTS.tpdLimit,
           MODEL_DEFAULTS.monthlyTokenBudget, null, // context_window = unknown
-          autoEnableModels ? 1 : 0, // enabled/disabled based on user choice
+          enabledFlag,
           MODEL_DEFAULTS.supportsVision ? 1 : 0, MODEL_DEFAULTS.supportsTools ? 1 : 0,
         );
-        insertFb.run(Number(result.lastInsertRowid), maxPriority + added.length + 1, autoEnableModels ? 1 : 0);
+        insertFb.run(Number(result.lastInsertRowid), maxPriority + added.length + 1, enabledFlag);
         added.push(modelId);
       }
     });

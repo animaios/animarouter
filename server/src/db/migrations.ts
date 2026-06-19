@@ -7,7 +7,7 @@ import { fetchLiveBenchmarkScores } from './benchmark-scores.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
 // additions, indexes, FKs) that use "IF NOT EXISTS" should stay unconditional.
-const CURRENT_DATA_VERSION = 1;
+const CURRENT_DATA_VERSION = 2;
 
 export function migrateDbSchema(db: Database.Database) {
   // Schema-level changes run every boot — they're idempotent (IF NOT EXISTS).
@@ -53,6 +53,9 @@ export function migrateDbSchema(db: Database.Database) {
       migrateModelsV25ZenDeadPromos(db);
       migrateModelsV26MaxOutputTokens(db);
       migrateCustomProvidersV27UserProviders(db);
+      // V2 data migration: enforce free-only for OpenRouter and OpenCode.
+      // Runs exactly once so user re-enables persist across reboots.
+      migrateModelsFreeOnlyEnforcement(db);
       db.pragma(`user_version = ${CURRENT_DATA_VERSION}`);
     });
     apply();
@@ -64,6 +67,9 @@ export function migrateDbSchema(db: Database.Database) {
   migrateQuirksV1(db);
   migrateModelsV32CommandCode(db);
   migrateModelsV33BenchmarkScore(db);
+
+  // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
+  // migration (v2) — user re-enables persist across reboots.
 
   // Live benchmark fetch (runs every boot with internal caching)
   try {
@@ -1998,6 +2004,22 @@ function migrateModelsV33BenchmarkScore(db: Database.Database) {
     db.prepare('ALTER TABLE models ADD COLUMN benchmark_score REAL').run();
   }
   console.log('✅ Added benchmark_score column to models');
+}
+
+// ── V34 → V2 data migration: free-only enforcement (2026-06) ────────────
+// Runs exactly once (guarded by user_version). Disables any OpenRouter or
+// OpenCode model whose model_id does NOT contain "free". After this runs,
+// user re-enables persist — the enforcement never re-runs on boot.
+function migrateModelsFreeOnlyEnforcement(db: Database.Database) {
+  const result = db.prepare(`
+    UPDATE models SET enabled = 0
+    WHERE platform IN ('openrouter', 'opencode')
+      AND enabled = 1
+      AND model_id NOT LIKE '%free%'
+  `).run();
+  if (result.changes > 0) {
+    console.log(`[V2] Disabled ${result.changes} non-free OpenRouter/OpenCode model(s)`);
+  }
 }
 
 // V27: user-requested custom providers and their models (Bluesminds,
