@@ -19,10 +19,21 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --include=dev
 
-      - name: Run tests
-        run: npm test
+      - name: Run tests with coverage
+        run: npm run test:coverage -w server
+
+      - name: Typecheck client
+        run: npm run typecheck -w client
 
       - name: Build workspaces
         run: npm run build
+
+      - name: Upload coverage to DeepSource
+        if: github.event_name == 'push'
+        uses: deepsourcelabs/action@master
+        with:
+          key: ts
+          coverage-file: server/coverage/cobertura-coverage.xml
+          dsn: ${{ secrets.DEEPSOURCE_DSN }}

@@ -1,0 +1,23 @@
+version = 1
+
+[[analyzers]]
+name = "javascript"
+
+  [analyzers.meta]
+  dialect = "typescript"
+  environment = ["nodejs", "browser"]
+  dependency_file_paths = [
+    "package.json",
+    "server/package.json",
+    "client/package.json",
+    "shared/package.json",
+  ]
+
+[[analyzers]]
+name = "test-coverage"
+
+  [analyzers.meta]
+  coverage_threshold = 60
+
+[[transformers]]
+name = "prettier"
