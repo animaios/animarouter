@@ -20,6 +20,7 @@ export type LiveEvent =
   | { type: 'routing.provider_fastfail'; id: string; provider: string; failedModelCount: number; at: number }
   | { type: 'heartbeat.ping'; provider: string; model: string; success: boolean; latencyMs: number; error?: string; at: number }
   | { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; at: number }
+  | { type: 'degradation.boost'; modelDbId: number; oldBoost: number; newBoost: number; at: number }
   | { type: 'stream.chunk'; id: string; text: string; at: number };
 
 /** Exhaustive-check helper: assign a `LiveEvent` to this and the compiler

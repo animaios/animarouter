@@ -16,13 +16,13 @@ function shutdownFlushDegradation() {
     if (dirty.length > 0) {
       const upsert = getDb().prepare(`
         INSERT OR REPLACE INTO model_degradation
-        (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms, boost)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const { modelDbId, state } of dirty) {
         upsert.run(modelDbId, state.penalty, state.tier,
           state.consecutiveHits, state.consecutiveMajorHits,
-          state.lastHitAt, state.halfLifeMs);
+          state.lastHitAt, state.halfLifeMs, state.boost);
       }
     }
   } catch (e) {
@@ -57,7 +57,8 @@ async function main() {
   for (const row of rows) {
     const elapsed = now - (row.last_hit_at ?? now);
     const decayedPenalty = applyDecay(row.penalty, elapsed, row.half_life_ms);
-    if (decayedPenalty >= 0.01) {
+    const rowBoost = row.boost ?? 1.0;
+    if (decayedPenalty >= 0.01 || rowBoost !== 1.0) {
       loadState(row.model_db_id, {
         penalty: decayedPenalty,
         tier: row.tier,
@@ -66,6 +67,7 @@ async function main() {
         lastHitAt: now,
         halfLifeMs: row.half_life_ms,
         dirty: false,
+        boost: rowBoost,
       });
     } else {
       getDb().prepare('DELETE FROM model_degradation WHERE model_db_id = ?').run(row.model_db_id);
@@ -80,13 +82,13 @@ async function main() {
       if (dirty.length > 0) {
         const upsert = getDb().prepare(`
           INSERT OR REPLACE INTO model_degradation
-          (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms, boost)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `);
         for (const { modelDbId, state } of dirty) {
           upsert.run(modelDbId, state.penalty, state.tier,
             state.consecutiveHits, state.consecutiveMajorHits,
-            state.lastHitAt, state.halfLifeMs);
+            state.lastHitAt, state.halfLifeMs, state.boost);
         }
       }
       const evicted = evictGhostStates();

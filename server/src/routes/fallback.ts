@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, refreshStatsCache } from '../services/router.js';
-import { getAllStatesView, getDisplayTier } from '../services/degradation.js';
+import { getAllStatesView, getDisplayTier, getBoost, setBoost, resetBoost } from '../services/degradation.js';
 import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
 
 export const fallbackRouter = Router();
@@ -258,7 +258,7 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
 
 // ── Degradation dashboard API ─────────────────────────────────────────────────
 // GET /degradation → per-model penalty state, display tier, consecutive hits,
-// estimated recovery time. Uses decayed view (not raw stored penalties).
+// estimated recovery time, and boost multiplier. Uses decayed view (not raw stored penalties).
 fallbackRouter.get('/degradation', (_req: Request, res: Response) => {
   const db = getDb();
   const states = getAllStatesView();
@@ -281,7 +281,75 @@ fallbackRouter.get('/degradation', (_req: Request, res: Response) => {
         ? state.halfLifeMs * Math.log2(state.penalty)
         : null,
       lastHitAt: state.lastHitAt,
+      boost: state.boost,
     });
   }
   res.json(result);
+});
+
+// ── Boost multiplier API ─────────────────────────────────────────────────────
+// GET /boost → all models with a non-default boost (boost != 1.0)
+fallbackRouter.get('/boost', (_req: Request, res: Response) => {
+  const db = getDb();
+  const rows = db.prepare('SELECT model_db_id, boost FROM model_degradation WHERE boost != 1.0').all() as any[];
+  res.json(rows.map((r: any) => ({ modelDbId: r.model_db_id, boost: r.boost })));
+});
+
+const boostSchema = z.object({
+  boost: z.number().finite().positive(),
+});
+
+// PUT /boost/:modelDbId → set boost multiplier for a model, clamped to [boostMin, boostMax]
+fallbackRouter.put('/boost/:modelDbId', (req: Request, res: Response) => {
+  const rawId = req.params.modelDbId;
+  const modelDbId = parseInt(Array.isArray(rawId) ? rawId[0] : rawId, 10);
+  if (isNaN(modelDbId)) {
+    res.status(400).json({ error: { message: 'modelDbId must be a number' } });
+    return;
+  }
+
+  const parsed = boostSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  // Set boost (clamped internally) and persist immediately
+  setBoost(modelDbId, parsed.data.boost);
+
+  // Persist to DB immediately for API responsiveness
+  const db = getDb();
+  const currentBoost = getBoost(modelDbId);
+  db.prepare(`
+    INSERT INTO model_degradation (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms, boost)
+    VALUES (?, 0, 'minor', 0, 0, 0, 120000, ?)
+    ON CONFLICT(model_db_id) DO UPDATE SET boost = excluded.boost
+  `).run(modelDbId, currentBoost);
+
+  res.json({ modelDbId, boost: currentBoost });
+});
+
+// DELETE /boost/:modelDbId → reset boost to 1.0 (default)
+fallbackRouter.delete('/boost/:modelDbId', (req: Request, res: Response) => {
+  const rawId = req.params.modelDbId;
+  const modelDbId = parseInt(Array.isArray(rawId) ? rawId[0] : rawId, 10);
+  if (isNaN(modelDbId)) {
+    res.status(400).json({ error: { message: 'modelDbId must be a number' } });
+    return;
+  }
+
+  resetBoost(modelDbId);
+
+  // Update DB: set boost = 1.0, or delete row if penalty is also 0
+  const db = getDb();
+  const row = db.prepare('SELECT penalty FROM model_degradation WHERE model_db_id = ?').get(modelDbId) as any;
+  if (row) {
+    if (row.penalty <= 0) {
+      db.prepare('DELETE FROM model_degradation WHERE model_db_id = ?').run(modelDbId);
+    } else {
+      db.prepare('UPDATE model_degradation SET boost = 1.0 WHERE model_db_id = ?').run(modelDbId);
+    }
+  }
+
+  res.json({ modelDbId, boost: 1.0 });
 });

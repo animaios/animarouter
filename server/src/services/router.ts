@@ -10,7 +10,7 @@ import {
   speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, combineScore,
 } from './scoring.js';
 import {
-  getDegradationFactor, getPenalty, getAllStatesView, initDegradation,
+  getDegradationFactor, getPenalty, getAllStatesView, initDegradation, getBoost,
 } from './degradation.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Database } from 'better-sqlite3';
@@ -351,6 +351,7 @@ function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benc
 interface ScoredEntry {
   axes: { reliability: number; speed: number; intelligence: number };
   degradationFactor: number;
+  boost: number;
   score: number;
 }
 
@@ -399,6 +400,7 @@ function scoreChainEntry(
 
   // budget system removed — headroom is no longer a factor
   const degradationFactor = getDegradationFactor(entry.model_db_id);
+  const boost = getBoost(entry.model_db_id);
 
   // Phase 1: log NIM metrics if available, but do NOT blend into routing scores
   if (entry.nim_throughput_tps != null || entry.nim_avg_response_ms != null || entry.nim_uptime_pct != null) {
@@ -411,8 +413,9 @@ function scoreChainEntry(
     );
   }
 
-  const score = combineScore({ reliability, speed, intelligence, degradationFactor }, weights);
-  return { axes: { reliability, speed, intelligence }, degradationFactor, score };
+  const baseScore = combineScore({ reliability, speed, intelligence, degradationFactor }, weights);
+  const score = baseScore * boost;
+  return { axes: { reliability, speed, intelligence }, degradationFactor, boost, score };
 }
 
 /**
@@ -693,6 +696,7 @@ export interface RoutingScore {
   speed: number;
   intelligence: number;
   degradationFactor: number;
+  boost: number;
   score: number;
   totalRequests: number; // decay-weighted observations
 }
@@ -739,6 +743,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       speed: scored.axes.speed,
       intelligence: scored.axes.intelligence,
       degradationFactor: scored.degradationFactor,
+      boost: scored.boost,
       score: scored.score,
       totalRequests: Math.round((stats?.successes ?? 0) + (stats?.failures ?? 0)),
     };

@@ -248,6 +248,7 @@ function createTables(db: Database.Database) {
   ensureBenchmarkUnificationColumns(db);
   ensureBenchmarkSourceWeightsTable(db);
   ensureDegradationTable(db);
+  ensureDegradationBoostColumn(db);
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
@@ -323,9 +324,20 @@ function ensureDegradationTable(db: Database.Database) {
       consecutive_major INTEGER NOT NULL DEFAULT 0,
       last_hit_at   INTEGER,
       half_life_ms  INTEGER NOT NULL DEFAULT 120000,
+      boost         REAL    NOT NULL DEFAULT 1.0,
       FOREIGN KEY (model_db_id) REFERENCES models(id) ON DELETE CASCADE
     );
   `);
+}
+
+// ── Boost multiplier column ────────────────────────────────────────────────────
+// Per-model boost multiplier for the dynamic-degradation-boost feature.
+// Default 1.0 (neutral). Idempotent: skips if column already exists.
+function ensureDegradationBoostColumn(db: Database.Database) {
+  const columns = db.prepare('PRAGMA table_info(model_degradation)').all() as { name: string }[];
+  if (!columns.some(col => col.name === 'boost')) {
+    db.prepare('ALTER TABLE model_degradation ADD COLUMN boost REAL NOT NULL DEFAULT 1.0').run();
+  }
 }
 
 // `requested_model` is the model id the CLIENT pinned in the request body.

@@ -25,6 +25,8 @@ interface DegradationConfig {
   successRecovery: number;
   dampStrength: number;
   maxPenalty: number;
+  boostMin: number;
+  boostMax: number;
 }
 
 // ── Per-model state ────────────────────────────────────────────────────────────
@@ -50,6 +52,9 @@ export interface DegradationState {
 
   /** Dirty flag — true if state changed since last DB flush. */
   dirty: boolean;
+
+  /** Boost multiplier (default 1.0). Applied AFTER degradation factor. */
+  boost: number;
 }
 
 // ── Module state ───────────────────────────────────────────────────────────────
@@ -113,6 +118,8 @@ export function initDegradation(configOverrides?: Partial<DegradationConfig>): v
     successRecovery: envFloat('DEGRADE_SUCCESS_RECOVERY', 0.3),
     dampStrength: envFloat('DEGRADE_DAMP_STRENGTH', 50),
     maxPenalty: envFloat('DEGRADE_MAX_PENALTY', 100),
+    boostMin: envFloat('DEGRADE_BOOST_MIN', 0.1),
+    boostMax: envFloat('DEGRADE_BOOST_MAX', 100.0),
   };
 
   if (configOverrides) {
@@ -158,6 +165,7 @@ function getOrCreateState(modelDbId: number): DegradationState {
       lastHitAt: Date.now(),
       halfLifeMs: cfg.minor.halfLifeMs,
       dirty: false,
+      boost: 1.0,
     };
     degradationStates.set(modelDbId, state);
   }
@@ -393,6 +401,66 @@ export function getAllStatesView(): Map<number, DegradationState & { displayTier
     });
   }
   return result;
+}
+
+// ── Boost multiplier ────────────────────────────────────────────────────────────
+
+/**
+ * Read-only query: returns the boost multiplier for a model.
+ * Default is 1.0 (neutral) when no state exists.
+ */
+export function getBoost(modelDbId: number): number {
+  const state = degradationStates.get(modelDbId);
+  if (!state) return 1.0;
+  return state.boost;
+}
+
+/**
+ * Set the boost multiplier for a model. Clamps to [boostMin, boostMax].
+ * Creates state if none exists (penalty=0). Emits a degradation.boost event.
+ */
+export function setBoost(modelDbId: number, value: number): void {
+  const cfg = getConfig();
+  const clamped = Math.max(cfg.boostMin, Math.min(cfg.boostMax, value));
+
+  const state = getOrCreateState(modelDbId);
+  const oldBoost = state.boost;
+  state.boost = clamped;
+  state.dirty = true;
+
+  publish({
+    type: 'degradation.boost',
+    modelDbId,
+    oldBoost,
+    newBoost: clamped,
+    at: Date.now(),
+  } as any);
+}
+
+/**
+ * Reset the boost multiplier to 1.0 (default). Emits a degradation.boost event.
+ * Cleans up state if penalty is also 0.
+ */
+export function resetBoost(modelDbId: number): void {
+  const state = degradationStates.get(modelDbId);
+  if (!state) return;
+
+  const oldBoost = state.boost;
+  state.boost = 1.0;
+  state.dirty = true;
+
+  publish({
+    type: 'degradation.boost',
+    modelDbId,
+    oldBoost,
+    newBoost: 1.0,
+    at: Date.now(),
+  } as any);
+
+  // If penalty is also 0, clean up the state to prevent Map bloat
+  if (state.penalty <= 0) {
+    degradationStates.delete(modelDbId);
+  }
 }
 
 // ── State hydration ────────────────────────────────────────────────────────────

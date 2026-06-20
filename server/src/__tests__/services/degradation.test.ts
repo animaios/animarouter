@@ -12,15 +12,22 @@ import {
   loadState,
   flushDirtyStates,
   evictGhostStates,
+  getBoost,
+  setBoost,
+  resetBoost,
 } from '../../services/degradation.js';
+import * as events from '../../services/events.js';
 
 vi.mock('../../services/events.js', () => ({
   publish: vi.fn(),
 }));
 
+const publishMock = vi.mocked(events.publish);
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2024, 1, 1));
+  publishMock.mockClear();
   initDegradation();
 });
 
@@ -211,6 +218,7 @@ describe('recordSuccess', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 60 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     recordSuccess(1);
     // decay elapsed=0 → penalty stays 100. recovery = floor(100*0.3) = 30. 100-30=70
@@ -226,6 +234,7 @@ describe('recordSuccess', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 2 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     recordSuccess(1);
     // floor(3*0.3) = floor(0.9) = 0, max(1,0) = 1, 3-1=2
@@ -271,6 +280,7 @@ describe('recordSuccess', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 60 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     recordSuccess(1);
     // penalty < 1 → snap to 0, half-life resets to minor
@@ -296,6 +306,7 @@ describe('getDegradationFactor', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 2 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     expect(getDegradationFactor(1)).toBeCloseTo(0.889, 2);
   });
@@ -309,6 +320,7 @@ describe('getDegradationFactor', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 2 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     expect(getDegradationFactor(1)).toBeCloseTo(0.667, 2);
   });
@@ -322,6 +334,7 @@ describe('getDegradationFactor', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 15 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     expect(getDegradationFactor(1)).toBeCloseTo(0.242, 2);
   });
@@ -335,6 +348,7 @@ describe('getDegradationFactor', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 60 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     expect(getDegradationFactor(1)).toBeCloseTo(0.020, 3);
   });
@@ -351,6 +365,7 @@ describe('getDegradationFactor', () => {
         lastHitAt: Date.now(),
         halfLifeMs: 2 * 60 * 1000,
         dirty: false,
+        boost: 1.0,
       });
       return getDegradationFactor(p);
     });
@@ -369,6 +384,7 @@ describe('getDegradationFactor', () => {
         lastHitAt: Date.now(),
         halfLifeMs: 2 * 60 * 1000,
         dirty: false,
+        boost: 1.0,
       });
       const f = getDegradationFactor(p + 200);
       expect(f).toBeGreaterThanOrEqual(0);
@@ -396,6 +412,7 @@ describe('Bounds + Dirty Flag', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 2 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     recordSuccess(1);
     expect(getPenalty(1)).toBeGreaterThanOrEqual(0);
@@ -447,6 +464,7 @@ describe('Bounds + Dirty Flag', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 2 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     const evicted = evictGhostStates();
     expect(evicted).toContain(1);
@@ -483,6 +501,7 @@ describe('API Shape', () => {
       lastHitAt: Date.now(),
       halfLifeMs: 15 * 60 * 1000,
       dirty: false,
+      boost: 1.0,
     });
     // Immediately: no decay
     expect(getPenalty(42)).toBeCloseTo(15, 1);
@@ -513,5 +532,152 @@ describe('getDisplayTier', () => {
   it('returns critical for penalty > 30', () => {
     expect(getDisplayTier(31)).toBe('critical');
     expect(getDisplayTier(100)).toBe('critical');
+  });
+});
+
+// ── Boost Multiplier ──────────────────────────────────────────────────────────
+
+describe('getBoost', () => {
+  it('returns 1.0 for a modelDbId with no state', () => {
+    expect(getBoost(999)).toBe(1.0);
+  });
+
+  it('returns the stored boost value after setBoost', () => {
+    setBoost(1, 5.0);
+    expect(getBoost(1)).toBe(5.0);
+  });
+});
+
+describe('setBoost', () => {
+  it('sets boost within bounds, sets dirty = true', () => {
+    setBoost(1, 2.5);
+    expect(getBoost(1)).toBe(2.5);
+    const raw = getAllStatesRaw();
+    expect(raw.get(1)!.dirty).toBe(true);
+  });
+
+  it('clamps below boostMin to boostMin (default 0.1)', () => {
+    setBoost(1, 0.01);
+    expect(getBoost(1)).toBeCloseTo(0.1, 5);
+  });
+
+  it('clamps above boostMax to boostMax (default 100.0)', () => {
+    setBoost(1, 500);
+    expect(getBoost(1)).toBeCloseTo(100.0, 5);
+  });
+
+  it('creates a new state for a model with no prior penalty', () => {
+    setBoost(42, 3.0);
+    expect(getBoost(42)).toBe(3.0);
+    const raw = getAllStatesRaw();
+    expect(raw.get(42)!.penalty).toBe(0);
+  });
+
+  it('emits degradation.boost event with oldBoost and newBoost', () => {
+    setBoost(1, 2.0);
+    expect(publishMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'degradation.boost',
+        modelDbId: 1,
+        oldBoost: 1.0,
+        newBoost: 2.0,
+      })
+    );
+  });
+
+  it('does NOT affect penalty, tier, or half-life', () => {
+    recordFailure(1, 'major'); // penalty ~3.0
+    const rawBefore = getAllStatesRaw();
+    const penaltyBefore = rawBefore.get(1)!.penalty;
+    const tierBefore = rawBefore.get(1)!.tier;
+    const halfLifeBefore = rawBefore.get(1)!.halfLifeMs;
+
+    setBoost(1, 10.0);
+
+    const rawAfter = getAllStatesRaw();
+    expect(rawAfter.get(1)!.penalty).toBeCloseTo(penaltyBefore, 2);
+    expect(rawAfter.get(1)!.tier).toBe(tierBefore);
+    expect(rawAfter.get(1)!.halfLifeMs).toBe(halfLifeBefore);
+  });
+});
+
+describe('resetBoost', () => {
+  it('resets boost to 1.0, sets dirty = true', () => {
+    setBoost(1, 5.0);
+    resetBoost(1);
+    // If penalty is 0, state is deleted; getBoost returns 1.0 default
+    expect(getBoost(1)).toBe(1.0);
+  });
+
+  it('emits degradation.boost event', () => {
+    setBoost(1, 5.0);
+    publishMock.mockClear();
+    resetBoost(1);
+    expect(publishMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'degradation.boost',
+        modelDbId: 1,
+        oldBoost: 5.0,
+        newBoost: 1.0,
+      })
+    );
+  });
+
+  it('deletes the state from the Map if penalty === 0', () => {
+    setBoost(1, 5.0); // creates state with penalty=0
+    resetBoost(1);
+    const raw = getAllStatesRaw();
+    expect(raw.has(1)).toBe(false);
+  });
+
+  it('does nothing if no state exists', () => {
+    publishMock.mockClear();
+    resetBoost(999); // no state
+    expect(publishMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('boost + penalty interaction', () => {
+  it('setBoost on a model with penalty > 0: boost is set, penalty unchanged', () => {
+    loadState(1, {
+      penalty: 20,
+      tier: 'major',
+      consecutiveHits: 3,
+      consecutiveMajorHits: 2,
+      lastHitAt: Date.now(),
+      halfLifeMs: 15 * 60 * 1000,
+      dirty: false,
+      boost: 1.0,
+    });
+    setBoost(1, 3.0);
+    const raw = getAllStatesRaw();
+    expect(raw.get(1)!.boost).toBe(3.0);
+    expect(raw.get(1)!.penalty).toBeCloseTo(20, 0);
+  });
+
+  it('resetBoost on a model with penalty > 0: boost reset to 1.0, state kept', () => {
+    loadState(1, {
+      penalty: 20,
+      tier: 'major',
+      consecutiveHits: 3,
+      consecutiveMajorHits: 2,
+      lastHitAt: Date.now(),
+      halfLifeMs: 15 * 60 * 1000,
+      dirty: false,
+      boost: 5.0,
+    });
+    resetBoost(1);
+    const raw = getAllStatesRaw();
+    expect(raw.has(1)).toBe(true);
+    expect(raw.get(1)!.boost).toBe(1.0);
+    expect(raw.get(1)!.penalty).toBeCloseTo(20, 0);
+  });
+});
+
+describe('getAllStatesView with boost', () => {
+  it('returns boost field in the view', () => {
+    setBoost(1, 2.5);
+    const view = getAllStatesView();
+    expect(view.get(1)!.boost).toBe(2.5);
   });
 });
