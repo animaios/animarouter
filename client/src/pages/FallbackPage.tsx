@@ -17,7 +17,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { SlidersHorizontal, Pencil } from 'lucide-react'
+import { SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 
 import { Button } from '@/components/ui/button'
@@ -70,6 +70,7 @@ interface RoutingScore {
   speed: number
   intelligence: number
   rateLimit: number
+  boost: number
   score: number
   totalRequests: number
 }
@@ -342,6 +343,7 @@ function RowContent({
   dragHandle,
   onToggle,
   onEdit,
+  onBoost,
 }: {
   row: Row
   rank: number
@@ -349,6 +351,7 @@ function RowContent({
   dragHandle?: ReactNode
   onToggle: (modelDbId: number, enabled: boolean) => void
   onEdit: (row: Row) => void
+  onBoost: (modelDbId: number, direction: 'up' | 'down') => void
 }) {
   const guard = row.rateLimit ?? 1
   return (
@@ -379,6 +382,12 @@ function RowContent({
           )}
           {(row.penalty ?? 0) > 0 && (
             <span className="text-[10px] text-amber-600 dark:text-amber-400">−{Math.round(row.penalty)} penalty</span>
+          )}
+          {row.boost !== undefined && row.boost > 1.01 && (
+            <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-green-600/15 text-green-700 dark:bg-green-400/15 dark:text-green-400">↑ boosted</span>
+          )}
+          {row.boost !== undefined && row.boost < 0.99 && (
+            <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-red-600/15 text-red-700 dark:bg-red-400/15 dark:text-red-400">↓ demoted</span>
           )}
           {row.totalRequests !== undefined && row.totalRequests > 0 && (
             <span className="text-[10px] text-muted-foreground/60 tabular-nums">{row.totalRequests} obs</span>
@@ -426,6 +435,8 @@ function RowContent({
       </td>
       <td className="py-2 pr-3 align-middle text-right">
         <div className="flex items-center gap-1 justify-end">
+          <ThumbsButton direction="up" active={(row.boost ?? 1) > 1.01} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'up') }} />
+          <ThumbsButton direction="down" active={(row.boost ?? 1) < 0.99} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'down') }} />
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onEdit(row); }}
@@ -441,7 +452,28 @@ function RowContent({
   )
 }
 
-function SortableRow({ row, rank, onToggle, onEdit }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void }) {
+function ThumbsButton({ direction, active, onClick }: {
+  direction: 'up' | 'down'
+  active: boolean
+  onClick: (e: React.MouseEvent) => void
+}) {
+  const Icon = direction === 'up' ? ThumbsUp : ThumbsDown
+  const activeColor = direction === 'up'
+    ? 'text-green-600 dark:text-green-400 hover:text-green-700'
+    : 'text-red-600 dark:text-red-400 hover:text-red-700'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`p-1 rounded hover:bg-muted transition-colors ${active ? activeColor : 'text-muted-foreground/40 hover:text-foreground'}`}
+      title={direction === 'up' ? 'Boost this model (routes more)' : 'Demote this model (routes less)'}
+    >
+      <Icon className="size-3.5" fill={active ? 'currentColor' : 'none'} />
+    </button>
+  )
+}
+
+function SortableRow({ row, rank, onToggle, onEdit, onBoost }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.modelDbId })
   const handle = (
     <button
@@ -463,7 +495,7 @@ function SortableRow({ row, rank, onToggle, onEdit }: { row: Row; rank: number; 
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`border-b last:border-0 bg-card group ${isDragging ? 'opacity-50' : ''} ${row.enabled ? '' : 'opacity-50'}`}
     >
-      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} />
+      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} onBoost={onBoost} />
     </tr>
   )
 }
@@ -512,6 +544,18 @@ export default function FallbackPage() {
     mutationFn: (payload: { strategy: RoutingStrategy; weights?: RoutingWeights }) =>
       apiFetch('/api/fallback/routing', { method: 'PUT', body: JSON.stringify(payload) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
+  })
+
+  // Boost mutation: thumbs up → 2.0, thumbs down → 0.5, click active → reset to 1.0.
+  // Fires instantly and invalidates the routing cache so scores recalculate.
+  const boostMutation = useMutation({
+    mutationFn: ({ modelDbId, boost }: { modelDbId: number; boost: number }) =>
+      boost === 1
+        ? apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
+        : apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+    },
   })
 
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
@@ -599,6 +643,17 @@ export default function FallbackPage() {
 
   function handleToggleAll(enabled: boolean) {
     setLocalEntries(allEntries.map(e => (e.keyCount > 0 ? { ...e, enabled } : e)))
+  }
+
+  function handleBoost(modelDbId: number, direction: 'up' | 'down') {
+    const currentBoost = scoreById.get(modelDbId)?.boost ?? 1
+    let nextBoost: number
+    if (direction === 'up') {
+      nextBoost = currentBoost > 1.01 ? 1 : 2   // toggle: active → reset, inactive → 2.0
+    } else {
+      nextBoost = currentBoost < 0.99 ? 1 : 0.5  // toggle: active → reset, inactive → 0.5
+    }
+    boostMutation.mutate({ modelDbId, boost: nextBoost })
   }
 
   const hasChanges = localEntries !== null || pendingModelEdits.size > 0
@@ -846,7 +901,7 @@ export default function FallbackPage() {
                         <SortableContext items={ordered.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
                           <tbody>
                             {ordered.map((row, i) => (
-                              <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} />
+                              <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
                             ))}
                           </tbody>
                         </SortableContext>
@@ -860,7 +915,7 @@ export default function FallbackPage() {
                       <tbody>
                         {ordered.map((row, i) => (
                           <tr key={row.modelDbId} className={`border-b last:border-0 group ${row.enabled ? '' : 'opacity-50'}`}>
-                            <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} />
+                            <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
                           </tr>
                         ))}
                       </tbody>
