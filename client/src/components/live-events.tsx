@@ -86,7 +86,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       }
       return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
     case 'heartbeat.cycle_skipped':
-      return null; // Intentionally not rendered (too noisy for live feed)
+      return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] Cycle skipped: ${evt.reason} (idle ${Math.round(evt.lastActivityAgeMs / 1000)}s)` };
     case 'stream.chunk':
       return null; // Stream chunks are not rendered in the log feed
     default: {

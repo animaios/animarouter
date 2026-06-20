@@ -93,13 +93,13 @@ When a provider fast-fails, the proxy shall emit a `routing.provider_fastfail` e
 The client's `live-events.tsx` shall render `routing.provider_fastfail` events with a visible **warning** indicator, distinct from the info-level key_exhausted and model_switch messages.
 
 ### FR-5: Configuration
-The threshold shall be configurable via the `PROVIDER_FASTFAIL_THRESHOLD` environment variable:
+The threshold shall be configurable via the `feature-settings.ts` registry (resolution order: **DB → env var → default**), exposed in the Settings UI as "Fast-Fail Threshold":
 
-| Variable | Default | Description |
-|---|---|---|
-| `PROVIDER_FASTFAIL_THRESHOLD` | `2` | Distinct models on one platform that must 5xx before the platform is skipped. `0` disables the feature entirely. |
+| Setting key | Env var fallback | Default | Description |
+|---|---|---|---|
+| `provider_fastfail_threshold` | `PROVIDER_FASTFAIL_THRESHOLD` | `2` | Distinct models on one platform that must 5xx before the platform is skipped. `0` disables the feature entirely. |
 
-Read once at module level in `proxy.ts`. No runtime reload needed (restart to change).
+The value is read through `getFeatureSetting('provider_fastfail_threshold')` at module level in `proxy.ts` (cached after first read; restart to change). The env var alone is **not** the primary config path — it serves as a fallback when no DB override exists.
 
 ### FR-6: Data Structure
 The tracking data structure shall be a `Map<string, Set<number>>` local to the retry loop — **not** module-level, **not** persisted. Key is the platform slug; value is the set of `modelDbId`s that 5xx'd on that platform during this request. The map is garbage-collected when the request completes.
