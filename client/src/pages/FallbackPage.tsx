@@ -17,7 +17,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { SlidersHorizontal, Pencil } from 'lucide-react'
+import { SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 
 import { Button } from '@/components/ui/button'
@@ -36,7 +36,6 @@ interface FallbackEntry {
   priority: number
   effectivePriority: number
   penalty: number
-  rateLimitHits: number
   enabled: boolean
   platform: string
   modelId: string
@@ -69,7 +68,7 @@ interface RoutingScore {
   reliability: number
   speed: number
   intelligence: number
-  rateLimit: number
+  boost: number
   score: number
   totalRequests: number
 }
@@ -342,6 +341,7 @@ function RowContent({
   dragHandle,
   onToggle,
   onEdit,
+  onBoost,
 }: {
   row: Row
   rank: number
@@ -349,8 +349,8 @@ function RowContent({
   dragHandle?: ReactNode
   onToggle: (modelDbId: number, enabled: boolean) => void
   onEdit: (row: Row) => void
+  onBoost: (modelDbId: number, direction: 'up' | 'down') => void
 }) {
-  const guard = row.rateLimit ?? 1
   return (
     <>
       <td className="py-2 pl-3 pr-1 w-6 align-middle">
@@ -379,6 +379,12 @@ function RowContent({
           )}
           {(row.penalty ?? 0) > 0 && (
             <span className="text-[10px] text-amber-600 dark:text-amber-400">−{Math.round(row.penalty)} penalty</span>
+          )}
+          {row.boost !== undefined && row.boost > 1.01 && (
+            <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-green-600/15 text-green-700 dark:bg-green-400/15 dark:text-green-400">↑ boosted</span>
+          )}
+          {row.boost !== undefined && row.boost < 0.99 && (
+            <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-red-600/15 text-red-700 dark:bg-red-400/15 dark:text-red-400">↓ demoted</span>
           )}
           {row.totalRequests !== undefined && row.totalRequests > 0 && (
             <span className="text-[10px] text-muted-foreground/60 tabular-nums">{row.totalRequests} obs</span>
@@ -411,21 +417,20 @@ function RowContent({
                 {Math.round((row.speed ?? 0) * 100)}
               </span>
               {row.actualAvgTtfbMs && (
-                <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{Math.round(row.actualAvgTtfbMs)}ms ttfb</span>
+                <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{row.actualAvgTtfbMs >= 1000 ? `${(row.actualAvgTtfbMs / 1000).toFixed(2)}s` : `${Math.round(row.actualAvgTtfbMs)}ms`} ttfb</span>
               )}
             </div>
           </div>
         </div>
       </td>
       <td className="py-2 pr-3 align-middle"><AxisBar value={row.intelligence} color="#a855f7" /></td>
-      <td className="py-2 pr-3 align-middle font-mono text-[11px] text-muted-foreground tabular-nums opacity-0 group-hover:opacity-100 transition-opacity">
-        {guard < 0.999 ? `×${Math.round(guard * 100) / 100}` : '—'}
-      </td>
       <td className="py-2 pr-3 align-middle text-right font-mono text-xs font-medium tabular-nums opacity-0 group-hover:opacity-100 transition-opacity">
-        {row.score !== undefined ? Math.round(row.score) : '–'}
+        {row.score !== undefined ? row.score.toFixed(2) : '–'}
       </td>
       <td className="py-2 pr-3 align-middle text-right">
         <div className="flex items-center gap-1 justify-end">
+          <ThumbsButton direction="up" active={(row.boost ?? 1) > 1.01} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'up') }} />
+          <ThumbsButton direction="down" active={(row.boost ?? 1) < 0.99} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'down') }} />
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onEdit(row); }}
@@ -441,7 +446,28 @@ function RowContent({
   )
 }
 
-function SortableRow({ row, rank, onToggle, onEdit }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void }) {
+function ThumbsButton({ direction, active, onClick }: {
+  direction: 'up' | 'down'
+  active: boolean
+  onClick: (e: React.MouseEvent) => void
+}) {
+  const Icon = direction === 'up' ? ThumbsUp : ThumbsDown
+  const activeColor = direction === 'up'
+    ? 'text-green-600 dark:text-green-400 hover:text-green-700'
+    : 'text-red-600 dark:text-red-400 hover:text-red-700'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`p-1 rounded hover:bg-muted transition-colors ${active ? activeColor : 'text-muted-foreground/40 hover:text-foreground'}`}
+      title={direction === 'up' ? 'Boost this model (routes more)' : 'Demote this model (routes less)'}
+    >
+      <Icon className="size-3.5" fill={active ? 'currentColor' : 'none'} />
+    </button>
+  )
+}
+
+function SortableRow({ row, rank, onToggle, onEdit, onBoost }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.modelDbId })
   const handle = (
     <button
@@ -463,7 +489,7 @@ function SortableRow({ row, rank, onToggle, onEdit }: { row: Row; rank: number; 
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`border-b last:border-0 bg-card group ${isDragging ? 'opacity-50' : ''} ${row.enabled ? '' : 'opacity-50'}`}
     >
-      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} />
+      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} onBoost={onBoost} />
     </tr>
   )
 }
@@ -512,6 +538,18 @@ export default function FallbackPage() {
     mutationFn: (payload: { strategy: RoutingStrategy; weights?: RoutingWeights }) =>
       apiFetch('/api/fallback/routing', { method: 'PUT', body: JSON.stringify(payload) }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] }),
+  })
+
+  // Boost mutation: thumbs up → 2.0, thumbs down → 0.5, click active → reset to 1.0.
+  // Fires instantly and invalidates the routing cache so scores recalculate.
+  const boostMutation = useMutation({
+    mutationFn: ({ modelDbId, boost }: { modelDbId: number; boost: number }) =>
+      boost === 1
+        ? apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
+        : apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+    },
   })
 
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
@@ -599,6 +637,17 @@ export default function FallbackPage() {
 
   function handleToggleAll(enabled: boolean) {
     setLocalEntries(allEntries.map(e => (e.keyCount > 0 ? { ...e, enabled } : e)))
+  }
+
+  function handleBoost(modelDbId: number, direction: 'up' | 'down') {
+    const currentBoost = scoreById.get(modelDbId)?.boost ?? 1
+    let nextBoost: number
+    if (direction === 'up') {
+      nextBoost = currentBoost > 1.01 ? 1 : 2   // toggle: active → reset, inactive → 2.0
+    } else {
+      nextBoost = currentBoost < 0.99 ? 1 : 0.5  // toggle: active → reset, inactive → 0.5
+    }
+    boostMutation.mutate({ modelDbId, boost: nextBoost })
   }
 
   const hasChanges = localEntries !== null || pendingModelEdits.size > 0
@@ -694,13 +743,8 @@ export default function FallbackPage() {
         <th className="py-2 pr-3 font-medium">
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#a855f7' }} />Intelligence</span>
         </th>
-        <th className="py-2 pr-3 font-medium">
-          <Tooltip text="Live rate-limit penalty. Below 1.0 means the model is being demoted due to recent 429s.">
-            <span className="underline decoration-dotted underline-offset-2 cursor-help">Guardrails</span>
-          </Tooltip>
-        </th>
         <th className="py-2 pr-3 font-medium text-right">
-          <Tooltip text="Final routing score = weighted average of reliability, speed and intelligence, multiplied by the rate-limit guardrail. Higher routes first.">
+          <Tooltip text="Final routing score across reliability, speed and intelligence. Higher routes first.">
             <span className="underline decoration-dotted underline-offset-2 cursor-help">Score</span>
           </Tooltip>
         </th>
@@ -846,7 +890,7 @@ export default function FallbackPage() {
                         <SortableContext items={ordered.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
                           <tbody>
                             {ordered.map((row, i) => (
-                              <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} />
+                              <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
                             ))}
                           </tbody>
                         </SortableContext>
@@ -860,7 +904,7 @@ export default function FallbackPage() {
                       <tbody>
                         {ordered.map((row, i) => (
                           <tr key={row.modelDbId} className={`border-b last:border-0 group ${row.enabled ? '' : 'opacity-50'}`}>
-                            <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} />
+                            <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
                           </tr>
                         ))}
                       </tbody>
