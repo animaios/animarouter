@@ -79,24 +79,18 @@ export function migrateDbSchema(db: Database.Database) {
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
 
-  // Live benchmark fetch (runs every boot with internal caching)
-  try {
-    fetchLiveBenchmarkScores(db);
-  } catch (error) {
-    console.warn('Live benchmark fetch failed, using static scores:', error);
-  }
+  // Live benchmark fetch — fire-and-forget: benchmark data is non-blocking on boot
+  fetchLiveBenchmarkScores(db).catch(err =>
+    console.warn('[Boot] AA fetch error:', err.message)
+  );
 
-  // SWE-rebench live leaderboard scrape (fire-and-forget, falls back to hardcoded scores)
-  try {
-    new BenchmarkService().updateAllBenchmarkScores()
-      .then(({ updated, errors }) => {
-        if (updated > 0) console.log(`[Boot] SWE-rebench updated ${updated} models`);
-        if (errors.length > 0) console.warn('[Boot] Benchmark errors:', errors.join('; '));
-      })
-      .catch(err => console.warn('[Boot] SWE-rebench fetch failed:', err));
-  } catch (error) {
-    console.warn('SWE-rebench boot fetch failed:', error);
-  }
+  // SWE-rebench + NIM + AA composite pipeline — fire-and-forget
+  new BenchmarkService().updateAllBenchmarkScores()
+    .then(({ updated, errors }) => {
+      if (updated > 0) console.log(`[Boot] SWE-rebench updated ${updated} models`);
+      if (errors.length > 0) console.warn('[Boot] Benchmark errors:', errors.join('; '));
+    })
+    .catch(err => console.warn('[Boot] SWE-rebench fetch failed:', err));
 }
 
 function createTables(db: Database.Database) {

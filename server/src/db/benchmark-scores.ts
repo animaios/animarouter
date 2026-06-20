@@ -430,13 +430,18 @@ const FETCH_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 export interface BenchmarkFetchResult {
   updated: number;
   errors: string[];
-  source: 'cache' | 'live' | 'skipped';
+  source: 'cache' | 'live' | 'skipped' | 'static';
 }
 
 /**
  * Fetch live AA scores from Artificial Analysis and update the DB.
  * AA writes ONLY to aa_score, aa_score_updated, aa_confidence.
  * Uses canonical_model_key for matching. Returns affected IDs for composite.
+ *
+ * Resilience (spec boot-benchmark-fixes R2, R4):
+ *   - 404 → graceful fallback to static BENCHMARK_SCORES table (no error surfaced)
+ *   - Single retry on 5xx or network errors (2 s delay)
+ *   - 10 s AbortController timeout (unchanged)
  */
 export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFetchResult & { affectedIds: Set<number> }> {
   const affectedIds = new Set<number>();
@@ -446,75 +451,117 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
     return { ...lastFetchResult, source: 'cache', affectedIds };
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  // Retry loop: up to 2 attempts (1 retry on 5xx / network errors)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
 
-  try {
-    const res = await fetch(AA_API_URL, {
-      signal: controller.signal,
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'FreeLLMApi-Gateway/1.0 (benchmark sync)',
-      },
-    });
+    try {
+      const res = await fetch(AA_API_URL, {
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'FreeLLMApi-Gateway/1.0 (benchmark sync)',
+        },
+      });
 
-    if (!res.ok) {
-      const msg = `AA API returned ${res.status}`;
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        // ── R2: 404 → static fallback (not an error) ──────────────────────
+        if (res.status === 404) {
+          console.warn('[Benchmarks] AA fetch: 404, falling back to static scores');
+          applyBenchmarkScores(db);
+          const staticCount = BENCHMARK_SCORES.length;
+          lastFetchResult = { updated: staticCount, errors: [] };
+          lastFetchTime = Date.now();
+          return { ...lastFetchResult, source: 'static', affectedIds };
+        }
+
+        // 5xx → retryable; 4xx (other than 404) → terminal error
+        if (res.status >= 500 && attempt === 0) {
+          console.warn(`[Benchmarks] AA fetch: ${res.status} — retrying in 2 s`);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+
+        const bodySnippet = await res.text().catch(() => '<unreadable>');
+        const msg = `AA API returned ${res.status}: ${bodySnippet.slice(0, 80)}`;
+        lastFetchResult = { updated: 0, errors: [msg] };
+        lastFetchTime = Date.now();
+        return { ...lastFetchResult, source: 'live', affectedIds };
+      }
+
+      const body = await res.json() as any;
+      const models = Array.isArray(body) ? body : (body?.models ?? body?.data ?? []);
+
+      if (!Array.isArray(models) || models.length === 0) {
+        lastFetchResult = { updated: 0, errors: ['No models in AA response'] };
+        lastFetchTime = Date.now();
+        return { ...lastFetchResult, source: 'live', affectedIds };
+      }
+
+      // AA writes ONLY to aa_score columns. Uses canonical_model_key.
+      const updateScore = db.prepare(`
+        UPDATE models SET aa_score = ?, aa_score_updated = ?, aa_confidence = 1.0
+        WHERE canonical_model_key = ?
+          AND (aa_score IS NULL OR aa_score != ?)
+      `);
+
+      const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+
+      let updated = 0;
+      const tx = db.transaction(() => {
+        for (const m of models) {
+          const modelId = m.model_id ?? m.id ?? m.name ?? '';
+          const score = Number(m.score ?? m.intelligence_index ?? m.intelligence_score ?? 0);
+          if (!modelId || score <= 0 || score > 100) continue;
+
+          const canonicalKey = canonicalizeModelId(modelId);
+          const result = updateScore.run(score, new Date().toISOString(), canonicalKey, score);
+          if (result.changes > 0) {
+            updated += result.changes;
+            const row = findId.get(canonicalKey) as { id: number } | undefined;
+            if (row) affectedIds.add(row.id);
+          }
+        }
+      });
+      tx();
+
+      lastFetchResult = { updated, errors: [] };
+      lastFetchTime = Date.now();
+      console.log(`[Benchmarks] AA fetch: ${updated} models updated`);
+
+      return { ...lastFetchResult, source: 'live', affectedIds };
+    } catch (err: any) {
+      clearTimeout(timeout);
+
+      // AbortError = timeout → retryable on first attempt
+      const isTimeout = err.name === 'AbortError';
+      const isNetwork = err.cause?.code === 'ECONNRESET'
+        || err.cause?.code === 'ENOTFOUND'
+        || err.cause?.code === 'ECONNREFUSED'
+        || err.message?.includes('fetch failed');
+
+      if (attempt === 0 && (isTimeout || isNetwork || err.cause)) {
+        const reason = isTimeout ? 'timeout' : err.message;
+        console.warn(`[Benchmarks] AA fetch: ${reason} — retrying in 2 s`);
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+
+      const msg = isTimeout ? 'timeout' : err.message;
+      console.log(`[Benchmarks] AA fetch failed: ${msg} (static table still active)`);
       lastFetchResult = { updated: 0, errors: [msg] };
       lastFetchTime = Date.now();
       return { ...lastFetchResult, source: 'live', affectedIds };
     }
-
-    const body = await res.json() as any;
-    const models = Array.isArray(body) ? body : (body?.models ?? body?.data ?? []);
-
-    if (!Array.isArray(models) || models.length === 0) {
-      lastFetchResult = { updated: 0, errors: ['No models in AA response'] };
-      lastFetchTime = Date.now();
-      return { ...lastFetchResult, source: 'live', affectedIds };
-    }
-
-    // AA writes ONLY to aa_score columns. Uses canonical_model_key.
-    const updateScore = db.prepare(`
-      UPDATE models SET aa_score = ?, aa_score_updated = ?, aa_confidence = 1.0
-      WHERE canonical_model_key = ?
-        AND (aa_score IS NULL OR aa_score != ?)
-    `);
-
-    const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
-
-    let updated = 0;
-    const tx = db.transaction(() => {
-      for (const m of models) {
-        const modelId = m.model_id ?? m.id ?? m.name ?? '';
-        const score = Number(m.score ?? m.intelligence_index ?? m.intelligence_score ?? 0);
-        if (!modelId || score <= 0 || score > 100) continue;
-
-        const canonicalKey = canonicalizeModelId(modelId);
-        const result = updateScore.run(score, new Date().toISOString(), canonicalKey, score);
-        if (result.changes > 0) {
-          updated += result.changes;
-          const row = findId.get(canonicalKey) as { id: number } | undefined;
-          if (row) affectedIds.add(row.id);
-        }
-      }
-    });
-    tx();
-
-    lastFetchResult = { updated, errors: [] };
-    lastFetchTime = Date.now();
-    console.log(`[Benchmarks] AA fetch: ${updated} models updated`);
-
-    return { ...lastFetchResult, source: 'live', affectedIds };
-  } catch (err: any) {
-    const msg = err.name === 'AbortError' ? 'timeout' : err.message;
-    console.log(`[Benchmarks] AA fetch failed: ${msg} (static table still active)`);
-    lastFetchResult = { updated: 0, errors: [msg] };
-    lastFetchTime = Date.now();
-    return { ...lastFetchResult, source: 'live', affectedIds };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  // Unreachable, but TypeScript needs a return
+  lastFetchResult = { updated: 0, errors: ['AA fetch exhausted retries'] };
+  lastFetchTime = Date.now();
+  return { ...lastFetchResult, source: 'live', affectedIds };
 }
 
 /**

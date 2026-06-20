@@ -118,20 +118,79 @@ export class BenchmarkService {
   /**
    * Fetch NIM benchmarks from external source only (no self-hosted).
    * Returns scores with speed/reliability metrics for logging (Phase 1 — not blended).
+   *
+   * Resilience (spec boot-benchmark-fixes R1, R4):
+   *   - 10 s AbortController timeout
+   *   - Content-Type gate: skip response.json() when not application/json
+   *   - JSON parse guard: catch SyntaxError, log body preview, return []
+   *   - Single retry on 5xx or network errors (4xx is terminal)
    */
   async fetchNIMBenchmarks(): Promise<BenchmarkScore[]> {
     const source = this.sources[1]; // NIM External
+    return this.fetchNIMWithRetry(source.apiUrl, source.name);
+  }
+
+  /**
+   * Internal: NIM fetch with one retry on 5xx / network error.
+   */
+  private async fetchNIMWithRetry(url: string, sourceName: string): Promise<BenchmarkScore[]> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await this.fetchNIMOnce(url, sourceName);
+        return result;
+      } catch (err: any) {
+        const isRetryable = err.retryable === true;
+        if (attempt === 0 && isRetryable) {
+          console.warn(`[NIM] ${err.message} — retrying in 2 s`);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        console.warn(`[NIM] External fetch failed: ${err.message}`);
+        return [];
+      }
+    }
+    return [];
+  }
+
+  /**
+   * Single NIM fetch attempt. Throws with `retryable: true` on 5xx / network
+   * errors so the caller can retry. 4xx and parse errors are terminal.
+   */
+  private async fetchNIMOnce(url: string, sourceName: string): Promise<BenchmarkScore[]> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
     try {
-      const response = await fetch(source.apiUrl);
+      const response = await fetch(url, { signal: controller.signal });
+
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const msg = `HTTP ${response.status}: ${response.statusText}`;
+        const err: any = new Error(msg);
+        // 5xx is retryable; 4xx is terminal
+        err.retryable = response.status >= 500;
+        throw err;
       }
 
-      const data = await response.json();
+      // Content-Type gate (R1.4): don't call response.json() on non-JSON bodies
+      const ct = response.headers.get('content-type') ?? '';
+      if (!ct.includes('application/json')) {
+        const body = await response.text().catch(() => '<unreadable>');
+        console.warn(`[NIM] Non-JSON response (${response.status}): ${body.slice(0, 80)}`);
+        return [];
+      }
+
+      // JSON parse guard (R1.2 / R1.3)
+      let data: any;
+      try {
+        data = await response.json();
+      } catch (parseErr: any) {
+        console.warn(`[NIM] JSON parse failed: ${parseErr.message}`);
+        return [];
+      }
 
       // Handle NIMStats data format with speed metrics
-      if ((data as any)?.models && Array.isArray((data as any).models)) {
-        return (data as any).models.map((model: any) => ({
+      if (data?.models && Array.isArray(data.models)) {
+        return data.models.map((model: any) => ({
           modelId: model.id,
           platform: this.extractPlatform(model.id),
           score: this.normalizeScore(model.score || 0),
@@ -143,9 +202,9 @@ export class BenchmarkService {
         }));
       }
 
-      // Fallback for different response formats
+      // Fallback for plain-array response formats
       if (Array.isArray(data)) {
-        return (data as any[]).map((item: any) => ({
+        return data.map((item: any) => ({
           modelId: item.model || item.id,
           platform: this.extractPlatform(item.model || item.id),
           score: this.normalizeScore(item.score || item.accuracy || 0),
@@ -157,10 +216,24 @@ export class BenchmarkService {
         }));
       }
 
-      throw new Error(`Unexpected data format from ${source.name}`);
-    } catch (error) {
-      console.warn(`[NIM] External fetch failed:`, (error as Error).message);
+      console.warn(`[NIM] Unexpected data format from ${sourceName}`);
       return [];
+    } catch (err: any) {
+      // AbortError = timeout → retryable
+      if (err.name === 'AbortError') {
+        const e: any = new Error('NIM fetch timed out (10 s)');
+        e.retryable = true;
+        throw e;
+      }
+      // Fetch network errors (ECONNRESET, DNS failure, etc.) → retryable
+      if (err.retryable === undefined) {
+        const e: any = new Error(err.message);
+        e.retryable = true;
+        throw e;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
