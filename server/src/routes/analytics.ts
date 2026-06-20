@@ -121,6 +121,7 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
     SELECT
       r.platform,
       r.model_id,
+      m.display_name,
       COUNT(*) as requests,
       SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as success_rate,
       AVG(r.latency_ms) as avg_latency_ms,
@@ -128,8 +129,10 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
       SUM(r.output_tokens) as total_output_tokens,
       SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pinned_requests
     FROM requests r
+    LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
     WHERE r.created_at >= ?
       ${pf.sql}
+      AND (m.enabled IS NULL OR m.enabled = 1)
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC
   `).all(since, ...pf.params) as any[];
@@ -137,7 +140,7 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
   res.json(rows.map(r => ({
     platform: r.platform,
     modelId: r.model_id,
-    displayName: r.model_id,
+    displayName: r.display_name ?? r.model_id,
     requests: r.requests,
     successRate: Math.round(r.success_rate * 10) / 10,
     avgLatencyMs: Math.round(r.avg_latency_ms),
