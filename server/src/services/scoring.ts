@@ -25,6 +25,7 @@ export interface RoutingWeights {
   reliability: number;
   speed: number;
   intelligence: number;
+  latency: number;
 }
 
 // Strategy is either the legacy manual chain ('priority'), one of the bandit
@@ -33,15 +34,15 @@ export interface RoutingWeights {
 export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom';
 
 export const BANDIT_PRESETS: Record<Exclude<RoutingStrategy, 'priority' | 'custom'>, RoutingWeights> = {
-  // Reliability leads; speed and intelligence split the rest evenly.
-  balanced: { reliability: 0.5, speed: 0.25, intelligence: 0.25 },
-  // Intelligence leads, but reliability still carries real weight so a smart
-  // model that keeps failing doesn't win.
-  smartest: { reliability: 0.35, speed: 0.1, intelligence: 0.55 },
-  // Speed leads; reliability keeps a fast-but-broken model from winning.
-  fastest: { reliability: 0.35, speed: 0.55, intelligence: 0.1 },
-  // Reliability dominates — for clients that just want it to work.
-  reliable: { reliability: 0.7, speed: 0.15, intelligence: 0.15 },
+  // Reliability leads; speed, intelligence, latency split the rest evenly.
+  balanced: { reliability: 0.40, speed: 0.20, intelligence: 0.20, latency: 0.20 },
+  // Intelligence leads; latency gets a small edge over raw speed because smart
+  // models tend to have higher TTFB and shouldn't be entirely penalized.
+  smartest: { reliability: 0.30, speed: 0.10, intelligence: 0.45, latency: 0.15 },
+  // Both throughput (speed) and responsiveness (latency) are heavily weighted.
+  fastest: { reliability: 0.25, speed: 0.30, intelligence: 0.10, latency: 0.35 },
+  // Reliability dominates; the remaining 40% splits evenly among the other three.
+  reliable: { reliability: 0.60, speed: 0.10, intelligence: 0.15, latency: 0.15 },
 };
 
 // Analytics-driven routing is on by default ('balanced'). Operators who want the
@@ -68,15 +69,13 @@ export function expectedReliability(successes: number, failures: number): number
   return alpha / (alpha + beta);
 }
 
-// ── Speed (throughput + TTFB blended into one [0,1] axis) ───────────────────
+// ── Speed (throughput-only, [0,1] axis) ──────────────────────────────────────
 // Throughput uses a saturating curve so one very fast tiny model can't make a
 // perfectly-fine larger model look "slow" (the global-max-normalization bug in
-// the fork). TTFB is a simple linear ramp from "instant" to "painfully slow".
+// the fork). TTFB is now a separate 'latency' axis — see latencyScore().
 export const SPEED_SCALE_TOK_S = 60;   // tok/s at which throughput ≈ 0.63
 export const TTFB_BEST_MS = 300;       // ≤ this → full latency credit
 export const TTFB_WORST_MS = 5000;     // ≥ this → zero latency credit
-const THROUGHPUT_WEIGHT = 0.6;         // within the speed axis
-const TTFB_WEIGHT = 0.4;
 // Optimistic prior so unmeasured models still get explored on the speed axis.
 export const SPEED_PRIOR = 0.6;
 
@@ -92,17 +91,44 @@ function ttfbScore(ttfbMs: number): number {
 }
 
 /**
- * Blend throughput and TTFB into a single [0,1] speed score.
- * `tokPerSec <= 0` means no successful samples → return the exploration prior.
- * `ttfbMs === null` means we have throughput but no first-byte timing → fall
- * back to throughput alone rather than guessing latency.
+ * Throughput-only speed score. `tokPerSec <= 0` means no successful samples →
+ * return the exploration prior.
  */
-export function speedScore(tokPerSec: number, ttfbMs: number | null): number {
-  if (tokPerSec <= 0 && ttfbMs === null) return SPEED_PRIOR;
-  const tp = throughputScore(tokPerSec);
-  if (ttfbMs === null) return tp;
-  if (tokPerSec <= 0) return ttfbScore(ttfbMs);
-  return THROUGHPUT_WEIGHT * tp + TTFB_WEIGHT * ttfbScore(ttfbMs);
+export function speedScore(tokPerSec: number): number {
+  if (tokPerSec <= 0) return SPEED_PRIOR;
+  return throughputScore(tokPerSec);
+}
+
+// ── Latency (TTFB, standalone [0,1] axis) ───────────────────────────────────
+// Extracted from the old blended speed axis so responsiveness and throughput
+// can be weighted independently. Uses the same TTFB ramp constants.
+export const LATENCY_PRIOR = 0.6;
+
+/**
+ * Latency score from TTFB. `null` means no first-byte timing → prior.
+ */
+export function latencyScore(avgTtfbMs: number | null): number {
+  if (avgTtfbMs === null) return LATENCY_PRIOR;
+  return ttfbScore(avgTtfbMs);
+}
+
+// TTFB prior by size_label — used when no real TTFB data exists.
+// Smaller models are assumed more responsive; larger models get higher TTFB.
+const TTFB_PRIOR_MS: Record<string, number> = {
+  Small: 200,
+  Medium: 400,
+  Large: 800,
+  Frontier: 500,
+  Custom: 500,
+};
+
+/**
+ * Derive an optimistic TTFB-based latency score from model size tier.
+ * Used as the default (prior) latency when no real TTFB data exists.
+ */
+export function latencyCompositeFromSize(sizeLabel: string): number {
+  const ttfbMs = TTFB_PRIOR_MS[sizeLabel] ?? 500;
+  return ttfbScore(ttfbMs);
 }
 
 // ── Heavy-weighted real performance scoring ─────────────────────────────────
@@ -130,40 +156,54 @@ function realDataConfidence(totalRequests: number): number {
 }
 
 /**
- * Heavy-weighted speed score that favors real performance data.
+ * Heavy-weighted speed score that favors real throughput data.
  *
  * When no performance data exists: uses default speed_score only (pure prior).
  * When little data exists: blends default score with real data based on confidence.
  * When lots of data exists: heavily weights real token/sec (up to 95%).
  *
  * @param tokPerSec - Measured real tokens per second from actual requests
- * @param ttfbMs - Measured time to first byte from actual requests
  * @param totalRequests - Total number of requests for confidence calculation
  * @param defaultSpeedScore - Default score from manual/prior settings (0-1)
  */
 export function heavyWeightedSpeedScore(
   tokPerSec: number,
-  ttfbMs: number | null,
   totalRequests: number,
   defaultSpeedScore: number
 ): number {
-  // Calculate how much we trust the real data
-  const confidence = realDataConfidence(totalRequests);
-
   // If no real data at all, use pure default
   if (tokPerSec <= 0 && totalRequests <= 0) {
     return defaultSpeedScore;
   }
 
-  // Calculate real performance score from actual data
-  const realScore = speedScore(tokPerSec, ttfbMs);
+  // Calculate real performance score from actual throughput data
+  const realScore = speedScore(tokPerSec);
 
   // Blend weight: 0% real data when no confidence, up to max weight when fully confident
+  const confidence = realDataConfidence(totalRequests);
   const realWeight = confidence * REAL_SPEED_MAX_WEIGHT;
   const defaultWeight = 1 - realWeight;
 
   // Weighted blend of real performance and default score
   return (realWeight * realScore) + (defaultWeight * defaultSpeedScore);
+}
+
+/**
+ * Heavy-weighted latency score that favors real TTFB data.
+ * Mirrors heavyWeightedSpeedScore: logistic blend of real TTFB vs manual prior,
+ * driven by request count confidence.
+ */
+export function heavyWeightedLatencyScore(
+  avgTtfbMs: number | null,
+  totalRequests: number,
+  defaultLatencyScore: number,
+): number {
+  if (avgTtfbMs === null && totalRequests <= 0) return defaultLatencyScore;
+  const realScore = latencyScore(avgTtfbMs);
+  const confidence = realDataConfidence(totalRequests);
+  const realWeight = confidence * REAL_SPEED_MAX_WEIGHT;
+  const defaultWeight = 1 - realWeight;
+  return realWeight * realScore + defaultWeight * defaultLatencyScore;
 }
 
 // ── Intelligence ────────────────────────────────────────────────────────────
@@ -227,6 +267,7 @@ export interface ScoreInputs {
   reliability: number;   // [0,1] — sampled (routing) or expected (display)
   speed: number;         // [0,1]
   intelligence: number;  // [0,1]
+  latency: number;       // [0,1]
   degradationFactor: number; // [0,1] multiplier from degradation engine
 }
 
@@ -236,10 +277,11 @@ export interface ScoreInputs {
  * the base never escapes [0,1].
  */
 export function combineScore(inputs: ScoreInputs, weights: RoutingWeights): number {
-  const wSum = weights.reliability + weights.speed + weights.intelligence || 1;
+  const wSum = weights.reliability + weights.speed + weights.intelligence + weights.latency || 1;
   const base =
     (weights.reliability * inputs.reliability +
       weights.speed * inputs.speed +
-      weights.intelligence * inputs.intelligence) / wSum;
+      weights.intelligence * inputs.intelligence +
+      weights.latency * inputs.latency) / wSum;
   return base * inputs.degradationFactor;
 }

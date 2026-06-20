@@ -92,7 +92,8 @@ const routingSchema = z.object({
     reliability: z.number().min(0).max(1),
     speed: z.number().min(0).max(1),
     intelligence: z.number().min(0).max(1),
-  }).refine(w => w.reliability + w.speed + w.intelligence > 0, {
+    latency: z.number().min(0).max(1),
+  }).refine(w => w.reliability + w.speed + w.intelligence + w.latency > 0, {
     message: 'weights must not all be zero',
   }).optional(),
 });

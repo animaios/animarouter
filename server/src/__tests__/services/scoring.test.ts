@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  BANDIT_PRESETS, combineScore, speedScore, intelligenceScore,
+  BANDIT_PRESETS, combineScore, speedScore, latencyScore, intelligenceScore,
   sampleBeta, reliabilityPosterior,
-  expectedReliability, SPEED_PRIOR,
+  expectedReliability, SPEED_PRIOR, LATENCY_PRIOR,
 } from '../../services/scoring.js';
 
 describe('scoring: reliability posterior', () => {
@@ -22,27 +22,45 @@ describe('scoring: reliability posterior', () => {
 
 describe('scoring: speed axis', () => {
   it('returns the exploration prior when there is no data at all', () => {
-    expect(speedScore(0, null)).toBe(SPEED_PRIOR);
+    expect(speedScore(0)).toBe(SPEED_PRIOR);
   });
 
   it('is bounded in [0,1] and monotonic in throughput', () => {
-    const a = speedScore(10, null);
-    const b = speedScore(50, null);
-    const c = speedScore(200, null);
+    const a = speedScore(10);
+    const b = speedScore(50);
+    const c = speedScore(200);
     expect(a).toBeGreaterThanOrEqual(0);
     expect(c).toBeLessThanOrEqual(1);
     expect(a).toBeLessThan(b);
     expect(b).toBeLessThan(c);
   });
 
-  it('a fast TTFB raises the score versus a slow one at equal throughput', () => {
-    const fast = speedScore(80, 200);
-    const slow = speedScore(80, 6000);
-    expect(fast).toBeGreaterThan(slow);
+  it('returns a throughput-only score (no TTFB blending)', () => {
+    expect(speedScore(80)).toBeGreaterThan(0);
+  });
+});
+
+describe('scoring: latency axis', () => {
+  it('returns the exploration prior when TTFB is null', () => {
+    expect(latencyScore(null)).toBe(LATENCY_PRIOR);
   });
 
-  it('falls back to throughput-only when TTFB is unknown', () => {
-    expect(speedScore(80, null)).toBeGreaterThan(0);
+  it('returns 1.0 for excellent TTFB (≤300ms)', () => {
+    expect(latencyScore(300)).toBe(1.0);
+    expect(latencyScore(100)).toBe(1.0);
+  });
+
+  it('returns 0.0 for poor TTFB (≥5000ms)', () => {
+    expect(latencyScore(5000)).toBe(0.0);
+    expect(latencyScore(10000)).toBe(0.0);
+  });
+
+  it('is bounded in [0,1] and monotonically decreasing with TTFB', () => {
+    const fast = latencyScore(200);
+    const mid = latencyScore(1500);
+    const slow = latencyScore(4000);
+    expect(fast).toBeGreaterThan(mid);
+    expect(mid).toBeGreaterThan(slow);
   });
 });
 
@@ -61,28 +79,28 @@ describe('scoring: intelligence axis', () => {
 // Degradation factor tests are in degradation.test.ts
 
 describe('scoring: combineScore', () => {
-  const perfect = { reliability: 1, speed: 1, intelligence: 1, degradationFactor: 1 };
+  const perfect = { reliability: 1, speed: 1, intelligence: 1, latency: 1, degradationFactor: 1 };
 
   it('stays within [0,1] for in-range inputs', () => {
     expect(combineScore(perfect, BANDIT_PRESETS.balanced)).toBeLessThanOrEqual(1);
-    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, degradationFactor: 1 }, BANDIT_PRESETS.balanced)).toBe(0);
+    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, latency: 0, degradationFactor: 1 }, BANDIT_PRESETS.balanced)).toBe(0);
   });
 
   it('a 100%-reliable slow model beats a 0%-reliable fast one under balanced — no hand-cap needed', () => {
-    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
-    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
+    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
+    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
     expect(reliable).toBeGreaterThan(flaky);
   });
 
   it('the smartest preset ranks a high-intelligence model above a fast one', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
+    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
+    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
     expect(smart).toBeGreaterThan(fast);
   });
 
   it('the fastest preset flips that ordering', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
+    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
+    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
     expect(fast).toBeGreaterThan(smart);
   });
 
@@ -94,7 +112,7 @@ describe('scoring: combineScore', () => {
 
   it('every preset weight vector sums to 1', () => {
     for (const w of Object.values(BANDIT_PRESETS)) {
-      expect(w.reliability + w.speed + w.intelligence).toBeCloseTo(1, 5);
+      expect(w.reliability + w.speed + w.intelligence + w.latency).toBeCloseTo(1, 5);
     }
   });
 });

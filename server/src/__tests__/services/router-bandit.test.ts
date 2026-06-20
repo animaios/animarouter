@@ -153,20 +153,21 @@ describe('bandit router', () => {
   });
 
   it('custom weights persist normalized; default to balanced until saved', () => {
-    expect(getCustomWeights()).toEqual({ reliability: 0.5, speed: 0.25, intelligence: 0.25 });
-    setCustomWeights({ reliability: 0.6, speed: 0.3, intelligence: 0.1 });
+    expect(getCustomWeights()).toEqual({ reliability: 0.4, speed: 0.2, intelligence: 0.2, latency: 0.2 });
+    setCustomWeights({ reliability: 0.5, speed: 0.2, intelligence: 0.1, latency: 0.2 });
     const w = getCustomWeights();
-    expect(w.reliability).toBeCloseTo(0.6, 10);
-    expect(w.speed).toBeCloseTo(0.3, 10);
+    expect(w.reliability).toBeCloseTo(0.5, 10);
+    expect(w.speed).toBeCloseTo(0.2, 10);
     expect(w.intelligence).toBeCloseTo(0.1, 10);
+    expect(w.latency).toBeCloseTo(0.2, 10);
     // Non-normalized input is normalized on save.
-    setCustomWeights({ reliability: 1, speed: 1, intelligence: 0 });
-    expect(getCustomWeights()).toEqual({ reliability: 0.5, speed: 0.5, intelligence: 0 });
+    setCustomWeights({ reliability: 1, speed: 1, intelligence: 0, latency: 0 });
+    expect(getCustomWeights()).toEqual({ reliability: 0.5, speed: 0.5, intelligence: 0, latency: 0 });
   });
 
   it('custom weights reject all-zero and negative vectors', () => {
-    expect(() => setCustomWeights({ reliability: 0, speed: 0, intelligence: 0 })).toThrow();
-    expect(() => setCustomWeights({ reliability: -1, speed: 1, intelligence: 1 })).toThrow();
+    expect(() => setCustomWeights({ reliability: 0, speed: 0, intelligence: 0, latency: 0 })).toThrow();
+    expect(() => setCustomWeights({ reliability: -1, speed: 1, intelligence: 1, latency: 1 })).toThrow();
   });
 
   it('custom strategy routes with the saved weights (extreme speed wins)', () => {
@@ -178,14 +179,14 @@ describe('bandit router', () => {
     addHistory('groq', 'fast', { successes: 60, failures: 2, outTokens: 1000, latencyMs: 1000, ttfbMs: 150 });
 
     setRoutingStrategy('custom');
-    setCustomWeights({ reliability: 0.1, speed: 0.9, intelligence: 0 });
+    setCustomWeights({ reliability: 0.1, speed: 0.8, intelligence: 0, latency: 0.1 });
     refreshStatsCache(getDb(), true);
     const counts = pickCounts(300);
     expect((counts['fast'] ?? 0)).toBeGreaterThan(counts['smart'] ?? 0);
 
     const { strategy, weights } = getRoutingScores();
     expect(strategy).toBe('custom');
-    expect(weights).toEqual({ reliability: 0.1, speed: 0.9, intelligence: 0 });
+    expect(weights).toEqual({ reliability: 0.1, speed: 0.8, intelligence: 0, latency: 0.1 });
   });
 
   it('getRoutingScores returns a per-axis breakdown ranked by score', () => {
@@ -195,7 +196,7 @@ describe('bandit router', () => {
     refreshStatsCache(getDb(), true);
     const { strategy, weights, scores } = getRoutingScores();
     expect(strategy).toBe('balanced');
-    expect(weights).toEqual({ reliability: 0.5, speed: 0.25, intelligence: 0.25 });
+    expect(weights).toEqual({ reliability: 0.4, speed: 0.2, intelligence: 0.2, latency: 0.2 });
     expect(scores).toHaveLength(1);
     expect(scores[0]).toMatchObject({ modelId: 'm1', enabled: true });
     expect(scores[0].reliability).toBeGreaterThan(0.9);

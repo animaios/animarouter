@@ -8,6 +8,7 @@ import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
   speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, combineScore,
+  latencyCompositeFromSize, heavyWeightedLatencyScore,
 } from './scoring.js';
 import {
   getDegradationFactor, getPenalty, getAllStatesView, initDegradation, getBoost,
@@ -173,12 +174,16 @@ export function getCustomWeights(): RoutingWeights {
   const raw = getSetting(CUSTOM_WEIGHTS_KEY);
   if (raw) {
     try {
-      const w = JSON.parse(raw) as RoutingWeights;
+      const w = JSON.parse(raw) as Partial<RoutingWeights>;
+      const reliability = w.reliability ?? 0;
+      const speed = w.speed ?? 0;
+      const intelligence = w.intelligence ?? 0;
+      const latency = w.latency ?? 0.20;  // default for old 3-axis stored weights
       if (
-        [w.reliability, w.speed, w.intelligence].every(v => Number.isFinite(v) && v >= 0) &&
-        w.reliability + w.speed + w.intelligence > 0
+        [reliability, speed, intelligence, latency].every(v => Number.isFinite(v) && v >= 0) &&
+        reliability + speed + intelligence + latency > 0
       ) {
-        return { reliability: w.reliability, speed: w.speed, intelligence: w.intelligence };
+        return { reliability, speed, intelligence, latency };
       }
     } catch { /* corrupt setting → fall through to default */ }
   }
@@ -186,11 +191,11 @@ export function getCustomWeights(): RoutingWeights {
 }
 
 export function setCustomWeights(weights: RoutingWeights): void {
-  const { reliability, speed, intelligence } = weights;
-  if (![reliability, speed, intelligence].every(v => Number.isFinite(v) && v >= 0)) {
+  const { reliability, speed, intelligence, latency } = weights;
+  if (![reliability, speed, intelligence, latency].every(v => Number.isFinite(v) && v >= 0)) {
     throw new Error('Custom weights must be non-negative numbers');
   }
-  const sum = reliability + speed + intelligence;
+  const sum = reliability + speed + intelligence + latency;
   if (sum <= 0) {
     throw new Error('Custom weights must not all be zero');
   }
@@ -198,6 +203,7 @@ export function setCustomWeights(weights: RoutingWeights): void {
     reliability: reliability / sum,
     speed: speed / sum,
     intelligence: intelligence / sum,
+    latency: latency / sum,
   }));
 }
 
@@ -349,7 +355,7 @@ function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benc
 // Per-model axis values + the final score. `sampled` chooses Thompson sampling
 // (for routing) vs. the expected value (for a stable dashboard display).
 interface ScoredEntry {
-  axes: { reliability: number; speed: number; intelligence: number };
+  axes: { reliability: number; speed: number; intelligence: number; latency: number };
   degradationFactor: number;
   boost: number;
   score: number;
@@ -362,6 +368,8 @@ function scoreChainEntry(
   intelMax: number,
   speedMin: number,
   speedMax: number,
+  latencyMin: number,
+  latencyMax: number,
   sampled: boolean,
 ): ScoredEntry {
   const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
@@ -389,9 +397,20 @@ function scoreChainEntry(
   const totalRequests = Math.round(successes + failures);
   const speed = heavyWeightedSpeedScore(
     stats?.tokPerSec ?? 0,
-    stats?.avgTtfbMs ?? null,
     totalRequests,
     defaultSpeed,
+  );
+
+  // Latency axis: TTFB, blended with manual size-based prior.
+  const latencyComposite = latencyCompositeFromSize(entry.size_label);
+  const defaultLatency = latencyMax > latencyMin
+    ? (latencyComposite - latencyMin) / (latencyMax - latencyMin)
+    : 1;
+
+  const latency = heavyWeightedLatencyScore(
+    stats?.avgTtfbMs ?? null,
+    totalRequests,
+    defaultLatency,
   );
 
   const intelligence = intelligenceScore(
@@ -413,9 +432,9 @@ function scoreChainEntry(
     );
   }
 
-  const baseScore = combineScore({ reliability, speed, intelligence, degradationFactor }, weights);
+  const baseScore = combineScore({ reliability, speed, intelligence, latency, degradationFactor }, weights);
   const score = baseScore * boost;
-  return { axes: { reliability, speed, intelligence }, degradationFactor, boost, score };
+  return { axes: { reliability, speed, intelligence, latency }, degradationFactor, boost, score };
 }
 
 /**
@@ -444,8 +463,13 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
   const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
   const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
+  // Latency composites for min-max normalization
+  const latencyComposites = chain.map(e => latencyCompositeFromSize(e.size_label));
+  const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
+  const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+
   return chain
-    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, speedMin, speedMax, true).score }))
+    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, speedMin, speedMax, latencyMin, latencyMax, true).score }))
     // Higher score first; manual priority breaks ties so the chain still matters.
     .sort((a, b) => b.s - a.s || a.e.priority - b.e.priority)
     .map(x => x.e);
@@ -695,6 +719,7 @@ export interface RoutingScore {
   reliability: number;
   speed: number;
   intelligence: number;
+  latency: number;
   degradationFactor: number;
   boost: number;
   score: number;
@@ -730,8 +755,13 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
   const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
   const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
+  // Latency composites for min-max normalization
+  const latencyComposites = chain.map(e => latencyCompositeFromSize(e.size_label));
+  const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
+  const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+
   const scores: RoutingScore[] = chain.map(entry => {
-    const scored = scoreChainEntry(entry, weights, intelMin, intelMax, speedMin, speedMax, false);
+    const scored = scoreChainEntry(entry, weights, intelMin, intelMax, speedMin, speedMax, latencyMin, latencyMax, false);
     const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
     return {
       modelDbId: entry.model_db_id,
@@ -742,6 +772,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       reliability: scored.axes.reliability,
       speed: scored.axes.speed,
       intelligence: scored.axes.intelligence,
+      latency: scored.axes.latency,
       degradationFactor: scored.degradationFactor,
       boost: scored.boost,
       score: scored.score,

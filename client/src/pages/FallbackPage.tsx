@@ -61,13 +61,14 @@ interface FallbackEntry {
 
 type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
 
-type RoutingWeights = { reliability: number; speed: number; intelligence: number }
+type RoutingWeights = { reliability: number; speed: number; intelligence: number; latency: number }
 
 interface RoutingScore {
   modelDbId: number
   reliability: number
   speed: number
   intelligence: number
+  latency: number
   boost: number
   score: number
   totalRequests: number
@@ -85,11 +86,11 @@ type Row = FallbackEntry & Partial<RoutingScore>
 
 const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
   { key: 'priority', label: 'Manual', blurb: 'Route in the exact order you set below. Drag the handles to reorder. No scoring; the chain is followed top-to-bottom.' },
-  { key: 'balanced', label: 'Balanced', blurb: 'Reliability leads (50%), with speed and intelligence weighted equally (25% each). A sensible all-round default.' },
-  { key: 'smartest', label: 'Smartest', blurb: 'Prefer the most capable model that still works. Intelligence 55%, reliability 35%, speed 10%.' },
-  { key: 'fastest', label: 'Fastest', blurb: 'Prefer the fastest model that still works. Speed 55%, reliability 35%, intelligence 10%.' },
-  { key: 'reliable', label: 'Most reliable', blurb: 'Maximize success rate above all. Reliability 70%, speed and intelligence 15% each.' },
-  { key: 'custom', label: 'Custom', blurb: 'Set your own balance of reliability, speed and intelligence with sliders. Same engine as the presets, just your weights.' },
+  { key: 'balanced', label: 'Balanced', blurb: 'Reliability leads (40%), with speed, intelligence and latency weighted equally (20% each). A sensible all-round default.' },
+  { key: 'smartest', label: 'Smartest', blurb: 'Prefer the most capable model that still works. Intelligence 45%, reliability 30%, latency 15%, speed 10%.' },
+  { key: 'fastest', label: 'Fastest', blurb: 'Prefer the fastest, most responsive model. Latency 35%, speed 30%, reliability 25%, intelligence 10%.' },
+  { key: 'reliable', label: 'Most reliable', blurb: 'Maximize success rate above all. Reliability 60%, intelligence 15%, latency 15%, speed 10%.' },
+  { key: 'custom', label: 'Custom', blurb: 'Set your own balance of reliability, speed, intelligence and latency with sliders. Same engine as the presets, just your weights.' },
 ]
 
 // Slider axes share the colors used by the score table columns below.
@@ -97,6 +98,7 @@ const WEIGHT_AXES: { key: keyof RoutingWeights; label: string; color: string }[]
   { key: 'reliability', label: 'Reliability', color: '#22c55e' },
   { key: 'speed', label: 'Speed', color: '#3b82f6' },
   { key: 'intelligence', label: 'Intelligence', color: '#a855f7' },
+  { key: 'latency', label: 'Latency', color: '#f59e0b' },
 ]
 
 // Slider popover for the 'custom' strategy. Sliders are independent (0-100)
@@ -115,6 +117,7 @@ function CustomWeightsPopover({ saved, onSave, saving }: {
       reliability: Math.round(w.reliability * 100),
       speed: Math.round(w.speed * 100),
       intelligence: Math.round(w.intelligence * 100),
+      latency: Math.round(w.latency * 100),
     }
   }
 
@@ -129,11 +132,12 @@ function CustomWeightsPopover({ saved, onSave, saving }: {
       reliability: values.reliability / 100,
       speed: values.speed / 100,
       intelligence: values.intelligence / 100,
+      latency: values.latency / 100,
     })
     setDirty(false)
   }
 
-  const sum = values.reliability + values.speed + values.intelligence
+  const sum = values.reliability + values.speed + values.intelligence + values.latency
 
   return (
     <Popover onOpenChange={open => { if (open) { setValues(fromSaved(saved)); setDirty(false) } }}>
@@ -408,18 +412,26 @@ function RowContent({
                 : 'No data'
             }
           </div>
+          <AxisBar value={row.speed} color="#3b82f6" />
+        </div>
+      </td>
+      <td className="py-2 pr-3 align-middle">
+        <div className="flex flex-col gap-1">
+          <div className="text-xs font-mono text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">
+            {row.actualAvgTtfbMs != null && row.actualAvgTtfbMs > 0
+              ? row.actualAvgTtfbMs >= 1000
+                ? `${(row.actualAvgTtfbMs / 1000).toFixed(2)}s`
+                : `${Math.round(row.actualAvgTtfbMs)}ms`
+              : '—'
+            }
+          </div>
           <div className="flex items-center gap-1.5">
             <div className="h-1.5 w-12 rounded-full bg-muted overflow-hidden">
-              <div className="h-full rounded-full" style={{ width: `${Math.round((row.speed ?? 0) * 100)}%`, backgroundColor: '#3b82f6' }} />
+              <div className="h-full rounded-full" style={{ width: `${Math.round((row.latency ?? 0) * 100)}%`, backgroundColor: '#f59e0b' }} />
             </div>
-            <div className="flex items-center gap-1">
-              <span className="font-mono text-[11px] text-muted-foreground tabular-nums w-7 text-right opacity-0 group-hover:opacity-100 transition-opacity">
-                {Math.round((row.speed ?? 0) * 100)}
-              </span>
-              {row.actualAvgTtfbMs && (
-                <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{row.actualAvgTtfbMs >= 1000 ? `${(row.actualAvgTtfbMs / 1000).toFixed(2)}s` : `${Math.round(row.actualAvgTtfbMs)}ms`} ttfb</span>
-              )}
-            </div>
+            <span className="font-mono text-[11px] text-muted-foreground tabular-nums w-7 text-right opacity-0 group-hover:opacity-100 transition-opacity">
+              {row.latency !== undefined ? Math.round(row.latency * 100) : '–'}
+            </span>
           </div>
         </div>
       </td>
@@ -741,10 +753,13 @@ export default function FallbackPage() {
           </div>
         </th>
         <th className="py-2 pr-3 font-medium">
+          <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#f59e0b' }} />TTFB</span>
+        </th>
+        <th className="py-2 pr-3 font-medium">
           <span className="inline-flex items-center gap-1"><span className="size-2 rounded-sm" style={{ background: '#a855f7' }} />Intelligence</span>
         </th>
         <th className="py-2 pr-3 font-medium text-right">
-          <Tooltip text="Final routing score across reliability, speed and intelligence. Higher routes first.">
+          <Tooltip text="Final routing score across reliability, speed, intelligence and latency. Higher routes first.">
             <span className="underline decoration-dotted underline-offset-2 cursor-help">Score</span>
           </Tooltip>
         </th>
@@ -765,7 +780,7 @@ export default function FallbackPage() {
     <div>
       <PageHeader
         title="Models"
-        description="Pick a routing strategy. In Manual mode you drag to set the order; the other strategies route by live score across reliability, speed and intelligence."
+        description="Pick a routing strategy. In Manual mode you drag to set the order; the other strategies route by live score across reliability, speed, intelligence and latency."
         divider={false}
         actions={<ModelsTabs />}
       />
@@ -779,7 +794,8 @@ export default function FallbackPage() {
               <span className="text-xs text-muted-foreground tabular-nums">
                 reliability {Math.round(routing.weights.reliability * 100)}% ·
                 {' '}speed {Math.round(routing.weights.speed * 100)}% ·
-                {' '}intelligence {Math.round(routing.weights.intelligence * 100)}%
+                {' '}intelligence {Math.round(routing.weights.intelligence * 100)}% ·
+                {' '}latency {Math.round(routing.weights.latency * 100)}%
               </span>
             )}
           </div>

@@ -418,9 +418,11 @@ No `CURRENT_DATA_VERSION` bump needed — no data reset required.
 | File | Scope |
 |------|-------|
 | `server/src/services/scoring.ts` | Add `latency` to `RoutingWeights`, `ScoreInputs`; add `latencyScore`, `heavyWeightedLatencyScore`, `latencyCompositeFromSize`, `TTFB_PRIOR_MS`, `LATENCY_PRIOR`; make `speedScore` throughput-only; update `combineScore`; update `BANDIT_PRESETS` |
-| `server/src/services/router.ts` | Add `latency` to `ScoredEntry.axes`, `scoreChainEntry` (new params + latency block), `orderChain` (latency composites + min-max), `getCustomWeights` (4-field + backward compat), `setCustomWeights` (4-field); update `getRoutingScores` return shape |
+| `server/src/services/router.ts` | Add `latency` to `ScoredEntry.axes`, `scoreChainEntry` (new params + latency block), `orderChain` (latency composites + min-max), `getCustomWeights` (4-field + backward compat), `setCustomWeights` (4-field); update `getRoutingScores` return shape; add `latency` to `RoutingScore` interface |
 | `server/src/routes/fallback.ts` | Add `latency` to `routingSchema` |
-| `client/src/pages/FallbackPage.tsx` | Add `latency` to `RoutingWeights`, `RoutingScore`; update `STRATEGIES`, `WEIGHT_AXES`; extend `CustomWeightsPopover`; add TTFB column to models table; add latency score dot |
+| `client/src/pages/FallbackPage.tsx` | Add `latency` to `RoutingWeights`, `RoutingScore`; update `STRATEGIES`, `WEIGHT_AXES`; extend `CustomWeightsPopover`; add TTFB column to models table; add latency score dot; remove inline TTFB display from Speed column; update strategy weights header display, page description, and Score tooltip to mention latency |
+| `server/src/__tests__/services/scoring.test.ts` | Update `speedScore()` calls (drop `ttfbMs` param); remove TTFB-blending test (now covered by `latencyScore`); add `latency` to all `ScoreInputs` in `combineScore` tests; update preset weight-sum assertion for 4 axes; add `latencyScore` test cases |
+| `server/src/__tests__/services/router-bandit.test.ts` | Add `latency` field to all `setCustomWeights` / `getCustomWeights` assertions; update `toEqual` expectations for 4-axis weights |
 
 ---
 
@@ -445,3 +447,14 @@ No `CURRENT_DATA_VERSION` bump needed — no data reset required.
 1. **`LATENCY_PRIOR` value**: Set to 0.6 (same as `SPEED_PRIOR`) so unmeasured models are explored. Tunable if latency axis turns out to over-explore.
 2. **TTFB column sorting**: Not in scope for this spec (adding sort-by-TTFB to the column header is a natural follow-up).
 3. **`speed_rank` → latency prior**: Currently `latencyCompositeFromSize` uses `sizeLabel` only. `speed_rank` is not used because it's a within-provider rank for overall speed, not specifically TTFB. If a per-model "latency rank" is added later, it can feed the prior.
+
+---
+
+## Review Notes (Implementation Gaps Found)
+
+1. **`shared/types.ts`**: `RoutingWeights` and `RoutingScore` are NOT mirrored in shared types — no change needed there.
+2. **Inline TTFB removal**: The existing Speed column in `FallbackPage.tsx` renders TTFB inline (`${avgTtfbMs}ms ttfb` on hover). This must be removed when the dedicated TTFB column is added to avoid redundancy.
+3. **Strategy weights header**: The `{routing.weights && ...}` block at the top of the strategy section displays `reliability X% · speed Y% · intelligence Z%` — needs `latency Z%` appended.
+4. **Page description**: `PageHeader` description says "reliability, speed and intelligence" — needs "latency" added.
+5. **Score tooltip**: Says "Final routing score across reliability, speed and intelligence" — needs updating.
+6. **Test breakage**: `scoring.test.ts` has 6 tests using the old `speedScore(tokPerSec, ttfbMs)` signature; `router-bandit.test.ts` has 5 tests with hardcoded 3-axis weight assertions. All must be updated.
