@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 
 // Mock only routeRequest so we don't need real provider keys; keep the rest of
-// the router module (recordSuccess / recordRateLimitHit) intact.
+// the router module (degradation integration) intact.
 const { mockRouteRequest } = vi.hoisted(() => ({ mockRouteRequest: vi.fn() }));
 vi.mock('../../services/router.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/router.js')>();

@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, refreshStatsCache } from '../services/router.js';
+import { getAllStatesView, getDisplayTier } from '../services/degradation.js';
 import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
 
 export const fallbackRouter = Router();
@@ -254,3 +255,33 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
 });
 
 // Token budget system removed — endpoint deleted.
+
+// ── Degradation dashboard API ─────────────────────────────────────────────────
+// GET /degradation → per-model penalty state, display tier, consecutive hits,
+// estimated recovery time. Uses decayed view (not raw stored penalties).
+fallbackRouter.get('/degradation', (_req: Request, res: Response) => {
+  const db = getDb();
+  const states = getAllStatesView();
+  const result: any[] = [];
+  for (const [modelDbId, state] of states) {
+    const model = db.prepare(
+      'SELECT platform, model_id, display_name FROM models WHERE id = ?'
+    ).get(modelDbId) as any;
+    result.push({
+      modelDbId,
+      platform: model?.platform ?? null,
+      modelId: model?.model_id ?? null,
+      displayName: model?.display_name ?? null,
+      penalty: state.penalty,
+      displayTier: state.displayTier,
+      consecutiveHits: state.consecutiveHits,
+      consecutiveMajorHits: state.consecutiveMajorHits,
+      halfLifeMs: state.halfLifeMs,
+      estimatedRecoveryMs: state.penalty > 1
+        ? state.halfLifeMs * Math.log2(state.penalty)
+        : null,
+      lastHitAt: state.lastHitAt,
+    });
+  }
+  res.json(result);
+});

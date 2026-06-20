@@ -3,10 +3,10 @@ import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   getAllPenalties,
-  recordRateLimitHit,
   routeRequest,
   setRoutingStrategy,
 } from '../../services/router.js';
+import { recordFailure } from '../../services/degradation.js';
 
 describe('Router', () => {
   beforeAll(() => {
@@ -170,16 +170,20 @@ describe('Router', () => {
 
   it('applies elapsed decay before adding a new 429 penalty', () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date(2024, 1, 1));
     const modelDbId = 987654321;
 
-    recordRateLimitHit(modelDbId);
-    vi.advanceTimersByTime(10 * 60 * 1000);
-    recordRateLimitHit(modelDbId);
+    // recordFailure(id, 'minor') uses the degradation engine directly.
+    // Minor weight=1.0, compoundFactor=1.5, halfLife=2min.
+    recordFailure(modelDbId, 'minor');  // penalty=1.0, consHits=1
+    vi.advanceTimersByTime(10 * 60 * 1000); // 5 half-lives → 1.0 * 0.5^5 ≈ 0.03125
+    recordFailure(modelDbId, 'minor');  // decay then add: 0.03125 + 1.0*1.5^1 = 1.53125
 
-    expect(getAllPenalties()).toContainEqual({
-      modelDbId,
-      count: 2,
-      penalty: 3,
-    });
+    // count=2 (consecutiveHits), penalty ≈ 1.53125
+    const penalties = getAllPenalties();
+    const entry = penalties.find(p => p.modelDbId === modelDbId);
+    expect(entry).toBeDefined();
+    expect(entry!.count).toBe(2);
+    expect(entry!.penalty).toBeCloseTo(1.531, 2);
   });
 });

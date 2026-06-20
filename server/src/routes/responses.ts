@@ -8,7 +8,8 @@ import type {
   ChatToolDefinition,
   ChatToolChoice,
 } from '@api-gateway/shared/types.js';
-import { routeRequest, recordRateLimitHit, recordSuccess, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
+import { routeRequest, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
+import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
 import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs } from '../services/ratelimit.js';
 import { getUnifiedApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
@@ -519,7 +520,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, `unparseable inline tool-call dialect: ${heldText.slice(0, 120)}`);
             skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
             setCooldown(route.platform, route.modelId, route.keyId, computeRetryCooldownMs(false, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
-            recordRateLimitHit(route.modelDbId);
+            recordFailure(route.modelDbId, 'minor');
             lastError = new Error(`unparseable inline tool-call dialect from ${route.displayName}`);
             continue;
           }
@@ -560,7 +561,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
           logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, 'empty completion (no content, no tool_calls)');
           skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
           setCooldown(route.platform, route.modelId, route.keyId, computeRetryCooldownMs(false, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
-          recordRateLimitHit(route.modelDbId);
+          recordFailure(route.modelDbId, 'minor');
           lastError = new Error(`empty completion from ${route.displayName}`);
           continue;
         }
@@ -633,7 +634,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
           logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, Date.now() - start, 'empty completion (no content, no tool_calls)');
           skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
           setCooldown(route.platform, route.modelId, route.keyId, computeRetryCooldownMs(false, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
-          recordRateLimitHit(route.modelDbId);
+          recordFailure(route.modelDbId, 'minor');
           lastError = new Error(`empty completion from ${route.displayName}`);
           continue;
         }
@@ -678,7 +679,8 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             { rpd: route.rpdLimit, tpd: route.tpdLimit },
           ));
         }
-        recordRateLimitHit(route.modelDbId);
+        const respTier = classifyError(err);
+        if (respTier) recordFailure(route.modelDbId, respTier);
         lastError = err;
         continue;
       }

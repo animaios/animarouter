@@ -7,6 +7,27 @@ import { startRequestRetentionPruner } from './services/request-retention.js';
 import { rebuildExhaustionFromDB } from './services/key-exhaustion.js';
 import { initDegradation, loadState, applyDecay, flushDirtyStates, evictGhostStates } from './services/degradation.js';
 
+/** Synchronous flush of dirty degradation states on shutdown (better-sqlite3 is sync). */
+function shutdownFlushDegradation() {
+  try {
+    const dirty = flushDirtyStates();
+    if (dirty.length > 0) {
+      const upsert = getDb().prepare(`
+        INSERT OR REPLACE INTO model_degradation
+        (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const { modelDbId, state } of dirty) {
+        upsert.run(modelDbId, state.penalty, state.tier,
+          state.consecutiveHits, state.consecutiveMajorHits,
+          state.lastHitAt, state.halfLifeMs);
+      }
+    }
+  } catch (e) {
+    console.error('[Shutdown] Degradation flush failed:', e);
+  }
+}
+
 const PORT = process.env.PORT ?? 3001;
 // Dual-stack ('::') by default so the dashboard is reachable over both IPv4
 // and IPv6 (e.g. IPv6-enabled Docker networks — #180). Hosts with IPv6

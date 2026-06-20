@@ -11,7 +11,6 @@ import {
 } from './scoring.js';
 import {
   getDegradationFactor, getPenalty, getAllStatesView, initDegradation,
-  recordFailure, recordSuccess,
 } from './degradation.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Database } from 'better-sqlite3';
@@ -130,14 +129,6 @@ function ensureDegradationInit() {
   }
 }
 
-/** @deprecated Use classifyError + recordFailure from degradation module directly. */
-export function recordRateLimitHit(modelDbId: number) {
-  recordFailure(modelDbId, 'minor');
-}
-
-/** @deprecated Use recordSuccess from degradation module directly. */
-export { recordSuccess };
-
 /**
  * Get current penalties for all models (for the API/dashboard).
  * Backward-compatible wrapper around getAllStatesView().
@@ -151,11 +142,6 @@ export function getAllPenalties(): Array<{ modelDbId: number; count: number; pen
     }
   }
   return result.sort((a, b) => b.penalty - a.penalty);
-}
-
-/** @deprecated No-op — degradation state is cleaned up by the engine itself. */
-export function clearRateLimitPenalty(_modelDbId: number): void {
-  // Degradation engine handles cleanup via ghost eviction and success recovery.
 }
 
 // ── Routing strategy (persisted) ────────────────────────────────────────────

@@ -2,7 +2,6 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getDb } from '../db/index.js';
-import { clearRateLimitPenalty } from '../services/router.js';
 import { clearPlatformCaches } from '../services/ratelimit.js';
 import { hasProvider, buildProviderFor } from '../providers/index.js';
 
@@ -715,6 +714,6 @@ customRouter.delete('/api/custom-models/:id', (req: Request, res: Response) => {
   });
   tx();
 
-  clearRateLimitPenalty(id);
+  // Degradation engine handles cleanup via ghost eviction and success recovery.
   res.json({ success: true, id, archived: true });
 });
