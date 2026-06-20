@@ -52,14 +52,22 @@ function buildPlatformFilter(
   };
 }
 
-const EMPTY_SUMMARY = {
+interface SummaryResponse {
+  totalRequests: number; successRate: number;
+  totalInputTokens: number; totalOutputTokens: number;
+  avgLatencyMs: number; estimatedCostSavings: number;
+  pinnedRequests: number; pinHonoredRequests: number;
+  firstRequestAt: string | null;
+}
+
+const EMPTY_SUMMARY: SummaryResponse = {
   totalRequests: 0, successRate: 0,
   totalInputTokens: 0, totalOutputTokens: 0,
   avgLatencyMs: 0, estimatedCostSavings: 0,
   pinnedRequests: 0, pinHonoredRequests: 0,
   firstRequestAt: null,
 };
-const EMPTY_ERROR_DIST = { byCategory: [], byPlatform: [], detailed: [] };
+const EMPTY_ERROR_DIST = { byCategory: [] as any[], byPlatform: [] as any[], detailed: [] as any[] };
 
 // Summary stats
 analyticsRouter.get('/summary', (req: Request, res: Response) => {

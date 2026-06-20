@@ -298,5 +298,30 @@ describe('Analytics API', () => {
       expect(body.byPlatform).toHaveLength(1);
       expect(body.byPlatform[0].platform).toBe('active');
     });
+
+    it('filters timeline endpoint', async () => {
+      insertKey('tlactive', 1);
+      insertModel('tlactive', 'm1');
+      insertTokensRequest('tlactive', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('tlinactive', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/timeline?range=24h');
+
+      expect(body.length).toBeGreaterThan(0);
+      // Only the active provider's request is counted in each bucket
+      expect(body.every((pt: any) => pt.requests === 1)).toBe(true);
+    });
+
+    it('filters errors endpoint', async () => {
+      insertKey('erractive', 1);
+      insertModel('erractive', 'm1');
+      insertErrorRequest('erractive', 'm1', '429 rate limit', '2026-05-29 11:00:00');
+      insertErrorRequest('errinactive', 'm1', '500 internal server', '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/errors?range=24h');
+
+      expect(body).toHaveLength(1);
+      expect(body[0].platform).toBe('erractive');
+    });
   });
 });
