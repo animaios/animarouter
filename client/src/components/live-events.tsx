@@ -51,10 +51,10 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         return { id: evt.id || 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} healthy (${evt.latencyMs}ms)` };
       }
       return { id: evt.id || 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
-    case 'heartbeat.cycle_skipped':
-      return null; // Intentionally not rendered (too noisy for live feed)
+    default:
+      return null;
   }
-  return null;
+}
 
 function timeLabel(ts: number): string {
   const d = new Date(ts);
