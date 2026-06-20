@@ -245,6 +245,7 @@ function createTables(db: Database.Database) {
   ensureModelsBenchmarkColumns(db);
   ensureBenchmarkUnificationColumns(db);
   ensureBenchmarkSourceWeightsTable(db);
+  ensureDegradationTable(db);
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
@@ -301,6 +302,24 @@ function ensureBenchmarkSourceWeightsTable(db: Database.Database) {
   insert.run('aa', 0.50);
   insert.run('swe_rebench', 0.30);
   insert.run('nim', 0.15);
+}
+
+// ── Dynamic Degradation: persistent penalty state ─────────────────────────
+// Stores per-model degradation state so penalties survive server restarts.
+// Loaded at startup with time-decay applied; flushed periodically (60s).
+function ensureDegradationTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS model_degradation (
+      model_db_id   INTEGER PRIMARY KEY,
+      penalty       REAL    NOT NULL DEFAULT 0,
+      tier          TEXT    NOT NULL DEFAULT 'minor',
+      consecutive   INTEGER NOT NULL DEFAULT 0,
+      consecutive_major INTEGER NOT NULL DEFAULT 0,
+      last_hit_at   INTEGER,
+      half_life_ms  INTEGER NOT NULL DEFAULT 120000,
+      FOREIGN KEY (model_db_id) REFERENCES models(id) ON DELETE CASCADE
+    );
+  `);
 }
 
 // `requested_model` is the model id the CLIENT pinned in the request body.

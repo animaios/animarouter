@@ -3,7 +3,8 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { ChatMessage, ModelListRow } from '@api-gateway/shared/types.js';
-import { routeRequest, recordRateLimitHit, recordSuccess, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
+import { routeRequest, recordSuccess, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
+import { classifyError, recordFailure } from '../services/degradation.js';
 import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
 import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs } from '../services/ratelimit.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
@@ -1039,7 +1040,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch { /* socket gone */ }
             try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* socket gone */ }
             logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, totalOutputTokens, Date.now() - start, sanitizeProviderErrorMessage(streamErr.message), null, pinnedModelId);
-            recordRateLimitHit(route.modelDbId);
+            const streamTier = classifyError(streamErr);
+            if (streamTier) recordFailure(route.modelDbId, streamTier);
             return;
           }
           // Headers never sent — bubble to the outer retry handler, which
@@ -1225,7 +1227,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         ),
       );
     }
-    recordRateLimitHit(route.modelDbId);
+    const lastTier = classifyError(lastError);
+    if (lastTier) recordFailure(route.modelDbId, lastTier);
     publish({ type: 'routing.key_exhausted', id: requestId, provider: route.platform, keyId: route.keyId, model: route.modelId, reason: sanitizeProviderErrorMessage(lastError?.message), at: Date.now() });
     console.log(`[Proxy] Key ${route.keyId} exhausted after ${PER_KEY_RETRIES} failures from ${route.displayName}`);
     // Continue outer loop → routeRequest picks next key.

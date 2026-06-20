@@ -11,9 +11,9 @@
 // Two always-on GUARDRAILS then multiply the base — they never reorder good
 // models against each other, they only pull a model down as it gets dangerous:
 //
-//   effective = base × rateLimitFactor
+//   effective = base × degradationFactor
 //
-//   rateLimitFactor → demotes a model that is currently throwing 429s
+//   degradationFactor → demotes a model experiencing failures (severity-weighted)
 //
 // Reliability is drawn from a Beta posterior (Thompson sampling) so exploration
 // is automatic and proportional to uncertainty — a model is never permanently
@@ -195,18 +195,6 @@ export function speedCompositeFromRank(speedRank: number, sizeLabel: string): nu
   return 1000 - speedRank - penalty;
 }
 
-// ── Guardrail: live rate-limit penalty ──────────────────────────────────────
-// Maps the existing 0..MAX_PENALTY 429 penalty to a multiplier. At max penalty a
-// model keeps 40% of its score — demoted hard but never fully excluded, so it
-// can recover once the penalty decays.
-export const MAX_PENALTY = 10;
-export const RATE_LIMIT_MAX_DAMP = 0.6;
-
-export function rateLimitFactor(penalty: number): number {
-  const p = Math.min(Math.max(0, penalty), MAX_PENALTY);
-  return 1 - (p / MAX_PENALTY) * RATE_LIMIT_MAX_DAMP;
-}
-
 // ── Beta sampler (Marsaglia & Tsang via two Gamma draws) ────────────────────
 function randomNormal(): number {
   const u1 = Math.random() || Number.EPSILON;
@@ -239,11 +227,11 @@ export interface ScoreInputs {
   reliability: number;   // [0,1] — sampled (routing) or expected (display)
   speed: number;         // [0,1]
   intelligence: number;  // [0,1]
-  rateLimit: number;     // [floor,1] multiplier
+  degradationFactor: number; // [0,1] multiplier from degradation engine
 }
 
 /**
- * Convex base (∈[0,1]) × rate-limit guardrail. The weights are assumed
+ * Convex base (∈[0,1]) × degradation factor guardrail. The weights are assumed
  * to sum to 1; if a caller passes a non-normalized vector we renormalize so
  * the base never escapes [0,1].
  */
@@ -253,5 +241,5 @@ export function combineScore(inputs: ScoreInputs, weights: RoutingWeights): numb
     (weights.reliability * inputs.reliability +
       weights.speed * inputs.speed +
       weights.intelligence * inputs.intelligence) / wSum;
-  return base * inputs.rateLimit;
+  return base * inputs.degradationFactor;
 }

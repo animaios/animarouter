@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   BANDIT_PRESETS, combineScore, speedScore, intelligenceScore,
-  rateLimitFactor, sampleBeta, reliabilityPosterior,
+  sampleBeta, reliabilityPosterior,
   expectedReliability, SPEED_PRIOR,
 } from '../../services/scoring.js';
 
@@ -58,43 +58,37 @@ describe('scoring: intelligence axis', () => {
   });
 });
 
-describe('scoring: guardrails', () => {
-  it('rate-limit factor is 1 at no penalty and damped but non-zero at max', () => {
-    expect(rateLimitFactor(0)).toBe(1);
-    expect(rateLimitFactor(10)).toBeCloseTo(0.4, 5);
-    expect(rateLimitFactor(100)).toBeCloseTo(0.4, 5); // clamped
-  });
-});
+// Degradation factor tests are in degradation.test.ts
 
 describe('scoring: combineScore', () => {
-  const perfect = { reliability: 1, speed: 1, intelligence: 1, rateLimit: 1 };
+  const perfect = { reliability: 1, speed: 1, intelligence: 1, degradationFactor: 1 };
 
   it('stays within [0,1] for in-range inputs', () => {
     expect(combineScore(perfect, BANDIT_PRESETS.balanced)).toBeLessThanOrEqual(1);
-    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, rateLimit: 1 }, BANDIT_PRESETS.balanced)).toBe(0);
+    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, degradationFactor: 1 }, BANDIT_PRESETS.balanced)).toBe(0);
   });
 
   it('a 100%-reliable slow model beats a 0%-reliable fast one under balanced — no hand-cap needed', () => {
-    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, rateLimit: 1 }, BANDIT_PRESETS.balanced);
-    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, rateLimit: 1 }, BANDIT_PRESETS.balanced);
+    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
+    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
     expect(reliable).toBeGreaterThan(flaky);
   });
 
   it('the smartest preset ranks a high-intelligence model above a fast one', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, rateLimit: 1 }, BANDIT_PRESETS.smartest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, rateLimit: 1 }, BANDIT_PRESETS.smartest);
+    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
+    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
     expect(smart).toBeGreaterThan(fast);
   });
 
   it('the fastest preset flips that ordering', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, rateLimit: 1 }, BANDIT_PRESETS.fastest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, rateLimit: 1 }, BANDIT_PRESETS.fastest);
+    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
+    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
     expect(fast).toBeGreaterThan(smart);
   });
 
-  it('guardrails multiply the base down', () => {
+  it('degradation factor multiplies base down', () => {
     const base = combineScore(perfect, BANDIT_PRESETS.balanced);
-    const throttled = combineScore({ ...perfect, rateLimit: 0.4 }, BANDIT_PRESETS.balanced);
+    const throttled = combineScore({ ...perfect, degradationFactor: 0.4 }, BANDIT_PRESETS.balanced);
     expect(throttled).toBeCloseTo(base * 0.4, 5);
   });
 

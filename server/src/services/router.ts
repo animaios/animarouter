@@ -7,9 +7,12 @@ import { isExhausted } from './key-exhaustion.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
-  speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, rateLimitFactor, combineScore,
-  MAX_PENALTY,
+  speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, combineScore,
 } from './scoring.js';
+import {
+  getDegradationFactor, getPenalty, getAllStatesView, initDegradation,
+  recordFailure, recordSuccess,
+} from './degradation.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Database } from 'better-sqlite3';
 
@@ -114,82 +117,45 @@ function releaseSlot(platform: string): void {
   if (entry && entry.count > 0) entry.count--;
 }
 
-// ── Dynamic priority: track 429s per model and demote accordingly ──
-// Key: model_db_id → { count, lastHit, penalty }
-const rateLimitPenalties = new Map<number, { count: number; lastHit: number; penalty: number }>();
+// ── Degradation integration ──────────────────────────────────────────────────
+// The degradation engine (degradation.ts) replaces the old flat 429-penalty
+// system with progressive, severity-weighted degradation. State is in-memory;
+// persistence is handled by periodic flushes (see index.ts).
 
-// Penalty decays over time so models recover
-const PENALTY_PER_429 = 3;        // each 429 adds this many priority positions
-const DECAY_INTERVAL_MS = 2 * 60 * 1000; // penalty decays every 2 minutes
-const DECAY_AMOUNT = 1;            // remove this much penalty per decay interval
+let degradationInitialized = false;
+function ensureDegradationInit() {
+  if (!degradationInitialized) {
+    initDegradation();
+    degradationInitialized = true;
+  }
+}
 
-/**
- * Record a 429 for a model — increases its penalty so it sinks in priority.
- */
+/** @deprecated Use classifyError + recordFailure from degradation module directly. */
 export function recordRateLimitHit(modelDbId: number) {
-  const existing = rateLimitPenalties.get(modelDbId);
-  const now = Date.now();
-  if (existing) {
-    const decaySteps = Math.floor((now - existing.lastHit) / DECAY_INTERVAL_MS);
-    existing.penalty = Math.max(0, existing.penalty - decaySteps * DECAY_AMOUNT);
-    existing.count++;
-    existing.lastHit = now;
-    existing.penalty = Math.min(existing.penalty + PENALTY_PER_429, MAX_PENALTY);
-  } else {
-    rateLimitPenalties.set(modelDbId, { count: 1, lastHit: now, penalty: PENALTY_PER_429 });
-  }
+  recordFailure(modelDbId, 'minor');
 }
 
-/** Clear stale penalty tracking when a model is deleted from the DB. */
-export function clearRateLimitPenalty(modelDbId: number) {
-  rateLimitPenalties.delete(modelDbId);
-}
-
-/**
- * Record a success for a model — reduces its penalty so it rises back up.
- */
-export function recordSuccess(modelDbId: number) {
-  const existing = rateLimitPenalties.get(modelDbId);
-  if (existing) {
-    existing.penalty = Math.max(0, existing.penalty - 1);
-    if (existing.penalty === 0) {
-      rateLimitPenalties.delete(modelDbId);
-    }
-  }
-}
-
-/**
- * Get the current penalty for a model (with time-based decay).
- * Pure read — does not mutate the entry; decay is applied lazily only when
- * recording a new hit (recordRateLimitHit) so the clock isn't reset on every
- * routing call.
- */
-function getPenalty(modelDbId: number): number {
-  const entry = rateLimitPenalties.get(modelDbId);
-  if (!entry) return 0;
-
-  const elapsed = Date.now() - entry.lastHit;
-  const decaySteps = Math.floor(elapsed / DECAY_INTERVAL_MS);
-  const decayed = Math.max(0, entry.penalty - decaySteps * DECAY_AMOUNT);
-  if (decayed === 0) {
-    rateLimitPenalties.delete(modelDbId);
-    return 0;
-  }
-  return decayed;
-}
+/** @deprecated Use recordSuccess from degradation module directly. */
+export { recordSuccess };
 
 /**
  * Get current penalties for all models (for the API/dashboard).
+ * Backward-compatible wrapper around getAllStatesView().
  */
 export function getAllPenalties(): Array<{ modelDbId: number; count: number; penalty: number }> {
+  const states = getAllStatesView();
   const result: Array<{ modelDbId: number; count: number; penalty: number }> = [];
-  for (const [modelDbId, entry] of rateLimitPenalties) {
-    const penalty = getPenalty(modelDbId);
-    if (penalty > 0) {
-      result.push({ modelDbId, count: entry.count, penalty });
+  for (const [modelDbId, state] of states) {
+    if (state.penalty > 0) {
+      result.push({ modelDbId, count: state.consecutiveHits, penalty: state.penalty });
     }
   }
   return result.sort((a, b) => b.penalty - a.penalty);
+}
+
+/** @deprecated No-op — degradation state is cleaned up by the engine itself. */
+export function clearRateLimitPenalty(_modelDbId: number): void {
+  // Degradation engine handles cleanup via ghost eviction and success recovery.
 }
 
 // ── Routing strategy (persisted) ────────────────────────────────────────────
@@ -198,6 +164,7 @@ const CUSTOM_WEIGHTS_KEY = 'routing_custom_weights';
 const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom'];
 
 export function getRoutingStrategy(): RoutingStrategy {
+  ensureDegradationInit();
   const raw = getSetting(STRATEGY_KEY);
   return (raw && VALID_STRATEGIES.includes(raw as RoutingStrategy))
     ? (raw as RoutingStrategy)
@@ -385,7 +352,7 @@ function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benc
 // (for routing) vs. the expected value (for a stable dashboard display).
 interface ScoredEntry {
   axes: { reliability: number; speed: number; intelligence: number };
-  rateLimit: number;
+  degradationFactor: number;
   score: number;
 }
 
@@ -433,7 +400,7 @@ function scoreChainEntry(
   );
 
   // budget system removed — headroom is no longer a factor
-  const rl = rateLimitFactor(getPenalty(entry.model_db_id));
+  const degradationFactor = getDegradationFactor(entry.model_db_id);
 
   // Phase 1: log NIM metrics if available, but do NOT blend into routing scores
   if (entry.nim_throughput_tps != null || entry.nim_avg_response_ms != null || entry.nim_uptime_pct != null) {
@@ -446,8 +413,8 @@ function scoreChainEntry(
     );
   }
 
-  const score = combineScore({ reliability, speed, intelligence, rateLimit: rl }, weights);
-  return { axes: { reliability, speed, intelligence }, rateLimit: rl, score };
+  const score = combineScore({ reliability, speed, intelligence, degradationFactor }, weights);
+  return { axes: { reliability, speed, intelligence }, degradationFactor, score };
 }
 
 /**
@@ -727,7 +694,8 @@ export interface RoutingScore {
   reliability: number;
   speed: number;
   intelligence: number;
-  rateLimit: number;
+  rateLimit: number;  // @deprecated — use degradationFactor
+  degradationFactor: number;
   score: number;
   totalRequests: number; // decay-weighted observations
 }
@@ -773,7 +741,8 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       reliability: scored.axes.reliability,
       speed: scored.axes.speed,
       intelligence: scored.axes.intelligence,
-      rateLimit: scored.rateLimit,
+      rateLimit: scored.degradationFactor,
+      degradationFactor: scored.degradationFactor,
       score: scored.score,
       totalRequests: Math.round((stats?.successes ?? 0) + (stats?.failures ?? 0)),
     };
