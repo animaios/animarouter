@@ -411,7 +411,7 @@ function RowContent({
                 {Math.round((row.speed ?? 0) * 100)}
               </span>
               {row.actualAvgTtfbMs && (
-                <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{Math.round(row.actualAvgTtfbMs)}ms ttfb</span>
+                <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity">{row.actualAvgTtfbMs >= 1000 ? `${(row.actualAvgTtfbMs / 1000).toFixed(2)}s` : `${Math.round(row.actualAvgTtfbMs)}ms`} ttfb</span>
               )}
             </div>
           </div>
