@@ -283,4 +283,70 @@ describe('Analytics API', () => {
       expect(body[0].platform).toBe('erractive');
     });
   });
+
+  describe('disabled model filtering in by-model', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    it('excludes disabled model from by-model breakdown', async () => {
+      insertKey('dm', 1);
+      insertModel('dm', 'active-m', 1);
+      insertModel('dm', 'disabled-m', 0);
+      insertTokensRequest('dm', 'active-m', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('dm', 'disabled-m', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      const dmRows = body.filter((r: any) => r.platform === 'dm');
+      expect(dmRows).toHaveLength(1);
+      expect(dmRows[0].modelId).toBe('active-m');
+    });
+
+    it('includes untracked model (no models row) in by-model breakdown', async () => {
+      insertKey('untracked', 1);
+      insertModel('untracked', 'known-m', 1);
+      insertTokensRequest('untracked', 'known-m', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('untracked', 'ghost-m', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      const utRows = body.filter((r: any) => r.platform === 'untracked');
+      expect(utRows).toHaveLength(2);
+      expect(utRows.map((r: any) => r.modelId).sort()).toEqual(['ghost-m', 'known-m']);
+    });
+
+    it('re-enabled model appears in by-model breakdown', async () => {
+      insertKey('retoggle', 1);
+      insertModel('retoggle', 'm1', 0);
+      insertTokensRequest('retoggle', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const before = await request(app, '/api/analytics/by-model?range=24h');
+      expect(before.body.filter((r: any) => r.platform === 'retoggle')).toHaveLength(0);
+
+      getDb().prepare('UPDATE models SET enabled = 1 WHERE platform = ? AND model_id = ?').run('retoggle', 'm1');
+
+      const after = await request(app, '/api/analytics/by-model?range=24h');
+      const rtRows = after.body.filter((r: any) => r.platform === 'retoggle');
+      expect(rtRows).toHaveLength(1);
+      expect(rtRows[0].modelId).toBe('m1');
+      expect(rtRows[0].requests).toBe(1);
+    });
+
+    it('disabled model on active platform does not affect by-platform', async () => {
+      insertKey('dm2', 1);
+      insertModel('dm2', 'active-m2', 1);
+      insertModel('dm2', 'disabled-m2', 0);
+      insertTokensRequest('dm2', 'active-m2', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('dm2', 'disabled-m2', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/by-platform?range=24h');
+
+      const dm2Row = body.find((r: any) => r.platform === 'dm2');
+      expect(dm2Row).toBeDefined();
+      // by-platform counts ALL requests for the active platform, including disabled-model requests
+      expect(dm2Row.requests).toBe(2);
+    });
+  });
 });

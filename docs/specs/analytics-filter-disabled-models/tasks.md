@@ -83,11 +83,11 @@ npm run dev
 
 ## Acceptance Checklist
 
-- [ ] `/by-model` endpoint excludes rows where `m.enabled = 0`
-- [ ] `/by-model` endpoint still includes models with no `models` row (`m.enabled IS NULL`)
-- [ ] Other 5 analytics endpoints are **unmodified**
-- [ ] Client `AnalyticsPage.tsx` is **not modified**
-- [ ] No DB schema changes
-- [ ] No new dependencies
-- [ ] 4 new model-filtering tests pass
-- [ ] Full server test suite passes
+- [x] `/by-model` endpoint excludes rows where `m.enabled = 0`
+- [x] `/by-model` endpoint still includes models with no `models` row (`m.enabled IS NULL`)
+- [x] Other 5 analytics endpoints are **unmodified**
+- [x] Client `AnalyticsPage.tsx` is **not modified**
+- [x] No DB schema changes
+- [x] No new dependencies
+- [x] 4 new model-filtering tests pass
+- [x] Full server test suite passes (1 pre-existing failure in `routing-provider-fastfail.test.ts` — unrelated)
