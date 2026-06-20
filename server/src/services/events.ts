@@ -17,6 +17,7 @@ export type LiveEvent =
   | { type: 'routing.key_exhausted'; id: string; provider: string; keyId: number; model: string; reason: string; at: number }
   | { type: 'routing.key_retry'; id: string; provider: string; keyId: number; model: string; attempt: number; max: number; at: number }
   | { type: 'routing.model_switch'; id: string; from: string; to: string; reason: string; at: number }
+  | { type: 'routing.provider_fastfail'; id: string; provider: string; failedModelCount: number; at: number }
   | { type: 'stream.chunk'; id: string; text: string; at: number };
 
 const MAX_SUBSCRIBERS = 8;

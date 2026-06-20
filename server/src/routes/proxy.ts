@@ -189,6 +189,20 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
 
 const PER_KEY_RETRIES = 3;
 
+// Provider-outage fast-fail: when ≥N distinct models on the same provider
+// return 5xx in one request, skip ALL models from that provider.
+// Threshold is read from feature-settings on first request (DB must be ready);
+// set to 0 to disable entirely.
+let _providerFastFailThreshold: number | null = null;
+function getProviderFastFailThreshold(): number {
+  if (_providerFastFailThreshold === null) {
+    _providerFastFailThreshold = getFeatureSetting('provider_fastfail_enabled')
+      ? (getFeatureSetting('provider_fastfail_threshold') as number)
+      : 0;
+  }
+  return _providerFastFailThreshold;
+}
+
 // Echo-tolerant tool calls: agents replay OUR responses back as history, and
 // not all of them preserve the strict OpenAI shape. `type` may be dropped
 // (re-added on forward), Gemini-lineage agents (Qwen Code, AionUI) often
@@ -748,6 +762,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   let lastError: any = null;
   const isPinned = !!(requestedModel && !isAutoModel(requestedModel));
   let prevModelKey: string | undefined;
+  const providerFailures = new Map<string, Set<number>>();
+  const fastFired = new Set<string>();
 
   // Client-disconnect detection: if the agent presses Stop or closes the
   // session, abort the whole retry loop instead of grinding through
@@ -1241,6 +1257,36 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     const lastTier = classifyError(lastError);
     if (lastTier) recordFailure(route.modelDbId, lastTier);
     publish({ type: 'routing.key_exhausted', id: requestId, provider: route.platform, keyId: route.keyId, model: route.modelId, reason: sanitizeProviderErrorMessage(lastError?.message), at: Date.now() });
+
+    // ── Provider-outage fast-fail ──────────────────────────────
+    // When ≥PROVIDER_FASTFAIL_THRESHOLD distinct models on the same
+    // platform have returned a 5xx (major) error in this request,
+    // the provider is considered down — skip every remaining model
+    // from that platform for the rest of this request.
+    if (getProviderFastFailThreshold() > 0 && classifyError(lastError) === 'major') {
+      const failed = providerFailures.get(route.platform) ?? new Set<number>();
+      failed.add(route.modelDbId);
+      providerFailures.set(route.platform, failed);
+
+      if (failed.size >= getProviderFastFailThreshold() && !fastFired.has(route.platform)) {
+        fastFired.add(route.platform);
+
+        const ffDb = getDb();
+        const platformModels = ffDb.prepare(
+          'SELECT id FROM models WHERE platform = ? AND enabled = 1'
+        ).all(route.platform) as Array<{ id: number }>;
+        for (const m of platformModels) skipModels.add(m.id);
+
+        publish({
+          type: 'routing.provider_fastfail',
+          id: requestId,
+          provider: route.platform,
+          failedModelCount: failed.size,
+          at: Date.now(),
+        });
+      }
+    }
+
     console.log(`[Proxy] Key ${route.keyId} exhausted after ${PER_KEY_RETRIES} failures from ${route.displayName}`);
     // Continue outer loop → routeRequest picks next key.
   }

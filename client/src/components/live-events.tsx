@@ -14,14 +14,15 @@ interface RequestErrorEvent extends LiveEventBase { type: 'request.error'; error
 interface KeyExhaustedEvent extends LiveEventBase { type: 'routing.key_exhausted'; provider: string; keyId: number; model: string; reason: string; }
 interface KeyRetryEvent extends LiveEventBase { type: 'routing.key_retry'; provider: string; keyId: number; model: string; attempt: number; max: number; }
 interface ModelSwitchEvent extends LiveEventBase { type: 'routing.model_switch'; from: string; to: string; reason: string; }
+interface ProviderFastFailEvent extends LiveEventBase { type: 'routing.provider_fastfail'; provider: string; failedModelCount: number; }
 
-type LiveEvent = RequestStartEvent | RequestDoneEvent | RequestErrorEvent | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent;
+type LiveEvent = RequestStartEvent | RequestDoneEvent | RequestErrorEvent | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent | ProviderFastFailEvent;
 
 interface LogEntry {
   id: string;
   text: string;
   ts: number;
-  kind: 'start' | 'done' | 'error' | 'info';
+  kind: 'start' | 'done' | 'error' | 'info' | 'warn';
 }
 
 const MAX_LOG_LINES = 200;
@@ -42,6 +43,8 @@ function formatEvent(evt: LiveEvent): LogEntry {
       return { id: evt.id, ts, kind: 'info', text: `↻ [${rId}] Retrying ${evt.provider}/${evt.model} key#${evt.keyId} (${evt.attempt}/${evt.max})` };
     case 'routing.model_switch':
       return { id: evt.id, ts, kind: 'info', text: `→ [${rId}] Switching model: ${evt.from} → ${evt.to}` };
+    case 'routing.provider_fastfail':
+      return { id: evt.id, ts, kind: 'warn', text: `⚡ [${rId}] Provider ${evt.provider} fast-failed (${evt.failedModelCount} models down) — skipping remaining models` };
   }
 }
 
@@ -166,6 +169,7 @@ export function LiveEvents() {
                   l.kind === 'error' ? 'text-rose-600 dark:text-rose-400 bg-rose-500/10'
                   : l.kind === 'done' ? 'text-emerald-600 dark:text-emerald-400'
                   : l.kind === 'start' ? 'text-sky-600 dark:text-sky-400'
+                  : l.kind === 'warn' ? 'text-amber-600 dark:text-amber-400'
                   : 'text-muted-foreground'
                 }`}
               >
