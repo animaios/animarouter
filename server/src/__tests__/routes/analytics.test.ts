@@ -43,6 +43,35 @@ function insertTokensRequest(
   `).run(platform, modelId, status, inputTokens, outputTokens, createdAt);
 }
 
+function insertKey(platform: string, enabled = 1) {
+  const db = getDb();
+  db.prepare(`
+    INSERT OR IGNORE INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+    VALUES (?, 'test', ?, ?, ?, 'healthy', ?)
+  `).run(platform, '0'.repeat(64), '0'.repeat(32), '0'.repeat(32), enabled);
+}
+
+function insertModel(platform: string, modelId: string, enabled = 1) {
+  const db = getDb();
+  db.prepare(`
+    INSERT OR IGNORE INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
+    VALUES (?, ?, ?, 1, 1, ?)
+  `).run(platform, modelId, modelId, enabled);
+}
+
+function insertErrorRequest(
+  platform: string,
+  modelId: string,
+  error: string,
+  createdAt: string,
+) {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
+    VALUES (?, ?, 'error', 0, 0, 3, ?, ?)
+  `).run(platform, modelId, error, createdAt);
+}
+
 describe('Analytics API', () => {
   let app: Express;
 
@@ -55,6 +84,17 @@ describe('Analytics API', () => {
 
   beforeEach(() => {
     getDb().prepare('DELETE FROM requests').run();
+    getDb().prepare('DELETE FROM api_keys').run();
+    // Seed keys and models so the active-provider filter includes these platforms' data.
+    // Models use INSERT OR IGNORE to avoid UNIQUE conflicts with initDb-seeded rows.
+    insertKey('test', 1);
+    insertKey('groq', 1);
+    insertKey('custom', 1);
+    insertModel('test', 'test-model');
+    insertModel('test', 'model-a');
+    insertModel('test', 'model-b');
+    insertModel('groq', 'llama-3.3-70b-versatile');
+    insertModel('custom', 'mystery-model');
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
   });
@@ -163,6 +203,100 @@ describe('Analytics API', () => {
       const row = body.find((r: any) => r.modelId === 'model-a');
       expect(row.requests).toBe(3);
       expect(row.pinnedRequests).toBe(1);
+    });
+  });
+
+  describe('active provider filtering', () => {
+    beforeEach(() => {
+      // api_keys and requests already cleared by parent beforeEach.
+      // Use unique platform names across filter tests so INSERT OR IGNORE doesn't
+      // carry stale enabled=1 state between tests.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    it('excludes requests from providers with no keys (summary)', async () => {
+      insertKey('haskey', 1);
+      insertModel('haskey', 'm1');
+      insertTokensRequest('haskey', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('nokey', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/summary?range=24h');
+
+      expect(body.totalRequests).toBe(1);
+    });
+
+    it('excludes requests from providers with only disabled keys (summary)', async () => {
+      insertKey('disabled', 0);
+      insertModel('disabled', 'm1');
+      insertTokensRequest('disabled', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/summary?range=24h');
+
+      expect(body.totalRequests).toBe(0);
+      expect(body.successRate).toBe(0);
+    });
+
+    it('excludes requests from providers with keys but no enabled models (summary)', async () => {
+      insertKey('nomodels', 1);
+      // No enabled models for 'nomodels' — intentionally omit insertModel()
+      insertTokensRequest('nomodels', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/summary?range=24h');
+
+      expect(body.totalRequests).toBe(0);
+    });
+
+    it('includes requests once a key is enabled', async () => {
+      insertKey('late', 0);
+      insertModel('late', 'm1');
+      insertTokensRequest('late', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const before = await request(app, '/api/analytics/summary?range=24h');
+      expect(before.body.totalRequests).toBe(0);
+
+      getDb().prepare('UPDATE api_keys SET enabled = 1 WHERE platform = ?').run('late');
+
+      const after = await request(app, '/api/analytics/summary?range=24h');
+      expect(after.body.totalRequests).toBe(1);
+    });
+
+    it('filters by-platform endpoint', async () => {
+      insertKey('active', 1);
+      insertModel('active', 'm1');
+      insertTokensRequest('active', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('inactive', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/by-platform?range=24h');
+
+      expect(body).toHaveLength(1);
+      expect(body[0].platform).toBe('active');
+    });
+
+    it('filters by-model endpoint', async () => {
+      insertKey('active', 1);
+      insertModel('active', 'm1');
+      insertModel('active', 'm2');
+      insertTokensRequest('active', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('active', 'm2', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('inactive', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      expect(body).toHaveLength(2);
+      expect(body.every((r: any) => r.platform === 'active')).toBe(true);
+    });
+
+    it('filters error-distribution endpoint', async () => {
+      insertKey('active', 1);
+      insertModel('active', 'm1');
+      insertErrorRequest('active', 'm1', '429 rate limit', '2026-05-29 11:00:00');
+      insertErrorRequest('inactive', 'm1', '500 internal server', '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/error-distribution?range=24h');
+
+      expect(body.byPlatform).toHaveLength(1);
+      expect(body.byPlatform[0].platform).toBe('active');
     });
   });
 });

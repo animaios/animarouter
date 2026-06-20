@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
+import type Database from 'better-sqlite3';
 import { getDb } from '../db/index.js';
 import { FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M } from '../db/model-pricing.js';
 
@@ -24,11 +25,51 @@ function getSinceTimestamp(range: string): string {
   }
 }
 
+/** Return platforms that have ≥1 enabled key AND ≥1 enabled model. */
+function getActivePlatforms(db: Database.Database): string[] {
+  return (db.prepare(`
+    SELECT DISTINCT k.platform
+    FROM api_keys k
+    WHERE k.enabled = 1
+      AND EXISTS (
+        SELECT 1 FROM models m
+        WHERE m.platform = k.platform AND m.enabled = 1
+      )
+  `).all() as { platform: string }[]).map(r => r.platform);
+}
+
+/** Build an IN-clause fragment for active platforms.
+ *  Returns { sql, params } — sql is '' when no active platforms exist. */
+function buildPlatformFilter(
+  activePlatforms: string[],
+  alias = '',
+): { sql: string; params: string[] } {
+  if (activePlatforms.length === 0) return { sql: '', params: [] };
+  const col = alias ? `${alias}.platform` : 'platform';
+  return {
+    sql: `AND ${col} IN (${activePlatforms.map(() => '?').join(',')})`,
+    params: activePlatforms,
+  };
+}
+
+const EMPTY_SUMMARY = {
+  totalRequests: 0, successRate: 0,
+  totalInputTokens: 0, totalOutputTokens: 0,
+  avgLatencyMs: 0, estimatedCostSavings: 0,
+  pinnedRequests: 0, pinHonoredRequests: 0,
+  firstRequestAt: null,
+};
+const EMPTY_ERROR_DIST = { byCategory: [], byPlatform: [], detailed: [] };
+
 // Summary stats
 analyticsRouter.get('/summary', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '7d';
   const since = getSinceTimestamp(range);
   const db = getDb();
+
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json(EMPTY_SUMMARY);
+  const pf = buildPlatformFilter(active, 'r');
 
   // Savings are priced per request at the served model's paid-equivalent
   // rate (models.paid_input_per_m / paid_output_per_m — see db/model-pricing.ts),
@@ -52,7 +93,8 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
     FROM requests r
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
     WHERE r.created_at >= ?
-  `).get(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since) as any;
+      ${pf.sql}
+  `).get(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since, ...pf.params) as any;
 
   const totalRequests = stats.total_requests ?? 0;
   const successRate = totalRequests > 0 ? (stats.success_count / totalRequests) * 100 : 0;
@@ -81,6 +123,10 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
   const since = getSinceTimestamp(range);
   const db = getDb();
 
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json([]);
+  const pf = buildPlatformFilter(active, 'r');
+
   const rows = db.prepare(`
     SELECT
       r.platform,
@@ -99,9 +145,10 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
     FROM requests r
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
     WHERE r.created_at >= ?
+      ${pf.sql}
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC
-  `).all(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since) as any[];
+  `).all(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since, ...pf.params) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
@@ -124,6 +171,10 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
   const since = getSinceTimestamp(range);
   const db = getDb();
 
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json([]);
+  const pf = buildPlatformFilter(active);
+
   const rows = db.prepare(`
     SELECT
       platform,
@@ -134,9 +185,10 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
       SUM(output_tokens) as total_output_tokens
     FROM requests
     WHERE created_at >= ?
+      ${pf.sql}
     GROUP BY platform
     ORDER BY requests DESC
-  `).all(since) as any[];
+  `).all(since, ...pf.params) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
@@ -155,6 +207,10 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const since = getSinceTimestamp(range);
   const db = getDb();
 
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json([]);
+  const pf = buildPlatformFilter(active);
+
   // dateFormat is a hardcoded whitelist — never user-controlled.
   const dateFormat = interval === 'hour' ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
 
@@ -166,9 +222,10 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failure_count
     FROM requests
     WHERE created_at >= ?
+      ${pf.sql}
     GROUP BY strftime('${dateFormat}', created_at)
     ORDER BY timestamp ASC
-  `).all(since) as any[];
+  `).all(since, ...pf.params) as any[];
 
   // strftime emits UTC without zone marker. Append 'Z' so the client
   // unambiguously parses as UTC and can format in the user's local timezone.
@@ -188,6 +245,10 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
   const since = getSinceTimestamp(range);
   const db = getDb();
 
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json(EMPTY_ERROR_DIST);
+  const pf = buildPlatformFilter(active);
+
   // Group errors by category (extract the key part of the error message)
   const rows = db.prepare(`
     SELECT
@@ -206,9 +267,10 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       COUNT(*) as count
     FROM requests
     WHERE status = 'error' AND created_at >= ?
+      ${pf.sql}
     GROUP BY platform, error_category
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, ...pf.params) as any[];
 
   // Also get totals by category
   const byCategory = db.prepare(`
@@ -226,18 +288,20 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       COUNT(*) as count
     FROM requests
     WHERE status = 'error' AND created_at >= ?
+      ${pf.sql}
     GROUP BY category
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, ...pf.params) as any[];
 
   // Errors by platform
   const byPlatform = db.prepare(`
     SELECT platform, COUNT(*) as count
     FROM requests
     WHERE status = 'error' AND created_at >= ?
+      ${pf.sql}
     GROUP BY platform
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, ...pf.params) as any[];
 
   res.json({
     byCategory,
@@ -252,13 +316,18 @@ analyticsRouter.get('/errors', (req: Request, res: Response) => {
   const since = getSinceTimestamp(range);
   const db = getDb();
 
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json([]);
+  const pf = buildPlatformFilter(active);
+
   const rows = db.prepare(`
     SELECT id, platform, model_id, error, latency_ms, created_at
     FROM requests
     WHERE status = 'error' AND created_at >= ?
+      ${pf.sql}
     ORDER BY created_at DESC
     LIMIT 50
-  `).all(since) as any[];
+  `).all(since, ...pf.params) as any[];
 
   res.json(rows.map(r => ({
     id: r.id,
