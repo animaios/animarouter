@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 
 // Mirrors server/src/services/events.ts LiveEvent union.
 interface LiveEventBase {
-  id: string;
+  id?: string;
   at: number;
 }
 
@@ -14,21 +14,23 @@ interface RequestErrorEvent extends LiveEventBase { type: 'request.error'; error
 interface KeyExhaustedEvent extends LiveEventBase { type: 'routing.key_exhausted'; provider: string; keyId: number; model: string; reason: string; }
 interface KeyRetryEvent extends LiveEventBase { type: 'routing.key_retry'; provider: string; keyId: number; model: string; attempt: number; max: number; }
 interface ModelSwitchEvent extends LiveEventBase { type: 'routing.model_switch'; from: string; to: string; reason: string; }
+interface ProviderFastFailEvent extends LiveEventBase { type: 'routing.provider_fastfail'; provider: string; failedModelCount: number; }
+interface HeartbeatPingEvent extends LiveEventBase { type: 'heartbeat.ping'; provider: string; model: string; success: boolean; latencyMs: number; error?: string; }
 
-type LiveEvent = RequestStartEvent | RequestDoneEvent | RequestErrorEvent | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent;
+type LiveEvent = RequestStartEvent | RequestDoneEvent | RequestErrorEvent | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent | ProviderFastFailEvent | HeartbeatPingEvent;
 
 interface LogEntry {
-  id: string;
+  id: string | undefined;
   text: string;
   ts: number;
-  kind: 'start' | 'done' | 'error' | 'info';
+  kind: 'start' | 'done' | 'error' | 'info' | 'warn';
 }
 
 const MAX_LOG_LINES = 200;
 
 function formatEvent(evt: LiveEvent): LogEntry {
   const ts = evt.at;
-  const rId = evt.id.slice(0, 8);
+  const rId = evt.id?.slice(0, 8) ?? '';
   switch (evt.type) {
     case 'request.start':
       return { id: evt.id, ts, kind: 'start', text: `▶ [${rId}] Request started${evt.model ? ` (pinned: ${evt.model})` : ' (auto)'} — ${evt.stream ? 'streaming' : 'non-stream'}` };
@@ -42,6 +44,13 @@ function formatEvent(evt: LiveEvent): LogEntry {
       return { id: evt.id, ts, kind: 'info', text: `↻ [${rId}] Retrying ${evt.provider}/${evt.model} key#${evt.keyId} (${evt.attempt}/${evt.max})` };
     case 'routing.model_switch':
       return { id: evt.id, ts, kind: 'info', text: `→ [${rId}] Switching model: ${evt.from} → ${evt.to}` };
+    case 'routing.provider_fastfail':
+      return { id: evt.id, ts, kind: 'warn', text: `⚡ [${rId}] Provider ${evt.provider} fast-failed (${evt.failedModelCount} models down) — skipping remaining models` };
+    case 'heartbeat.ping':
+      if (evt.success) {
+        return { id: evt.id || 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} healthy (${evt.latencyMs}ms)` };
+      }
+      return { id: evt.id || 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
   }
 }
 
@@ -166,6 +175,7 @@ export function LiveEvents() {
                   l.kind === 'error' ? 'text-rose-600 dark:text-rose-400 bg-rose-500/10'
                   : l.kind === 'done' ? 'text-emerald-600 dark:text-emerald-400'
                   : l.kind === 'start' ? 'text-sky-600 dark:text-sky-400'
+                  : l.kind === 'warn' ? 'text-amber-600 dark:text-amber-400'
                   : 'text-muted-foreground'
                 }`}
               >

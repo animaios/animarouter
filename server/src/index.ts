@@ -7,6 +7,7 @@ import { startRequestRetentionPruner } from './services/request-retention.js';
 import { rebuildExhaustionFromDB } from './services/key-exhaustion.js';
 import { initDegradation, loadState, applyDecay, flushDirtyStates, evictGhostStates } from './services/degradation.js';
 import { captureRunningValues } from './services/feature-settings.js';
+import { startHeartbeat, stopHeartbeat } from './services/heartbeat.js';
 
 /** Synchronous flush of dirty degradation states on shutdown (better-sqlite3 is sync). */
 function shutdownFlushDegradation() {
@@ -111,6 +112,7 @@ async function main() {
     console.log(`Server running on http://${display}:${PORT}`);
     console.log(`Proxy endpoint: http://${display}:${PORT}/v1/chat/completions`);
     startHealthChecker();
+    startHeartbeat();
   };
 
   const server = app.listen(Number(PORT), HOST, onReady(HOST));
@@ -133,12 +135,14 @@ async function main() {
   });
   process.on('SIGTERM', () => {
     console.log('[server] SIGTERM received — shutting down gracefully');
+    stopHeartbeat();
     shutdownFlushDegradation();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 30_000).unref();
   });
   process.on('SIGINT', () => {
     console.log('[server] SIGINT received — shutting down gracefully');
+    stopHeartbeat();
     shutdownFlushDegradation();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 30_000).unref();
