@@ -1,21 +1,23 @@
 <div align="center">
 
-# API-Gateway
+# [AnimAIOS](https://github.com/animaios/airi) - FreeRouter
 
-**One endpoint. Any provider. Every free tier. ~1.7B tokens per month.**
+**One endpoint. Any provider. Every free tier. More tokens per month than you will ever need.**
 
 Aggregate free tiers from Google, Groq, Cerebras, NVIDIA, Mistral, OpenRouter, GitHub Models, Cohere, Cloudflare, HuggingFace, Z.ai (Zhipu), Ollama, Kilo, Pollinations, LLM7, OVH AI Endpoints, and OpenCode Zen — plus **any OpenAI-compatible endpoint you bring** (llama.cpp, LM Studio, vLLM, local Ollama, or any remote service with an API key) — behind a single `/v1/chat/completions` endpoint. Every provider gets the same fallback chain, the same intelligent routing, the same dashboard. Keys are stored encrypted. A Thompson-sampling bandit picks the best available model for each request, falls over to the next provider when one is rate-limited, and tracks per-key usage so you stay under every cap. If you can reach it over HTTP and it speaks OpenAI, API-Gateway routes to it.
 
 > **This is a fork** of [tashfeenahmed/freellmapi](https://github.com/tashfeenahmed/freellmapi). We add custom provider CRUD, per-provider rate limiting & parallel gating, model auto-discovery, editing of all models (including built-ins), and per-key exhaustion recovery — all detailed in [What this fork adds](#what-this-fork-adds). We track upstream weekly and merge cleanly.
 
+<img width="256" height="384" alt="kawaii anima-chan" src="https://github.com/user-attachments/assets/992ae2fc-0473-40c9-b99b-cea7840b6543" />
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+[![DeepSource](https://app.deepsource.com/gh/animaios/freeproxy.svg/?label=code+coverage&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/freeproxy/)
+[![DeepSource](https://app.deepsource.com/gh/animaios/freeproxy.svg/?label=active+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/freeproxy/)
+[![DeepSource](https://app.deepsource.com/gh/animaios/freeproxy.svg/?label=resolved+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/freeproxy/)
 
-![Fallback chain with per-provider token budget](repo-assets/fallback-chain.png)
 
 </div>
-
----
 
 ## Contents
 
