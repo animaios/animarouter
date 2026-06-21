@@ -32,7 +32,7 @@ settingsRouter.get('/features', (_req: Request, res: Response) => {
 
 // Save a partial update of feature settings (validates server-side)
 settingsRouter.put('/features', (req: Request, res: Response) => {
-  const updates = req.body as Record<string, boolean | number>;
+  const updates = req.body as Record<string, boolean | number | string>;
   const errors = saveFeatureSettings(updates);
   if (errors.length > 0) {
     res.status(400).json({ error: errors.join('; ') });

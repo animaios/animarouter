@@ -1,5 +1,6 @@
 import type { ChatMessage } from '@api-gateway/shared/types.js';
 import { contentToString } from '../lib/content.js';
+import { getFeatureSetting } from './feature-settings.js';
 
 export type ContextHandoffMode = 'off' | 'on_model_switch';
 
@@ -14,7 +15,6 @@ type SessionContext = {
 const MAX_RECENT_MESSAGES = 12;
 const MAX_HANDOFF_CHARS = 6000;
 const MAX_CONTENT_PER_MSG = 500;
-const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const MAX_STORE_SIZE = 500;
 
 // (MAX_HANDOFF_CHARS chars + ~400 overhead chars) / 4 chars-per-token — conservative upper bound.
@@ -25,8 +25,12 @@ export const HANDOFF_MAX_TOKENS = Math.ceil((MAX_HANDOFF_CHARS + 400) / 4);
 const store = new Map<string, SessionContext>();
 
 export function getContextHandoffMode(): ContextHandoffMode {
-  const raw = process.env.API_GATEWAY_CONTEXT_HANDOFF?.trim().toLowerCase();
-  return raw === 'on_model_switch' ? 'on_model_switch' : 'off';
+  const mode = getFeatureSetting('context_handoff_mode') as string;
+  return mode === 'on_model_switch' ? 'on_model_switch' : 'off';
+}
+
+function getSessionTtlMs(): number {
+  return (getFeatureSetting('session_ttl_min') as number) * 60 * 1000;
 }
 
 // Slice without cutting through a surrogate pair. A bare String.slice can
@@ -48,8 +52,9 @@ function trimContent(content: ChatMessage['content']): string {
 function pruneExpired(): void {
   if (store.size === 0) return;
   const now = Date.now();
+  const ttl = getSessionTtlMs();
   for (const [key, ctx] of store) {
-    if (now - ctx.updatedAt > SESSION_TTL_MS) store.delete(key);
+    if (now - ctx.updatedAt > ttl) store.delete(key);
   }
 }
 
@@ -81,8 +86,9 @@ export function recordIncomingMessages(sessionKey: string, messages: ChatMessage
   // oldest entries by updatedAt. Mirrors the stickySessionMap 500-entry pattern.
   if (store.size > MAX_STORE_SIZE) {
     const now = Date.now();
+    const ttl = getSessionTtlMs();
     for (const [k, v] of store) {
-      if (now - v.updatedAt > SESSION_TTL_MS) store.delete(k);
+      if (now - v.updatedAt > ttl) store.delete(k);
     }
     if (store.size > MAX_STORE_SIZE) {
       const sorted = [...store.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);
@@ -171,8 +177,9 @@ export function recordSuccessfulModel(params: {
     store.set(sessionKey, { lastModelKey: modelKey, recentMessages: [], updatedAt: Date.now() });
     if (store.size > MAX_STORE_SIZE) {
       const now = Date.now();
+      const ttl = getSessionTtlMs();
       for (const [k, v] of store) {
-        if (now - v.updatedAt > SESSION_TTL_MS) store.delete(k);
+        if (now - v.updatedAt > ttl) store.delete(k);
       }
       if (store.size > MAX_STORE_SIZE) {
         const sorted = [...store.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);

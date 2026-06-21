@@ -9,6 +9,7 @@
  * Pure logic module — no database access, no HTTP concerns.
  */
 import { publish } from './events.js';
+import { getFeatureSetting } from './feature-settings.js';
 
 // ── Configuration types ────────────────────────────────────────────────────────
 
@@ -64,24 +65,6 @@ const degradationStates = new Map<number, DegradationState>();
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 
-function envFloat(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const v = parseFloat(raw);
-  return isNaN(v) ? fallback : v;
-}
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const v = parseInt(raw, 10);
-  return isNaN(v) ? fallback : v;
-}
-
-function envMinutesToMs(name: string, fallbackMinutes: number): number {
-  return envFloat(name, fallbackMinutes) * 60 * 1000;
-}
-
 function getConfig(): DegradationConfig {
   if (!config) {
     throw new Error('[Degradation] Engine not initialized — call initDegradation() first.');
@@ -96,30 +79,30 @@ function getConfig(): DegradationConfig {
  * multiple times resets and re-reads.
  */
 export function initDegradation(configOverrides?: Partial<DegradationConfig>): void {
-  const minorHalfLifeMs = envMinutesToMs('DEGRADE_MINOR_HALF_LIFE_MIN', 2);
-  const majorHalfLifeMs = envMinutesToMs('DEGRADE_MAJOR_HALF_LIFE_MIN', 15);
-  const criticalHalfLifeMs = envMinutesToMs('DEGRADE_CRITICAL_HALF_LIFE_MIN', 60);
+  const minorHalfLifeMs = (getFeatureSetting('degrade_minor_half_life_min') as number) * 60 * 1000;
+  const majorHalfLifeMs = (getFeatureSetting('degrade_major_half_life_min') as number) * 60 * 1000;
+  const criticalHalfLifeMs = (getFeatureSetting('degrade_critical_half_life_min') as number) * 60 * 1000;
 
   const base: DegradationConfig = {
     minor: {
-      weight: envFloat('DEGRADE_MINOR_WEIGHT', 1.0),
+      weight: getFeatureSetting('degrade_minor_weight') as number,
       halfLifeMs: minorHalfLifeMs,
     },
     major: {
-      weight: envFloat('DEGRADE_MAJOR_WEIGHT', 3.0),
+      weight: getFeatureSetting('degrade_major_weight') as number,
       halfLifeMs: majorHalfLifeMs,
     },
     critical: {
-      weight: envFloat('DEGRADE_CRITICAL_WEIGHT', 6.0),
+      weight: getFeatureSetting('degrade_critical_weight') as number,
       halfLifeMs: criticalHalfLifeMs,
-      consecutiveThreshold: envInt('DEGRADE_CRITICAL_THRESHOLD', 3),
+      consecutiveThreshold: getFeatureSetting('degrade_critical_threshold') as number,
     },
-    compoundFactor: envFloat('DEGRADE_COMPOUND_FACTOR', 1.5),
-    successRecovery: envFloat('DEGRADE_SUCCESS_RECOVERY', 0.3),
-    dampStrength: envFloat('DEGRADE_DAMP_STRENGTH', 50),
-    maxPenalty: envFloat('DEGRADE_MAX_PENALTY', 100),
-    boostMin: envFloat('DEGRADE_BOOST_MIN', 0.1),
-    boostMax: envFloat('DEGRADE_BOOST_MAX', 100.0),
+    compoundFactor: getFeatureSetting('degrade_compound_factor') as number,
+    successRecovery: getFeatureSetting('degrade_success_recovery') as number,
+    dampStrength: getFeatureSetting('degrade_damp_strength') as number,
+    maxPenalty: getFeatureSetting('degrade_max_penalty') as number,
+    boostMin: getFeatureSetting('degrade_boost_min') as number,
+    boostMax: getFeatureSetting('degrade_boost_max') as number,
   };
 
   if (configOverrides) {

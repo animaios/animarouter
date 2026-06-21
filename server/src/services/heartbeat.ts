@@ -24,14 +24,18 @@ import { getFeatureSetting } from './feature-settings.js';
 let _enabled: boolean | null = null;
 let _intervalMs: number | null = null;
 let _activityWindowMs: number | null = null;
+let _pingTimeoutMs: number | null = null;
+let _staggerMs: number | null = null;
 
 function readConfig() {
   if (_enabled === null) {
     _enabled = getFeatureSetting('heartbeat_enabled') as boolean;
     _intervalMs = (getFeatureSetting('heartbeat_interval_min') as number) * 60 * 1000;
     _activityWindowMs = (getFeatureSetting('heartbeat_activity_window_min') as number) * 60 * 1000;
+    _pingTimeoutMs = getFeatureSetting('heartbeat_timeout_ms') as number;
+    _staggerMs = getFeatureSetting('heartbeat_stagger_ms') as number;
   }
-  return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs! };
+  return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs! };
 }
 
 /** Reset the cached config (used in tests and after settings change). */
@@ -39,11 +43,9 @@ export function resetHeartbeatConfig(): void {
   _enabled = null;
   _intervalMs = null;
   _activityWindowMs = null;
+  _pingTimeoutMs = null;
+  _staggerMs = null;
 }
-
-// Hardcoded constants (not worth feature-settings entries)
-const PING_TIMEOUT_MS = parseInt(process.env.HEARTBEAT_TIMEOUT_MS ?? '10000', 10);
-const STAGGER_MS = parseInt(process.env.HEARTBEAT_STAGGER_MS ?? '2000', 10);
 
 // ── Module-level state ──────────────────────────────────────────────────────
 
@@ -93,7 +95,7 @@ async function runCycle(): Promise<void> {
 
   try {
     const now = Date.now();
-    const { activityWindowMs } = readConfig();
+    const { activityWindowMs, staggerMs, pingTimeoutMs } = readConfig();
 
     // ── Activity gate ──
     if (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs) {
@@ -134,12 +136,12 @@ async function runCycle(): Promise<void> {
     // ── Ping each provider (staggered) ──
     for (const [platform, model] of byPlatform) {
       try {
-        await pingProvider(platform, model.modelDbId, model.modelId);
+        await pingProvider(platform, model.modelDbId, model.modelId, pingTimeoutMs);
       } catch (e) {
         console.error(`[Heartbeat] Ping error for ${platform}/${model.modelId}:`, e);
       }
-      if (STAGGER_MS > 0 && platform !== [...byPlatform.keys()].at(-1)) {
-        await sleep(STAGGER_MS);
+      if (staggerMs > 0 && platform !== [...byPlatform.keys()].at(-1)) {
+        await sleep(staggerMs);
       }
     }
   } finally {
@@ -149,7 +151,7 @@ async function runCycle(): Promise<void> {
 
 // ── Internal: ping a single provider ────────────────────────────────────────
 
-async function pingProvider(platform: string, modelDbId: number, modelId: string): Promise<void> {
+async function pingProvider(platform: string, modelDbId: number, modelId: string, pingTimeoutMs: number): Promise<void> {
   const db = getDb();
 
   // Find a healthy, non-cooldown, non-exhausted key
@@ -186,7 +188,7 @@ async function pingProvider(platform: string, modelDbId: number, modelId: string
         modelId,
         { max_tokens: 5, temperature: 0 },
       ),
-      PING_TIMEOUT_MS,
+      pingTimeoutMs,
     );
 
     // Success — reduce degradation penalty

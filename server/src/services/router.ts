@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { getDb, getSetting, setSetting } from '../db/index.js';
+import { getFeatureSetting } from './feature-settings.js';
 import { buildProviderFor } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { canMakeRequest, canUseTokens, isOnCooldown, canUseProvider } from './ratelimit.js';
@@ -214,14 +215,18 @@ function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
 }
 
 // ── Analytics stats cache (decay-weighted) ──────────────────────────────────
-// Instead of the fork's flat 7-day window (where a model that degrades today
-// keeps a stale week-long average), each request is weighted by an exponential
-// decay so recent behavior dominates while older data still stabilizes the
-// estimate. We aggregate by (model, integer day age) in SQL — at most ~7 rows
-// per model — then apply the per-bucket decay weight in JS.
-const WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const HALF_LIFE_DAYS = 2; // a 2-day-old request counts half as much as a fresh one
-const CACHE_TTL_MS = 60 * 1000;
+// Constants now backed by feature settings (scoring_window_days, scoring_decay_half_life_days, scoring_cache_ttl_sec).
+function getScoringWindowMs(): number {
+  return (getFeatureSetting('scoring_window_days') as number) * 24 * 60 * 60 * 1000;
+}
+
+function getScoringHalfLifeDays(): number {
+  return getFeatureSetting('scoring_decay_half_life_days') as number;
+}
+
+function getScoringCacheTtlMs(): number {
+  return (getFeatureSetting('scoring_cache_ttl_sec') as number) * 1000;
+}
 
 interface ModelStats {
   successes: number;   // decay-weighted pseudo-count
@@ -234,16 +239,16 @@ let statsCache: Map<string, ModelStats> | null = null;
 let statsCacheTime = 0;
 
 function decayWeight(ageDays: number): number {
-  return Math.pow(0.5, Math.max(0, ageDays) / HALF_LIFE_DAYS);
+  return Math.pow(0.5, Math.max(0, ageDays) / getScoringHalfLifeDays());
 }
 
 export function refreshStatsCache(db: Database, force = false): void {
-  if (!force && statsCache && Date.now() - statsCacheTime < CACHE_TTL_MS) return;
+  if (!force && statsCache && Date.now() - statsCacheTime < getScoringCacheTtlMs()) return;
 
   // Clear the temporary table
   db.prepare('DELETE FROM model_stats_temp').run();
 
-  const since = new Date(Date.now() - WINDOW_MS).toISOString();
+  const since = new Date(Date.now() - getScoringWindowMs()).toISOString();
   const buckets = db.prepare(`
     SELECT platform, model_id,
       CAST((julianday('now') - julianday(created_at)) AS INTEGER) AS age_days,

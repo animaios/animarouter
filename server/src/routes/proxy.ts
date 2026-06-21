@@ -67,7 +67,10 @@ function isStickySessionEnabled(): boolean {
   return getFeatureSetting('sticky_session_enabled') as boolean;
 }
 const stickySessionMap = new Map<string, { modelDbId: number; lastUsed: number }>();
-const STICKY_TTL_MS = 30 * 60 * 1000; // 30 min session TTL
+
+function getStickyTtlMs(): number {
+  return (getFeatureSetting('sticky_session_ttl_min') as number) * 60 * 1000;
+}
 
 function getSessionKey(messages: ChatMessage[], sessionIdHeader?: string): string {
   // Explicit session pinning: clients that manage their own conversation ids
@@ -114,7 +117,7 @@ export function getStickyModel(messages: ChatMessage[], sessionIdHeader?: string
   const entry = stickySessionMap.get(key);
   if (!entry) return undefined;
 
-  if (Date.now() - entry.lastUsed > STICKY_TTL_MS) {
+  if (Date.now() - entry.lastUsed > getStickyTtlMs()) {
     stickySessionMap.delete(key);
     return undefined;
   }
@@ -133,7 +136,7 @@ export function setStickyModel(messages: ChatMessage[], modelDbId: number, sessi
   if (stickySessionMap.size > 500) {
     const now = Date.now();
     for (const [k, v] of stickySessionMap) {
-      if (now - v.lastUsed > STICKY_TTL_MS) stickySessionMap.delete(k);
+      if (now - v.lastUsed > getStickyTtlMs()) stickySessionMap.delete(k);
     }
   }
 }
@@ -781,7 +784,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // connection is severed before `res.end()`. We deliberately do NOT use
   // `req.on('close')` because that also fires when the response completes
   // normally, which would break stream/path completions.
-  outerLoop: for (let totalAttempt = 0; ; totalAttempt++) {
+  const globalRetryLimit = getFeatureSetting('global_retry_limit') as number;
+  outerLoop: for (let totalAttempt = 0; totalAttempt < globalRetryLimit; totalAttempt++) {
     // ---- Exit: client disconnected ----
     if (req.aborted) {
       publish({ type: 'request.aborted', id: requestId, at: Date.now() });
@@ -1301,7 +1305,16 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // Continue outer loop → routeRequest picks next key.
   }
 
-  // Unreachable — the outer loop exits via the catch block returning a 429.
+  // Outer loop exhausted after globalRetryLimit attempts — return 429.
+  const exhaustedMsg = `All models rate-limited after ${globalRetryLimit} attempts. Last: ${lastError?.message ?? 'unknown error'}`;
+  publish({ type: 'request.error', id: requestId, error: exhaustedMsg, at: Date.now() });
+  res.setHeader('X-Routed-Via', 'none');
+  res.status(429).json({
+    error: {
+      message: sanitizeProviderErrorMessage(exhaustedMsg),
+      type: 'rate_limit_error',
+    },
+  });
 });
 
 export function logRequest(

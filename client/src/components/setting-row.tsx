@@ -2,12 +2,19 @@ import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import type { FeatureSetting } from '@/lib/api'
 
 interface SettingRowProps {
   setting: FeatureSetting
-  value: boolean | number
-  onChange: (v: boolean | number) => void
+  value: boolean | number | string
+  onChange: (v: boolean | number | string) => void
   disabled?: boolean
 }
 
@@ -33,6 +40,23 @@ export function SettingRow({ setting, value, onChange, disabled }: SettingRowPro
             onCheckedChange={(checked) => onChange(checked)}
             disabled={disabled}
           />
+        ) : setting.type === 'string' && setting.options ? (
+          <Select
+            value={String(value ?? setting.default)}
+            onValueChange={(val) => onChange(val as string)}
+            disabled={disabled}
+          >
+            <SelectTrigger className="w-[200px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {setting.options.map((opt) => (
+                <SelectItem key={opt} value={opt}>
+                  {opt.replace(/_/g, ' ')}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         ) : (
           <Input
             id={`setting-${setting.key}`}
