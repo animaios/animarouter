@@ -117,8 +117,8 @@ describe('Router', () => {
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
 
-    // Remove token rate-limit interference so we isolate the context-window
-    // behavior (canUseTokens would otherwise also skip on a large estimate).
+    // Remove token limit interference so we isolate the context-window
+    // behavior (tpm_limit would otherwise also skip on a large estimate).
     db.prepare("UPDATE models SET tpm_limit = NULL, tpd_limit = NULL WHERE platform = 'groq'").run();
 
     // Whatever model a small request lands on, give it a tiny context window.

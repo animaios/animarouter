@@ -69,7 +69,7 @@ export default function PlaygroundPage() {
     if (status === 401 || errType === 'authentication_error')
       return `🔑 Invalid API key. Regenerate it in Settings.`
     if (status === 429 || errType === 'rate_limit_error')
-      return `⏳ All models are rate-limited. Wait a moment and try again.`
+      return `⚠️ ${errMsg}`
     if (status === 400 || errType === 'invalid_request_error')
       return `⚠️ ${errMsg}`
     if (status >= 500)

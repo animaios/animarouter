@@ -367,7 +367,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
     } catch (err: any) {
       const status = lastError ? 429 : (err.status ?? 503);
       const message = lastError
-        ? `All models rate-limited. Last error: ${sanitizeProviderErrorMessage(lastError.message)}`
+        ? `All models exhausted. Last error: ${sanitizeProviderErrorMessage(lastError.message)}`
         : err.message;
       const type = lastError ? 'rate_limit_error' : 'routing_error';
       if (streamStarted) {

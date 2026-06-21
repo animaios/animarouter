@@ -3,18 +3,8 @@ import {
   routeRequest, refreshStatsCache, getRoutingStrategy, setRoutingStrategy, getRoutingScores,
   getCustomWeights, setCustomWeights,
 } from '../../services/router.js';
-import * as ratelimit from '../../services/ratelimit.js';
 import { getDb, initDb } from '../../db/index.js';
-
-vi.mock('../../services/ratelimit.js', async () => {
-  const actual = await vi.importActual('../../services/ratelimit.js');
-  return {
-    ...actual,
-    canMakeRequest: vi.fn(() => true),
-    canUseTokens: vi.fn(() => true),
-    isOnCooldown: vi.fn(() => false),
-  };
-});
+import * as crypto from '../../lib/crypto.js';
 
 vi.mock('../../lib/crypto.js', async () => {
   const actual = await vi.importActual('../../lib/crypto.js');
@@ -80,9 +70,7 @@ describe('bandit router', () => {
     // models/keys/history (and seeded models don't share a platform with ours).
     getDb().exec('DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;');
     vi.clearAllMocks();
-    (ratelimit.canMakeRequest as any).mockReturnValue(true);
-    (ratelimit.canUseTokens as any).mockReturnValue(true);
-    (ratelimit.isOnCooldown as any).mockReturnValue(false);
+    (crypto.decrypt as any).mockReturnValue('mocked-api-key');
   });
 
   afterEach(() => {

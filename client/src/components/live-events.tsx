@@ -22,7 +22,7 @@ interface KeyExhaustedEvent extends RequestEventBase { type: 'routing.key_exhaus
 interface KeyRetryEvent extends RequestEventBase { type: 'routing.key_retry'; provider: string; keyId: number; model: string; attempt: number; max: number; }
 interface ModelSwitchEvent extends RequestEventBase { type: 'routing.model_switch'; from: string; to: string; reason: string; }
 interface ProviderFastFailEvent extends RequestEventBase { type: 'routing.provider_fastfail'; provider: string; failedModelCount: number; }
-interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; success: boolean; latencyMs: number; error?: string; }
+interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; }
 interface HeartbeatCycleSkippedEvent extends TimestampOnly { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; }
 interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text: string; }
 
@@ -82,9 +82,9 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
     }
     case 'heartbeat.ping':
       if (evt.success) {
-        return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} healthy (${evt.latencyMs}ms)` };
+        return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} healthy (${evt.latencyMs}ms)` };
       }
-      return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
+      return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
     case 'heartbeat.cycle_skipped':
       return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] Cycle skipped: ${evt.reason} (idle ${Math.round(evt.lastActivityAgeMs / 1000)}s)` };
     case 'stream.chunk':
