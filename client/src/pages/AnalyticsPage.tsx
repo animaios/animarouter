@@ -86,6 +86,9 @@ export default function AnalyticsPage() {
     queryFn: () => apiFetch<ModelStats[]>(`/api/analytics/by-model?range=${range}`),
   })
 
+  // Only show the Pinned column when at least one model has pinned requests.
+  const showPinnedCol = useMemo(() => byModel.some(m => m.pinnedRequests > 0), [byModel])
+
   const { data: errors = [] } = useQuery({
     queryKey: ['analytics', 'errors', range],
     queryFn: () => apiFetch<ErrorEntry[]>(`/api/analytics/errors?range=${range}`),
@@ -202,9 +205,10 @@ export default function AnalyticsPage() {
                         <TableHead className="pl-4">Model</TableHead>
                         <TableHead>Provider</TableHead>
                         <TableHead className="text-right">Requests</TableHead>
-                        <TableHead className="text-right">Pinned</TableHead>
+                        {showPinnedCol && <TableHead className="text-right">Pinned</TableHead>}
                         <TableHead className="text-right">Success</TableHead>
                         <TableHead className="text-right">Latency</TableHead>
+                        <TableHead className="text-right">Speed</TableHead>
                         <TableHead className="text-right">In tokens</TableHead>
                         <TableHead className="text-right pr-4">Out tokens</TableHead>
                       </TableRow>
@@ -215,9 +219,10 @@ export default function AnalyticsPage() {
                           <TableCell className="pl-4 text-sm font-medium">{m.displayName}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{m.platform}</TableCell>
                           <TableCell className="text-right tabular-nums">{m.requests}</TableCell>
-                          <TableCell className="text-right tabular-nums">{m.pinnedRequests > 0 ? m.pinnedRequests : '—'}</TableCell>
+                          {showPinnedCol && <TableCell className="text-right tabular-nums">{m.pinnedRequests}</TableCell>}
                           <TableCell className="text-right tabular-nums">{m.successRate}%</TableCell>
                           <TableCell className="text-right tabular-nums">{m.avgLatencyMs} ms</TableCell>
+                          <TableCell className="text-right tabular-nums">{m.tokPerSec > 0 ? `${m.tokPerSec} tok/s` : '—'}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatTokens(m.totalInputTokens)}</TableCell>
                           <TableCell className="text-right tabular-nums pr-4">{formatTokens(m.totalOutputTokens)}</TableCell>
                         </TableRow>

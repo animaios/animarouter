@@ -379,6 +379,7 @@ export interface ModelStats {
   totalInputTokens: number;
   totalOutputTokens: number;
   pinnedRequests: number;
+  tokPerSec: number;
 }
 
 export interface ErrorEntry {

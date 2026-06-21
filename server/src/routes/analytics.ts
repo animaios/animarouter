@@ -149,7 +149,11 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
       AVG(r.latency_ms) as avg_latency_ms,
       SUM(r.input_tokens) as total_input_tokens,
       SUM(r.output_tokens) as total_output_tokens,
-      SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pinned_requests
+      SUM(CASE WHEN r.requested_model = r.model_id THEN 1 ELSE 0 END) as pinned_requests,
+      CASE WHEN SUM(r.latency_ms) > 0
+        THEN ROUND(SUM(r.output_tokens) * 1000.0 / SUM(r.latency_ms), 1)
+        ELSE 0
+      END as tok_per_sec
     FROM requests r
     ${mf.joinSql}
     WHERE r.created_at >= ?
@@ -170,6 +174,7 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
     totalOutputTokens: r.total_output_tokens ?? 0,
     // Requests this model served because the client pinned it by name.
     pinnedRequests: r.pinned_requests ?? 0,
+    tokPerSec: r.tok_per_sec ?? 0,
   })));
 });
 
