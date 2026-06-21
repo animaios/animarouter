@@ -139,12 +139,18 @@ async function runCycle(): Promise<void> {
     }
 
     // ── Get enabled models from the fallback chain ──
+    // Order by priority so we deterministically use the highest-priority model
+    // on each platform to ping all of its keys. Without ordering, a key might
+    // randomly be pinged with a restricted model on some cycles (causing
+    // 403/404 failures) and a standard model on others.
     const db = getDb();
     const models = db.prepare(`
-      SELECT DISTINCT m.platform, m.id AS model_db_id, m.model_id
+      SELECT m.platform, m.id AS model_db_id, m.model_id, MIN(fc.priority) AS priority
       FROM fallback_config fc
       JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
       WHERE fc.enabled = 1
+      GROUP BY m.platform, m.id, m.model_id
+      ORDER BY priority ASC
     `).all() as Array<{ platform: string; model_db_id: number; model_id: string }>;
 
     if (models.length === 0) return;
@@ -238,13 +244,19 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
     const latencyMs = Date.now() - start;
     const tier = classifyError(err);
 
-    // Update per-key health
+    // Update per-key health.
+    // Model-specific errors (403/404) indicate the key's tier doesn't have
+    // access to this specific model, not that the key itself is unhealthy.
+    // Don't penalize key health for these — the key may work fine for other
+    // models on the same platform.
     const prev = keyHealthMap.get(keyRow.id);
-    const newPenalty = (prev?.penalty ?? 0) + 1;
+    const isModelError = err?.status === 403 || err?.status === 404 ||
+      /403|forbidden|404|not found/i.test(err?.message ?? '');
+    const newPenalty = isModelError ? (prev?.penalty ?? 0) : (prev?.penalty ?? 0) + 1;
     keyHealthMap.set(keyRow.id, {
       penalty: newPenalty,
       lastPingAt: Date.now(),
-      healthy: false,
+      healthy: isModelError ? (prev?.healthy ?? true) : false,
       lastError: (err?.message ?? 'unknown').slice(0, 120),
     });
 

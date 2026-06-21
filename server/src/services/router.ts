@@ -605,33 +605,43 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // Try all keys for this model before giving up on it.
     const rrKey = `${entry.platform}:${entry.model_id}`;
 
-    const keyOrder: KeyRow[] = keys.sort((a, b) => {
-      // Prefer heartbeat-healthy keys over unhealthy ones. Among equally
-      // healthy keys, preserve original order (round-robin stability).
-      const aHealthy = isKeyHealthy(a.id) ? 0 : 1;
-      const bHealthy = isKeyHealthy(b.id) ? 0 : 1;
-      return aHealthy - bHealthy;
-    });
-
     // Sticky key selection: when a custom provider enables sticky sessions,
     // hash the session key to pick a deterministic key. This maximizes
-    // upstream KV-cache reuse for cache-heavy providers like LongCAT.
+    // upstream KV-cache reuse for cache-heavy providers like LongCat.
     const stickyRow = db.prepare(
       'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
     ).get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
     const stickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
-
+    
+    // Split keys by health status so healthy keys are ALWAYS tried first,
+    // regardless of round-robin offset. Apply round-robin within each group
+    // independently to maintain fair distribution while respecting health.
+    const healthyKeys = keys.filter(k => isKeyHealthy(k.id));
+    const unhealthyKeys = keys.filter(k => !isKeyHealthy(k.id));
+    
     let idx: number;
     if (stickyEnabled && options?.stickySessionKey) {
       const hash = crypto.createHash('sha1').update(options.stickySessionKey).digest();
       const hashInt = hash.readUInt32BE(0);
-      idx = hashInt % keyOrder.length;
+      idx = hashInt % keys.length;
     } else {
       idx = (roundRobinIndex.get(rrKey) ?? 0);
     }
-
+    
+    // Apply round-robin offset to each group individually and concatenate.
+    // This ensures healthy keys are tried first even when idx is non-zero.
+    const rotateArray = <T>(arr: T[], offset: number): T[] => {
+      if (arr.length === 0) return arr;
+      const shift = offset % arr.length;
+      return [...arr.slice(shift), ...arr.slice(0, shift)];
+    };
+    const keyOrder: KeyRow[] = [
+      ...rotateArray(healthyKeys, idx),
+      ...rotateArray(unhealthyKeys, idx),
+    ];
+    
     for (let attempt = 0; attempt < keyOrder.length; attempt++) {
-      const key = keyOrder[(idx + attempt) % keyOrder.length];
+      const key = keyOrder[attempt];
 
       const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
 
