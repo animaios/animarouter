@@ -30,11 +30,17 @@ export function formatSqliteUtcToLocalTime(
 
 /**
  * Parse an ISO-8601 UTC timestamp and format it in the user's local timezone
- * for chart axis labels. Hourly gets abbreviated time; daily gets short date.
+ * for chart axis labels.
+ * - 'minute' / '5min': time only (HH:MM) — fits dense sub-hourly axes
+ * - 'hour': short date + time
+ * - 'day': short date only
  */
-export function formatIsoUtcToLocalChart(value: string, interval: 'hour' | 'day'): string {
+export function formatIsoUtcToLocalChart(value: string, interval: 'minute' | '5min' | 'hour' | 'day'): string {
   const date = new Date(value);
   if (isNaN(date.getTime())) return value;
+  if (interval === 'minute' || interval === '5min') {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
   if (interval === 'hour') {
     return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
