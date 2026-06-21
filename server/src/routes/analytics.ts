@@ -223,7 +223,6 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const db = getDb();
 
   const active = getActivePlatforms(db);
-  if (active.length === 0) return res.json([]);
   const pf = buildPlatformFilter(active, 'r');
   const mf = buildModelEnabledFilter();
 
@@ -236,11 +235,13 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
 
   // selectExpr and groupExpr must be identical SQL fragments so SELECT and GROUP BY match.
   const selectExpr = interval === '5min'
-    ? dateFormat  // already a full expression, not a plain format string
+    ? dateFormat
     : `strftime('${dateFormat}', r.created_at)`;
   const groupExpr = selectExpr;
 
-  const rows = db.prepare(`
+  // Only query when there are active platforms; otherwise dbRows stays empty
+  // and the zero-fill below still produces a full flat-line x-axis.
+  const dbRows = active.length === 0 ? [] : db.prepare(`
     SELECT
       ${selectExpr} as timestamp,
       COUNT(*) as requests,
@@ -255,17 +256,46 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
     ORDER BY timestamp ASC
   `).all(since, ...pf.params) as any[];
 
-  // strftime emits UTC without zone marker. Append 'Z' so the client
-  // unambiguously parses as UTC and can format in the user's local timezone.
-  // For 'day' we add a midnight time component so the client always gets ISO.
-  res.json(rows.map(r => ({
-    timestamp: interval === 'day'
-      ? r.timestamp + 'T00:00:00Z'
-      : r.timestamp + 'Z',
-    requests: r.requests,
-    successCount: r.success_count,
-    failureCount: r.failure_count,
-  })));
+  // ── Zero-fill: always emit the complete set of buckets ──────────────────
+  const BUCKET_MS: Record<string, number> = {
+    minute: 60 * 1000,
+    '5min': 5 * 60 * 1000,
+    hour: 60 * 60 * 1000,
+    day: 24 * 60 * 60 * 1000,
+  };
+
+  const floorToBucket = (ms: number, size: number): number =>
+    Math.floor(ms / size) * size;
+
+  const msToBucketKey = (ms: number, iv: string): string => {
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const datePart = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+    if (iv === 'day') return datePart;
+    return `${datePart}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
+  };
+
+  const dataMap = new Map(dbRows.map(r => [r.timestamp, r]));
+
+  const bucketSize = BUCKET_MS[interval] ?? BUCKET_MS.hour;
+  const nowMs = Date.now();
+  const sinceMs = new Date(since.replace(' ', 'T') + 'Z').getTime();
+  const startBucket = floorToBucket(sinceMs, bucketSize);
+  const endBucket = floorToBucket(nowMs, bucketSize);
+
+  const filled: any[] = [];
+  for (let t = startBucket; t <= endBucket; t += bucketSize) {
+    const key = msToBucketKey(t, interval);
+    const r = dataMap.get(key);
+    filled.push({
+      timestamp: interval === 'day' ? key + 'T00:00:00Z' : key + 'Z',
+      requests: r?.requests ?? 0,
+      successCount: r?.success_count ?? 0,
+      failureCount: r?.failure_count ?? 0,
+    });
+  }
+
+  res.json(filled);
 });
 
 // Error distribution (grouped by error type and platform)
