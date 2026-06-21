@@ -3,8 +3,10 @@ import { getDb, getSetting, setSetting } from '../db/index.js';
 import { getFeatureSetting } from './feature-settings.js';
 import { buildProviderFor } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
-import { canMakeRequest, canUseTokens, isOnCooldown, canUseProvider } from './ratelimit.js';
-import { isExhausted } from './key-exhaustion.js';
+// Rate-limit pre-checks removed — routing relies on heartbeat-based health
+// detection instead of predictive quota tracking. See PR: heartbeat per-key.
+// recordRequest/recordTokens still track usage for analytics purposes.
+import { isKeyHealthy } from './heartbeat.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
@@ -603,7 +605,13 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // Try all keys for this model before giving up on it.
     const rrKey = `${entry.platform}:${entry.model_id}`;
 
-    const keyOrder: KeyRow[] = keys;
+    const keyOrder: KeyRow[] = keys.sort((a, b) => {
+      // Prefer heartbeat-healthy keys over unhealthy ones. Among equally
+      // healthy keys, preserve original order (round-robin stability).
+      const aHealthy = isKeyHealthy(a.id) ? 0 : 1;
+      const bHealthy = isKeyHealthy(b.id) ? 0 : 1;
+      return aHealthy - bHealthy;
+    });
 
     // Sticky key selection: when a custom provider enables sticky sessions,
     // hash the session key to pick a deterministic key. This maximizes
@@ -631,16 +639,10 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // re-hammering the same key within one request sweep.
       if (skipKeys?.has(skipId)) continue;
 
-      // Check cooldown (from previous 429s)
-      if (isOnCooldown(entry.platform, entry.model_id, key.id)) continue;
-
-      // Provider-wide daily request cap (#162): providers like OpenRouter cap
-      // total requests/day across ALL their models for the account, not per
-      // model — skip every model on this provider once that key hits the cap.
-      if (!canUseProvider(entry.platform, key.id)) continue;
-
-      if (!canMakeRequest(entry.platform, entry.model_id, key.id, limits)) continue;
-      if (!canUseTokens(entry.platform, entry.model_id, key.id, estimatedTokens, limits)) continue;
+      // Rate-limit pre-checks removed. Key health is determined by the
+      // heartbeat system (per-key degradation) instead of predictive quota
+      // tracking. The proxy's retry loop + cooldown-on-failure handles any
+      // actual 429s that slip through.
 
 
       // provider was already resolved above; if it came back undefined (e.g.
@@ -705,7 +707,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // in the sortedChain for THIS specific request.
   }
 
-  const err = new Error('All models exhausted. Add more API keys or wait for rate limits to reset.') as any;
+  const err = new Error('All models exhausted. Add more API keys or check provider status.') as any;
   err.status = 429;
   throw err;
 }

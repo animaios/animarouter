@@ -1,5 +1,5 @@
 /**
- * Integration tests for Provider Health Heartbeat.
+ * Integration tests for Provider Health Heartbeat (Per-Key Edition).
  *
  * Each test re-imports modules in isolation to avoid cross-test contamination
  * from module-level cached config and state.
@@ -18,6 +18,8 @@ describe('Provider Health Heartbeat', () => {
   let getPenalty: (modelDbId: number) => number;
   let recordFailure: (modelDbId: number, tier: 'minor' | 'major') => void;
   let initDegradation: () => void;
+  let getKeyHealth: (keyId: number) => any;
+  let isKeyHealthy: (keyId: number) => boolean;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -44,15 +46,6 @@ describe('Provider Health Heartbeat', () => {
       return { ...actual, decrypt: vi.fn(() => 'mocked-api-key') };
     });
 
-    vi.doMock('../../services/ratelimit.js', async (importOriginal) => {
-      const actual = await importOriginal() as any;
-      return { ...actual, isOnCooldown: vi.fn(() => false) };
-    });
-
-    vi.doMock('../../services/key-exhaustion.js', () => ({
-      isExhausted: vi.fn(() => false),
-    }));
-
     // Import fresh modules
     const heartbeatModule = await import('../../services/heartbeat.js');
     const dbModule = await import('../../db/index.js');
@@ -61,6 +54,8 @@ describe('Provider Health Heartbeat', () => {
     recordActivity = heartbeatModule.recordActivity;
     startHeartbeat = heartbeatModule.startHeartbeat;
     stopHeartbeat = heartbeatModule.stopHeartbeat;
+    getKeyHealth = heartbeatModule.getKeyHealth;
+    isKeyHealthy = heartbeatModule.isKeyHealthy;
     initDb = dbModule.initDb;
     getDb = dbModule.getDb;
     setSetting = dbModule.setSetting;
@@ -75,6 +70,7 @@ describe('Provider Health Heartbeat', () => {
     setSetting('heartbeat_enabled', 'true');
     setSetting('heartbeat_interval_min', '10');
     setSetting('heartbeat_activity_window_min', '15');
+    setSetting('heartbeat_stagger_ms', '0'); // No stagger in tests to avoid timing issues
   });
 
   afterEach(() => {
@@ -90,7 +86,8 @@ describe('Provider Health Heartbeat', () => {
     const id = (db.prepare(`SELECT id FROM models WHERE platform = '${platform}' AND model_id = '${modelId}'`).get() as any).id;
     db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(id);
     db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('${platform}', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)`).run();
-    return id;
+    const keyRow = db.prepare("SELECT id FROM api_keys WHERE platform = ? AND enabled = 1").get(platform) as any;
+    return { modelDbId: id, keyId: keyRow.id };
   }
 
   // ── Activity Gating ────────────────────────────────────────────────────
@@ -140,11 +137,11 @@ describe('Provider Health Heartbeat', () => {
 
   describe('Ping success/failure classification', () => {
     it('successful ping records success and reduces degradation penalty', async () => {
-      const modelId = setupProvider();
+      const { modelDbId, keyId } = setupProvider();
 
       // Add some penalty first
-      recordFailure(modelId, 'major');
-      const penaltyBefore = getPenalty(modelId);
+      recordFailure(modelDbId, 'major');
+      const penaltyBefore = getPenalty(modelDbId);
       expect(penaltyBefore).toBeGreaterThan(0);
 
       chatCompletion.mockResolvedValueOnce({
@@ -160,14 +157,18 @@ describe('Provider Health Heartbeat', () => {
       expect(pingEvents.length).toBeGreaterThanOrEqual(1);
       expect(pingEvents[0].success).toBe(true);
       expect(pingEvents[0].provider).toBe('testprov');
+      expect(pingEvents[0].keyId).toBe(keyId);
       expect(pingEvents[0].latencyMs).toBeGreaterThanOrEqual(0);
 
       // Penalty should have decreased
-      expect(getPenalty(modelId)).toBeLessThan(penaltyBefore);
+      expect(getPenalty(modelDbId)).toBeLessThan(penaltyBefore);
+
+      // Per-key health should be healthy
+      expect(isKeyHealthy(keyId)).toBe(true);
     });
 
     it('failed ping (5xx) records major failure and increases penalty', async () => {
-      const modelId = setupProvider();
+      const { modelDbId, keyId } = setupProvider();
 
       chatCompletion.mockRejectedValueOnce(new Error('503 Service Unavailable'));
 
@@ -178,13 +179,20 @@ describe('Provider Health Heartbeat', () => {
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
       expect(pingEvents.length).toBeGreaterThanOrEqual(1);
       expect(pingEvents[0].success).toBe(false);
+      expect(pingEvents[0].keyId).toBe(keyId);
       expect(pingEvents[0].error).toBeDefined();
 
-      expect(getPenalty(modelId)).toBeGreaterThan(0);
+      expect(getPenalty(modelDbId)).toBeGreaterThan(0);
+
+      // Per-key health should be unhealthy
+      expect(isKeyHealthy(keyId)).toBe(false);
+      const health = getKeyHealth(keyId);
+      expect(health).toBeDefined();
+      expect(health.penalty).toBeGreaterThan(0);
     });
 
     it('failed ping (429) records minor failure', async () => {
-      const modelId = setupProvider();
+      const { modelDbId, keyId } = setupProvider();
 
       chatCompletion.mockRejectedValueOnce(new Error('429 Rate limited'));
 
@@ -195,12 +203,14 @@ describe('Provider Health Heartbeat', () => {
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
       expect(pingEvents.length).toBeGreaterThanOrEqual(1);
       expect(pingEvents[0].success).toBe(false);
+      expect(pingEvents[0].keyId).toBe(keyId);
 
-      expect(getPenalty(modelId)).toBeGreaterThan(0);
+      expect(getPenalty(modelDbId)).toBeGreaterThan(0);
+      expect(isKeyHealthy(keyId)).toBe(false);
     });
 
-    it('non-retryable error (401) does NOT penalize the model', async () => {
-      const modelId = setupProvider();
+    it('non-retryable error (401) does NOT penalize the model but marks key unhealthy', async () => {
+      const { modelDbId, keyId } = setupProvider();
 
       chatCompletion.mockRejectedValueOnce(new Error('401 Unauthorized'));
 
@@ -212,35 +222,33 @@ describe('Provider Health Heartbeat', () => {
       expect(pingEvents.length).toBeGreaterThanOrEqual(1);
       expect(pingEvents[0].success).toBe(false);
 
-      // Non-retryable errors don't penalize
-      expect(getPenalty(modelId)).toBe(0);
+      // Non-retryable errors don't penalize model-level degradation
+      expect(getPenalty(modelDbId)).toBe(0);
+
+      // But the key is still marked unhealthy per-key
+      expect(isKeyHealthy(keyId)).toBe(false);
     });
   });
 
-  // ── Provider Selection ──────────────────────────────────────────────────
+  // ── Per-Key Pinging ────────────────────────────────────────────────────
 
-  describe('Model selection (healthiest per provider)', () => {
-    it('selects the model with the lowest penalty for pinging', async () => {
+  describe('Per-key pinging', () => {
+    it('pings each key once per cycle even across multiple models', async () => {
       const db = getDb();
       db.prepare('DELETE FROM fallback_config').run();
 
-      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('selecttest', 'healthy', 'Healthy', 1, 1, 1)").run();
-      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('selecttest', 'sick', 'Sick', 2, 2, 1)").run();
-      const healthyId = (db.prepare("SELECT id FROM models WHERE model_id = 'healthy' AND platform = 'selecttest'").get() as any).id;
-      const sickId = (db.prepare("SELECT id FROM models WHERE model_id = 'sick' AND platform = 'selecttest'").get() as any).id;
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('multikey', 'model-a', 'Model A', 1, 1, 1)").run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('multikey', 'model-b', 'Model B', 2, 2, 1)").run();
+      const idA = (db.prepare("SELECT id FROM models WHERE model_id = 'model-a' AND platform = 'multikey'").get() as any).id;
+      const idB = (db.prepare("SELECT id FROM models WHERE model_id = 'model-b' AND platform = 'multikey'").get() as any).id;
 
-      db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)").run(healthyId);
-      db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)").run(sickId);
-      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('selecttest', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+      db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)").run(idA);
+      db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)").run(idB);
 
-      // Make sick model have a high penalty
-      recordFailure(sickId, 'major');
-      recordFailure(sickId, 'major');
-      recordFailure(sickId, 'major');
+      // One key for the platform — should be pinged only once
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('multikey', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
 
-      expect(getPenalty(healthyId)).toBeLessThan(getPenalty(sickId));
-
-      chatCompletion.mockResolvedValueOnce({
+      chatCompletion.mockResolvedValue({
         choices: [{ message: { role: 'assistant', content: 'pong' } }],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       });
@@ -250,8 +258,34 @@ describe('Provider Health Heartbeat', () => {
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
 
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
-      expect(pingEvents.length).toBeGreaterThanOrEqual(1);
-      expect(pingEvents[0].model).toBe('healthy');
+      // Key should be pinged exactly once (deduped across models)
+      expect(pingEvents.length).toBe(1);
+    });
+
+    it('pings multiple keys on the same platform', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('twokeys', 'model-a', 'Model A', 1, 1, 1)").run();
+      const idA = (db.prepare("SELECT id FROM models WHERE model_id = 'model-a' AND platform = 'twokeys'").get() as any).id;
+      db.prepare("INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)").run(idA);
+
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('twokeys', 'Key 1', 'enc1', 'iv1', 'tag1', 'healthy', 1)").run();
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('twokeys', 'Key 2', 'enc2', 'iv2', 'tag2', 'healthy', 1)").run();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
+
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      // Both keys should be pinged
+      expect(pingEvents.length).toBe(2);
+      expect(pingEvents.every(e => e.success)).toBe(true);
     });
   });
 

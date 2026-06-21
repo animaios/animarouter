@@ -1,20 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { routeRequest, setRoutingStrategy } from '../../services/router.js';
-import * as ratelimit from '../../services/ratelimit.js';
 import { classifyError } from '../../services/degradation.js';
 import { getDb, initDb } from '../../db/index.js';
-
-// Mock ratelimit to control quota availability
-vi.mock('../../services/ratelimit.js', async () => {
-  const actual = await vi.importActual('../../services/ratelimit.js');
-  return {
-    ...actual,
-    canMakeRequest: vi.fn(),
-    canUseTokens: vi.fn(),
-    isOnCooldown: vi.fn(() => false),
-    canUseProvider: vi.fn(() => true),
-  };
-});
+import * as crypto from '../../lib/crypto.js';
 
 // Mock crypto to avoid IV errors
 vi.mock('../../lib/crypto.js', async () => {
@@ -108,8 +96,7 @@ describe('Provider-Outage Fast-Fail — skipModels integration', () => {
     db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('cloudflare', 'CF Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
 
     vi.clearAllMocks();
-    (ratelimit.canMakeRequest as any).mockReturnValue(true);
-    (ratelimit.canUseTokens as any).mockReturnValue(true);
+    (crypto.decrypt as any).mockReturnValue('mocked-api-key');
   });
 
   afterEach(() => {

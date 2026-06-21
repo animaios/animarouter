@@ -1306,7 +1306,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   }
 
   // Outer loop exhausted after globalRetryLimit attempts — return 429.
-  const exhaustedMsg = `All models rate-limited after ${globalRetryLimit} attempts. Last: ${lastError?.message ?? 'unknown error'}`;
+  const exhaustedMsg = `All models exhausted after ${globalRetryLimit} attempts. Last: ${lastError?.message ?? 'unknown error'}`;
   publish({ type: 'request.error', id: requestId, error: exhaustedMsg, at: Date.now() });
   res.setHeader('X-Routed-Via', 'none');
   res.status(429).json({
