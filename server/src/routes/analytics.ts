@@ -234,11 +234,11 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
     interval === '5min'   ? "strftime('%Y-%m-%dT%H:', r.created_at) || printf('%02d', (CAST(strftime('%M', r.created_at) AS INTEGER) / 5) * 5) || ':00'" :
     interval === 'hour'   ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
 
-  // The GROUP BY expression must match the SELECT expression exactly.
-  const groupExpr = dateFormat;
+  // selectExpr and groupExpr must be identical SQL fragments so SELECT and GROUP BY match.
   const selectExpr = interval === '5min'
     ? dateFormat  // already a full expression, not a plain format string
     : `strftime('${dateFormat}', r.created_at)`;
+  const groupExpr = selectExpr;
 
   const rows = db.prepare(`
     SELECT
