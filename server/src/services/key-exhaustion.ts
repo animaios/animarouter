@@ -93,7 +93,7 @@ export function getExhaustedKeysForModel(provider: string, modelId: string): Arr
 export function areAllKeysExhausted(provider: string, modelId: string): boolean {
   const db = getDb();
   const keys = db.prepare(
-    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
   ).all(provider) as Array<{ id: number }>;
 
   if (keys.length === 0) return true;
@@ -104,9 +104,28 @@ export function areAllKeysExhausted(provider: string, modelId: string): boolean 
 export function areAllProviderKeysExhausted(provider: string): boolean {
   const db = getDb();
   const keys = db.prepare(
-    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
   ).all(provider) as Array<{ id: number }>;
 
   if (keys.length === 0) return true;
   return keys.every(k => exhaustionMap.has(k.id));
+}
+
+/** Remove exhaustion entries whose associated cooldown has expired in the DB.
+ *  Called periodically to prevent stale entries from accumulating indefinitely. */
+export function sweepStaleExhaustion(): number {
+  const db = getDb();
+  const now = Date.now();
+  let swept = 0;
+  for (const [keyId, info] of exhaustionMap) {
+    const row = db.prepare(`
+      SELECT 1 FROM rate_limit_cooldowns
+      WHERE key_id = ? AND model_id = ? AND expires_at_ms > ?
+    `).get(keyId, info.modelId, now) as unknown;
+    if (!row) {
+      exhaustionMap.delete(keyId);
+      swept++;
+    }
+  }
+  return swept;
 }

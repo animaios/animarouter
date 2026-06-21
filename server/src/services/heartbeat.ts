@@ -166,7 +166,7 @@ async function runCycle(): Promise<void> {
     const seenKeys = new Set<number>();
     for (const model of models) {
       const keys = db.prepare(
-        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
       ).all(model.platform) as any[];
 
       for (const key of keys) {
@@ -244,21 +244,22 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
     const latencyMs = Date.now() - start;
     const tier = classifyError(err);
 
-    // Update per-key health.
-    // Model-specific errors (403/404) indicate the key's tier doesn't have
-    // access to this specific model, not that the key itself is unhealthy.
-    // Don't penalize key health for these — the key may work fine for other
-    // models on the same platform.
-    const prev = keyHealthMap.get(keyRow.id);
-    const isModelError = err?.status === 403 || err?.status === 404 ||
-      /403|forbidden|404|not found/i.test(err?.message ?? '');
-    const newPenalty = isModelError ? (prev?.penalty ?? 0) : (prev?.penalty ?? 0) + 1;
-    keyHealthMap.set(keyRow.id, {
-      penalty: newPenalty,
-      lastPingAt: Date.now(),
-      healthy: isModelError ? (prev?.healthy ?? true) : false,
-      lastError: (err?.message ?? 'unknown').slice(0, 120),
-    });
+    // Model-specific errors (403/404) mean the key is valid but this model
+    // isn't accessible on its tier. Don't poison the key's global health —
+    // only genuine failures (5xx, timeout, 429) should penalize the key.
+    const isModelError = err?.status === 403 || err?.status === 404
+      || /forbidden|not found|no endpoints found/i.test(err?.message ?? '');
+
+    if (!isModelError) {
+      const prev = keyHealthMap.get(keyRow.id);
+      const newPenalty = (prev?.penalty ?? 0) + 1;
+      keyHealthMap.set(keyRow.id, {
+        penalty: newPenalty,
+        lastPingAt: Date.now(),
+        healthy: false,
+        lastError: (err?.message ?? 'unknown').slice(0, 120),
+      });
+    }
 
     // Only record model-level degradation for retryable errors (5xx, 429)
     // Non-retryable (401, 403, 404) are config issues, not health signals

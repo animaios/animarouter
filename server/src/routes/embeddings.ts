@@ -11,7 +11,7 @@ embeddingsRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const keyCounts = new Map(
     (db.prepare(
-      "SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform",
+      "SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown', 'error') GROUP BY platform",
     ).all() as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
   );
 

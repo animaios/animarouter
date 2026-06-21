@@ -581,7 +581,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     if (!provider) continue;
     // Get enabled keys that have not already failed validation or decryption.
     const keys = db.prepare(
-      "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown')"
+      "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
     ).all(entry.platform) as KeyRow[];
 
     if (keys.length === 0) {
@@ -619,26 +619,31 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     const healthyKeys = keys.filter(k => isKeyHealthy(k.id));
     const unhealthyKeys = keys.filter(k => !isKeyHealthy(k.id));
     
-    let idx: number;
-    if (stickyEnabled && options?.stickySessionKey) {
-      const hash = crypto.createHash('sha1').update(options.stickySessionKey).digest();
-      const hashInt = hash.readUInt32BE(0);
-      idx = hashInt % keys.length;
-    } else {
-      idx = (roundRobinIndex.get(rrKey) ?? 0);
-    }
-    
-    // Apply round-robin offset to each group individually and concatenate.
-    // This ensures healthy keys are tried first even when idx is non-zero.
+    // Build the key ordering array and starting index.
+    // For sticky sessions: concatenate healthy+unhealthy and hash into it.
+    // For round-robin: rotate within each health group independently so
+    // healthy keys are ALWAYS tried first regardless of the offset.
     const rotateArray = <T>(arr: T[], offset: number): T[] => {
       if (arr.length === 0) return arr;
       const shift = offset % arr.length;
       return [...arr.slice(shift), ...arr.slice(0, shift)];
     };
-    const keyOrder: KeyRow[] = [
-      ...rotateArray(healthyKeys, idx),
-      ...rotateArray(unhealthyKeys, idx),
-    ];
+
+    let keyOrder: KeyRow[];
+    let idx: number;
+    if (stickyEnabled && options?.stickySessionKey) {
+      keyOrder = [...healthyKeys, ...unhealthyKeys];
+      const hash = crypto.createHash('sha1').update(options.stickySessionKey).digest();
+      const hashInt = hash.readUInt32BE(0);
+      idx = hashInt % keyOrder.length;
+    } else {
+      const rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+      keyOrder = [
+        ...rotateArray(healthyKeys, rrIdx),
+        ...rotateArray(unhealthyKeys, rrIdx),
+      ];
+      idx = 0; // start from beginning — healthy-first guaranteed by construction
+    }
     
     for (let attempt = 0; attempt < keyOrder.length; attempt++) {
       const key = keyOrder[attempt];
@@ -701,7 +706,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // If we reach here, this specific model has NO available keys.
     // Update round-robin index even if we failed so we don't get stuck.
     if (!(stickyEnabled && options?.stickySessionKey)) {
-      roundRobinIndex.set(rrKey, (idx + 1) % keys.length);
+      roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
     }
 
     // In pin mode, don't fall through to the next model.

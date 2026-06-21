@@ -62,7 +62,7 @@ export function resolveFamily(model: string | undefined): string | null {
 
 function getPlatformKey(platform: string): string | null {
   const row = getDb().prepare(
-    "SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') ORDER BY id LIMIT 1",
+    "SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error') ORDER BY id LIMIT 1",
   ).get(platform) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
   if (!row) return null;
   try {
