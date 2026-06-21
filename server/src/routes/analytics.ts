@@ -14,6 +14,8 @@ function getSinceTimestamp(range: string): string {
   const now = Date.now();
 
   switch (range) {
+    case '15m':
+      return toSqliteDateTime(now - 15 * 60 * 1000);
     case '1h':
       return toSqliteDateTime(now - 60 * 60 * 1000);
     case '24h':
@@ -212,7 +214,11 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
 // Timeline data
 analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '24h';
-  const interval = (req.query.interval as string) ?? (range === '7d' || range === '30d' ? 'day' : 'hour');
+  const interval = (req.query.interval as string) ?? (
+    range === '15m' ? 'minute' :
+    range === '1h'  ? '5min'  :
+    range === '24h' ? 'hour'  : 'day'
+  );
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -222,11 +228,21 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const mf = buildModelEnabledFilter();
 
   // dateFormat is a hardcoded whitelist — never user-controlled.
-  const dateFormat = interval === 'hour' ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
+  // For 5-minute buckets we floor the minute value to the nearest multiple of 5.
+  const dateFormat =
+    interval === 'minute' ? '%Y-%m-%dT%H:%M:00' :
+    interval === '5min'   ? "strftime('%Y-%m-%dT%H:', r.created_at) || printf('%02d', (CAST(strftime('%M', r.created_at) AS INTEGER) / 5) * 5) || ':00'" :
+    interval === 'hour'   ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
+
+  // The GROUP BY expression must match the SELECT expression exactly.
+  const groupExpr = dateFormat;
+  const selectExpr = interval === '5min'
+    ? dateFormat  // already a full expression, not a plain format string
+    : `strftime('${dateFormat}', r.created_at)`;
 
   const rows = db.prepare(`
     SELECT
-      strftime('${dateFormat}', r.created_at) as timestamp,
+      ${selectExpr} as timestamp,
       COUNT(*) as requests,
       SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) as success_count,
       SUM(CASE WHEN r.status = 'error' THEN 1 ELSE 0 END) as failure_count
@@ -235,16 +251,17 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
     WHERE r.created_at >= ?
       ${pf.sql}
       ${mf.whereSql}
-    GROUP BY strftime('${dateFormat}', r.created_at)
+    GROUP BY ${groupExpr}
     ORDER BY timestamp ASC
   `).all(since, ...pf.params) as any[];
 
   // strftime emits UTC without zone marker. Append 'Z' so the client
   // unambiguously parses as UTC and can format in the user's local timezone.
+  // For 'day' we add a midnight time component so the client always gets ISO.
   res.json(rows.map(r => ({
-    timestamp: interval === 'hour'
-      ? r.timestamp + 'Z'
-      : r.timestamp + 'T00:00:00Z',
+    timestamp: interval === 'day'
+      ? r.timestamp + 'T00:00:00Z'
+      : r.timestamp + 'Z',
     requests: r.requests,
     successCount: r.success_count,
     failureCount: r.failure_count,
