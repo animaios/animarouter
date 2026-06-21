@@ -10,16 +10,23 @@ import type { FeatureSetting } from '@/lib/api'
 interface SettingsSectionProps {
   title: string
   settings: FeatureSetting[]
-  localValues: Record<string, boolean | number>
-  onChange: (key: string, value: boolean | number) => void
+  localValues: Record<string, boolean | number | string>
+  onChange: (key: string, value: boolean | number | string) => void
 }
 
 export function SettingsSection({ title, settings, localValues, onChange }: SettingsSectionProps) {
   /** Resolve a setting's current effective value (local override → server value). */
-  function getValue(key: string): boolean | number {
+  function getValue(key: string): boolean | number | string {
     if (key in localValues) return localValues[key]
     const s = settings.find((s) => s.key === key)
     return s?.value ?? false
+  }
+
+  /** Check if a parent toggle is "off" — handles both boolean false and string 'off'. */
+  function isParentDisabled(parentToggle: string | undefined): boolean {
+    if (!parentToggle) return false
+    const val = getValue(parentToggle)
+    return val === false || val === 'off'
   }
 
   return (
@@ -30,8 +37,7 @@ export function SettingsSection({ title, settings, localValues, onChange }: Sett
       <CardContent>
         <div className="divide-y">
           {settings.map((setting) => {
-            const disabled =
-              setting.parentToggle !== undefined && !getValue(setting.parentToggle)
+            const disabled = isParentDisabled(setting.parentToggle)
             return (
               <SettingRow
                 key={setting.key}

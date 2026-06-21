@@ -27,6 +27,7 @@ import {
   logRequest,
 } from './proxy.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
+import { getFeatureSetting } from '../services/feature-settings.js';
 
 export const responsesRouter = Router();
 
@@ -46,7 +47,10 @@ export const responsesRouter = Router();
 // bookkeeping, sticky sessions, logging) are imported, not re-implemented.
 // ─────────────────────────────────────────────────────────────────────────
 
-const MAX_RETRIES = 20;
+// Retry limit backed by the `global_retry_limit` feature setting.
+function getMaxRetries(): number {
+  return getFeatureSetting('global_retry_limit') as number;
+}
 
 function newId(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(18).toString('hex')}`;
@@ -355,7 +359,8 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
     res.write(`data: ${JSON.stringify({ type: event, sequence_number: seq++, ...payload })}\n\n`);
   };
 
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  const maxRetries = getMaxRetries();
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     let route: RouteResult;
     try {
       route = routeRequest(estimatedTotal, skipKeys.size > 0 ? skipKeys : undefined, preferredModel, false, wantsTools, skipModels.size > 0 ? skipModels : undefined);
@@ -696,7 +701,7 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
   // (reachable since empty-completion failover can burn every attempt after
   // streamStarted) — close the SSE stream with a failed event instead of
   // writing JSON onto a committed event-stream response.
-  const exhaustedMsg = `All models rate-limited after ${MAX_RETRIES} attempts. Last: ${lastError?.message}`;
+  const exhaustedMsg = `All models rate-limited after ${maxRetries} attempts. Last: ${lastError?.message}`;
   if (streamStarted) {
     sse('response.failed', { response: { id: responseId, object: 'response', status: 'failed', error: { message: exhaustedMsg, type: 'rate_limit_error' } } });
     res.end();

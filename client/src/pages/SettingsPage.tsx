@@ -30,7 +30,7 @@ export default function SettingsPage() {
     },
   })
 
-  const [localValues, setLocalValues] = useState<Record<string, boolean | number>>({})
+  const [localValues, setLocalValues] = useState<Record<string, boolean | number | string>>({})
 
   // Compute which keys have actually changed vs server values
   const changedKeys = useMemo(() => {
@@ -64,7 +64,7 @@ export default function SettingsPage() {
     )
   }, [data])
 
-  function handleChange(key: string, value: boolean | number) {
+  function handleChange(key: string, value: boolean | number | string) {
     setLocalValues((prev) => ({ ...prev, [key]: value }))
   }
 
@@ -74,7 +74,7 @@ export default function SettingsPage() {
 
   function handleSave() {
     if (changedKeys.length === 0) return
-    const updates: Record<string, boolean | number> = {}
+    const updates: Record<string, boolean | number | string> = {}
     for (const k of changedKeys) updates[k] = localValues[k]
     saveMutation.mutate(updates)
   }

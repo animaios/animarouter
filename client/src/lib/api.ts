@@ -60,11 +60,12 @@ export interface FeatureSetting {
   key: string;
   label: string;
   description: string;
-  type: 'boolean' | 'number';
-  value: boolean | number;
-  default: boolean | number;
+  type: 'boolean' | 'number' | 'string';
+  value: boolean | number | string;
+  default: boolean | number | string;
   min?: number;
   max?: number;
+  options?: string[];
   effect: 'live' | 'restart';
   group: string;
   parentToggle?: string;
@@ -80,7 +81,7 @@ export async function fetchFeatureSettings(): Promise<FeatureSettingsResponse> {
 }
 
 export async function saveFeatureSettings(
-  updates: Record<string, boolean | number>,
+  updates: Record<string, boolean | number | string>,
 ): Promise<FeatureSettingsResponse> {
   return apiFetch<FeatureSettingsResponse>('/api/settings/features', {
     method: 'PUT',

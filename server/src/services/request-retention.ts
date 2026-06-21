@@ -1,4 +1,5 @@
 import { getDb } from '../db/index.js';
+import { getFeatureSetting } from './feature-settings.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETENTION_DAYS = 90;
@@ -34,23 +35,14 @@ export interface RequestAnalyticsRetentionConfig {
 
 let nextPruneAtMs = 0;
 
-function readNonNegativeInt(name: string, defaultValue: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return defaultValue;
-
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) return defaultValue;
-  return parsed;
-}
-
 function toSqliteTimestamp(date: Date): string {
   return date.toISOString().slice(0, 19).replace('T', ' ');
 }
 
 export function getRequestAnalyticsRetentionConfig(): RequestAnalyticsRetentionConfig {
   return {
-    retentionDays: readNonNegativeInt('REQUEST_ANALYTICS_RETENTION_DAYS', DEFAULT_RETENTION_DAYS),
-    maxRows: readNonNegativeInt('REQUEST_ANALYTICS_MAX_ROWS', DEFAULT_MAX_ROWS),
+    retentionDays: getFeatureSetting('analytics_retention_days') as number,
+    maxRows: getFeatureSetting('analytics_max_rows') as number,
   };
 }
 

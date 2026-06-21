@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { getFeatureSetting } from '../services/feature-settings.js';
 
 // Per-IP fixed-window rate limiter for the public /v1 proxy (#35, item #6).
 //
@@ -13,7 +14,6 @@ import type { Request, Response, NextFunction } from 'express';
 // rate limiting off entirely.
 
 const WINDOW_MS = 60_000;
-const DEFAULT_RPM = 120;
 // Bound the IP map so a flood of distinct (e.g. spoofed) source addresses can't
 // grow it without limit; expired entries are pruned opportunistically.
 const MAX_TRACKED_IPS = 10_000;
@@ -23,16 +23,13 @@ interface WindowState {
   resetAt: number;
 }
 
-function parseLimit(): number {
-  const raw = process.env.PROXY_RATE_LIMIT_RPM;
-  if (raw === undefined || raw.trim() === '') return DEFAULT_RPM;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0) return DEFAULT_RPM;
-  return Math.floor(n);
+function getLimit(): number {
+  const n = getFeatureSetting('proxy_rate_limit_rpm') as number;
+  return Math.max(0, Math.floor(n));
 }
 
 export function createProxyRateLimiter() {
-  const limit = parseLimit();
+  const limit = getLimit();
   const windows = new Map<string, WindowState>();
 
   return function proxyRateLimit(req: Request, res: Response, next: NextFunction): void {
