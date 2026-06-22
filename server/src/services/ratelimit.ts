@@ -327,12 +327,6 @@ export function computeRetryCooldownMs(
   return getCooldownDurationForLimit(platform, modelId, keyId, limits, retryAfterMs);
 }
 
-// Long cooldown for a 403 Forbidden on a key that already passed validateKey.
-// Now backed by the `forbidden_cooldown_hours` feature setting (hours → ms).
-export function getModelForbiddenCooldownMs(): number {
-  return (getFeatureSetting('forbidden_cooldown_hours') as number) * 3600 * 1000;
-}
-
 // Decide how long to bench a model+key after an upstream 429. Escalate to the
 // long quarantine (getNextCooldownDuration, up to 24h) ONLY when the model is
 // genuinely at its DAILY limit (RPD or TPD) — that won't recover until the

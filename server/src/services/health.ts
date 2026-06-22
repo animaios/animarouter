@@ -25,8 +25,11 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     apiKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
   } catch (err: any) {
     console.error(`[Health] Key ${keyId} decrypt failed:`, err.message);
-    db.prepare("UPDATE api_keys SET status = ?, last_checked_at = datetime('now') WHERE id = ?")
-      .run('error', keyId);
+    // Decrypt failure is permanent (wrong encryption key or corrupt data).
+    // Disable the key outright — it can never succeed, and routing to it
+    // wastes CPU on every request (Fix 1 includes status='error' keys).
+    db.prepare("UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?")
+      .run(keyId);
     return 'error';
   }
 

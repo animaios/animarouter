@@ -94,6 +94,13 @@ export interface RouteResult {
 // Round-robin index per platform
 const roundRobinIndex = new Map<string, number>();
 
+/** Rotate an array by `offset` positions, wrapping around. */
+function rotateArray<T>(arr: T[], offset: number): T[] {
+  if (arr.length === 0) return arr;
+  const shift = offset % arr.length;
+  return [...arr.slice(shift), ...arr.slice(0, shift)];
+}
+
 // ── Parallel request gating ──
 // Per-provider (platform slug) in-flight counter. The limit is provider-level
 // so that the total concurrency across all models of one custom provider never
@@ -623,11 +630,6 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // For sticky sessions: concatenate healthy+unhealthy and hash into it.
     // For round-robin: rotate within each health group independently so
     // healthy keys are ALWAYS tried first regardless of the offset.
-    const rotateArray = <T>(arr: T[], offset: number): T[] => {
-      if (arr.length === 0) return arr;
-      const shift = offset % arr.length;
-      return [...arr.slice(shift), ...arr.slice(0, shift)];
-    };
 
     let keyOrder: KeyRow[];
     let idx: number;
@@ -650,7 +652,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
       const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
 
-      // skipKeys accumulation gates normal-mode attempts to avoid
+      // skipKeys accumulation gates attempts to avoid
       // re-hammering the same key within one request sweep.
       if (skipKeys?.has(skipId)) continue;
 
@@ -679,7 +681,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       try {
         decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
       } catch {
-        db.prepare("UPDATE api_keys SET status = 'error', last_checked_at = datetime('now') WHERE id = ?")
+        // Decrypt failure is permanent — disable the key so it's never
+        // selected again (Fix 1 includes status='error' in routing).
+        db.prepare("UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?")
           .run(key.id);
         releaseSlot(entry.platform);
         continue;

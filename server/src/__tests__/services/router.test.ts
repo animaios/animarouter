@@ -161,11 +161,13 @@ describe('Router', () => {
     `).run('groq', 'test', groqKey.encrypted, groqKey.iv, groqKey.authTag, 'healthy', 1);
 
     const result = routeRequest();
-    const corruptKey = db.prepare("SELECT status FROM api_keys WHERE label = 'corrupt'").get() as { status: string };
+    const corruptKey = db.prepare("SELECT status, enabled FROM api_keys WHERE label = 'corrupt'").get() as { status: string; enabled: number };
 
     expect(result.platform).toBe('groq');
     expect(result.apiKey).toBe('test-groq-key');
-    expect(corruptKey.status).toBe('error');
+    // Decrypt failure is permanent — key disabled with status='invalid'
+    expect(corruptKey.status).toBe('invalid');
+    expect(corruptKey.enabled).toBe(0);
   });
 
   it('applies elapsed decay before adding a new 429 penalty', () => {

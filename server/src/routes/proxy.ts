@@ -1250,8 +1250,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     } // end keyRetry
 
     // Key exhausted: all PER_KEY_RETRIES attempts failed.
-    // Mark it so the router cycles to the next key (and in 1 RPM mode,
-    // exhausted keys are re-tried in exhaustion order).
+    // Mark it so the router cycles to the next key.
     markExhausted(route.keyId, route.platform, route.modelId);
     const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
     skipKeys.add(skipId);

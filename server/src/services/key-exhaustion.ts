@@ -129,3 +129,24 @@ export function sweepStaleExhaustion(): number {
   }
   return swept;
 }
+
+// ── Sweep interval lifecycle ─────────────────────────────────────────────────
+let sweepTimerRef: ReturnType<typeof setInterval> | null = null;
+
+/** Start the periodic exhaustion sweep. Call once at server startup. */
+export function startExhaustionSweep(): void {
+  if (sweepTimerRef) return;
+  sweepTimerRef = setInterval(() => {
+    const swept = sweepStaleExhaustion();
+    if (swept > 0) console.log(`[Exhaustion] Swept ${swept} stale entries`);
+  }, 60_000);
+  sweepTimerRef.unref();
+}
+
+/** Stop the periodic exhaustion sweep. Call on graceful shutdown. */
+export function stopExhaustionSweep(): void {
+  if (sweepTimerRef) {
+    clearInterval(sweepTimerRef);
+    sweepTimerRef = null;
+  }
+}

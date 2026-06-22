@@ -79,7 +79,9 @@ export function loadSourceWeights(): Map<string, SourceWeight> {
 // NOT a step function. A score from 10 days ago weighs 50 %; 20 days = 25 %.
 export function stalenessDecay(updatedIso: string | null | undefined): number {
   if (!updatedIso) return 0;
-  const ageMs = Date.now() - new Date(updatedIso).getTime();
+  const ms = new Date(updatedIso).getTime();
+  if (!Number.isFinite(ms)) return 0; // bad date string → treat as missing
+  const ageMs = Date.now() - ms;
   if (ageMs < 0) return 1; // future timestamp → treat as fresh
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
   return Math.pow(0.5, ageDays / 10);
@@ -187,7 +189,8 @@ export function recomputeBenchmarkComposite(
       // Composite timestamp = max of available source timestamps
       const timestamps = [row.aa_score_updated, row.swe_rebench_score_updated]
         .filter((t: string | null) => t != null)
-        .map((t: string) => new Date(t).getTime());
+        .map((t: string) => new Date(t).getTime())
+        .filter((ms: number) => Number.isFinite(ms));
       const lastUpdate = timestamps.length > 0
         ? new Date(Math.max(...timestamps)).toISOString()
         : null;
@@ -562,12 +565,4 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
   lastFetchResult = { updated: 0, errors: ['AA fetch exhausted retries'] };
   lastFetchTime = Date.now();
   return { ...lastFetchResult, source: 'live', affectedIds };
-}
-
-/**
- * @deprecated Use fetchAAScores instead. Kept for backward compatibility.
- */
-export async function fetchLiveBenchmarkScores(db: Database.Database): Promise<BenchmarkFetchResult> {
-  const result = await fetchAAScores(db);
-  return { updated: result.updated, errors: result.errors, source: result.source };
 }

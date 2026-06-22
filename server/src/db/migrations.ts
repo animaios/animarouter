@@ -2,7 +2,6 @@ import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { initEncryptionKey } from '../lib/crypto.js';
 import { applyBenchmarkScores } from './benchmark-scores.js';
-import { fetchLiveBenchmarkScores } from './benchmark-scores.js';
 import { BenchmarkService } from '../services/benchmarks.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
@@ -79,12 +78,8 @@ export function migrateDbSchema(db: Database.Database) {
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
 
-  // Live benchmark fetch — fire-and-forget: benchmark data is non-blocking on boot
-  fetchLiveBenchmarkScores(db).catch(err =>
-    console.warn('[Boot] AA fetch error:', err.message)
-  );
-
   // SWE-rebench + NIM + AA composite pipeline — fire-and-forget
+  // (AA fetch is included inside updateAllBenchmarkScores — no separate call needed)
   new BenchmarkService().updateAllBenchmarkScores()
     .then(({ updated, errors }) => {
       if (updated > 0) console.log(`[Boot] SWE-rebench updated ${updated} models`);
