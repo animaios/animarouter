@@ -209,7 +209,15 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
   try {
     decryptedKey = decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag);
   } catch {
-    return; // decryption failed — skip, don't penalize
+    // Decrypt failure is permanent — mark key unhealthy so the router
+    // deprioritizes it until the health checker disables it (enabled=0).
+    keyHealthMap.set(keyRow.id, {
+      penalty: 0,
+      lastPingAt: Date.now(),
+      healthy: false,
+      lastError: 'decrypt failed',
+    });
+    return;
   }
 
   const start = Date.now();
@@ -247,8 +255,12 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
     // Model-specific errors (403/404) mean the key is valid but this model
     // isn't accessible on its tier. Don't poison the key's global health —
     // only genuine failures (5xx, timeout, 429) should penalize the key.
-    const isModelError = err?.status === 403 || err?.status === 404
-      || /forbidden|not found|no endpoints found/i.test(err?.message ?? '');
+    // The regex fallback is gated on non-5xx status to avoid matching
+    // e.g. a 500 whose message happens to contain "forbidden".
+    const status = err?.status;
+    const isModelError = status === 403 || status === 404
+      || ((!status || status < 500)
+        && /forbidden|not found|no endpoints found/i.test(err?.message ?? ''));
 
     if (!isModelError) {
       const prev = keyHealthMap.get(keyRow.id);

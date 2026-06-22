@@ -4,7 +4,7 @@ import { initDb, getDb } from './db/index.js';
 import { pruneSessions } from './services/auth.js';
 import { startHealthChecker } from './services/health.js';
 import { startRequestRetentionPruner } from './services/request-retention.js';
-import { rebuildExhaustionFromDB, sweepStaleExhaustion } from './services/key-exhaustion.js';
+import { rebuildExhaustionFromDB, startExhaustionSweep, stopExhaustionSweep } from './services/key-exhaustion.js';
 import { initDegradation, loadState, applyDecay, flushDirtyStates, evictGhostStates } from './services/degradation.js';
 import { captureRunningValues } from './services/feature-settings.js';
 import { startHeartbeat, stopHeartbeat } from './services/heartbeat.js';
@@ -115,12 +115,7 @@ async function main() {
     console.log(`Proxy endpoint: http://${display}:${PORT}/v1/chat/completions`);
     startHealthChecker();
     startHeartbeat();
-    // Sweep stale exhaustion entries every 60s
-    const exhaustionSweep = setInterval(() => {
-      const swept = sweepStaleExhaustion();
-      if (swept > 0) console.log(`[Exhaustion] Swept ${swept} stale entries`);
-    }, 60_000);
-    exhaustionSweep.unref();
+    startExhaustionSweep();
   };
 
   const server = app.listen(Number(PORT), HOST, onReady(HOST));
@@ -144,6 +139,7 @@ async function main() {
   process.on('SIGTERM', () => {
     console.log('[server] SIGTERM received — shutting down gracefully');
     stopHeartbeat();
+    stopExhaustionSweep();
     shutdownFlushDegradation();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 30_000).unref();
@@ -151,6 +147,7 @@ async function main() {
   process.on('SIGINT', () => {
     console.log('[server] SIGINT received — shutting down gracefully');
     stopHeartbeat();
+    stopExhaustionSweep();
     shutdownFlushDegradation();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 30_000).unref();
