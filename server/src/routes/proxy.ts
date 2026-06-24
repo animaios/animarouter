@@ -1226,7 +1226,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // the router excludes it from the healthy pool. Only a successful
         // heartbeat ping can restore it — saving wasted retry attempts.
         if (classifyError(err) === 'minor' && isHeartbeatEnabled()) {
-          markKeyUnhealthy(route.keyId, err.message?.slice(0, 120) ?? '429 rate limit');
+          markKeyUnhealthy(route.keyId, err?.message?.slice(0, 120) ?? '429 rate limit');
           publish({
             type: 'routing.key_evicted',
             id: requestId,

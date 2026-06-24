@@ -211,7 +211,7 @@ export function LiveEvents() {
       <div
         ref={logContainerRef}
         className={`overflow-y-auto font-mono text-[11px] leading-relaxed bg-muted text-muted-foreground rounded-b-3xl transition-all duration-200 ${
-          expanded ? 'max-h-120' : 'max-h-36'
+          expanded ? 'max-h-[480px]' : 'max-h-36'
         }`}
       >
         {lines.length === 0 ? (
