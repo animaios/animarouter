@@ -16,7 +16,7 @@ import { rescueInlineToolCalls, startsWithDialectMarker, couldBecomeDialectMarke
 import { getContextHandoffMode, recordIncomingMessages, maybeInjectContextHandoff, recordSuccessfulModel, hasPriorModel, HANDOFF_MAX_TOKENS } from '../services/context-handoff.js';
 import { publish } from '../services/events.js';
 import { getFeatureSetting } from '../services/feature-settings.js';
-import { recordActivity } from '../services/heartbeat.js';
+import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
 
 export const proxyRouter = Router();
 
@@ -1218,6 +1218,27 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         if (skipImmediately && !(isPinned && route.modelDbId === preferredModel)) {
           skipModels.add(route.modelDbId);
           continue outerLoop;
+        }
+
+        // ── 429/402 key eviction ──────────────────────────────────
+        // When a key returns a rate-limit or payment-required error
+        // and heartbeat is enabled, mark it unhealthy immediately so
+        // the router excludes it from the healthy pool. Only a successful
+        // heartbeat ping can restore it — saving wasted retry attempts.
+        if (classifyError(err) === 'minor' && isHeartbeatEnabled()) {
+          markKeyUnhealthy(route.keyId, err.message?.slice(0, 120) ?? '429 rate limit');
+          publish({
+            type: 'routing.key_evicted',
+            id: requestId,
+            provider: route.platform,
+            keyId: route.keyId,
+            model: route.modelId,
+            reason: isPaymentRequiredError(err) ? 'payment_required' : 'rate_limited',
+            at: Date.now(),
+          });
+          // Skip remaining retries on this key — it told us it's at capacity.
+          lastError = err;
+          break keyRetry;
         }
 
         if (keyAttempt < PER_KEY_RETRIES - 1) {

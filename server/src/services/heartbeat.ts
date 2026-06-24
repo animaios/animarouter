@@ -51,6 +51,24 @@ export function isKeyHealthy(keyId: number): boolean {
   return h.healthy;
 }
 
+/** Mark a key as unhealthy in the per-key health map. The key will be excluded
+ *  from routing by `isKeyHealthy()` until a successful heartbeat ping restores it.
+ *  No-op when heartbeat is disabled — the cooldown system handles recovery instead.
+ *
+ *  Called from `proxy.ts` when a request returns 429 (rate limit) or 402 (payment
+ *  required). The key is evicted immediately — no retries wasted on a key that
+ *  told us it's at capacity. */
+export function markKeyUnhealthy(keyId: number, error?: string): void {
+  if (!isHeartbeatEnabled()) return;
+  const prev = keyHealthMap.get(keyId);
+  keyHealthMap.set(keyId, {
+    penalty: (prev?.penalty ?? 0) + 1,
+    lastPingAt: Date.now(),
+    healthy: false,
+    lastError: error ?? 'evicted by traffic 429',
+  });
+}
+
 /**
  * Check whether the heartbeat feature is enabled and active.
  * Returns false when heartbeat is disabled, meaning all keys are usable

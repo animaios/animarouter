@@ -22,6 +22,7 @@ interface KeyExhaustedEvent extends RequestEventBase { type: 'routing.key_exhaus
 interface KeyRetryEvent extends RequestEventBase { type: 'routing.key_retry'; provider: string; keyId: number; model: string; attempt: number; max: number; }
 interface ModelSwitchEvent extends RequestEventBase { type: 'routing.model_switch'; from: string; to: string; reason: string; }
 interface ProviderFastFailEvent extends RequestEventBase { type: 'routing.provider_fastfail'; provider: string; failedModelCount: number; }
+interface KeyEvictedEvent extends RequestEventBase { type: 'routing.key_evicted'; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required'; }
 interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; }
 interface HeartbeatCycleSkippedEvent extends TimestampOnly { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; }
 interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text: string; }
@@ -29,6 +30,7 @@ interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text
 type LiveEvent =
   | RequestStartEvent | RequestDoneEvent | RequestErrorEvent | RequestAbortedEvent
   | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent | ProviderFastFailEvent
+  | KeyEvictedEvent
   | HeartbeatPingEvent | HeartbeatCycleSkippedEvent
   | StreamChunkEvent;
 
@@ -80,6 +82,11 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       const rId = evt.id.slice(0, 8);
       return { id: evt.id, ts, kind: 'warn', text: `⚡ [${rId}] Provider ${evt.provider} fast-failed (${evt.failedModelCount} models down) — skipping remaining models` };
     }
+    case 'routing.key_evicted': {
+      const rId = evt.id.slice(0, 8);
+      return { id: evt.id, ts, kind: 'warn',
+        text: `🚫 [${rId}] Key #${evt.keyId} evicted (${evt.reason === 'rate_limited' ? '429 rate limit' : '402 out of credits'}) on ${evt.provider}/${evt.model}` };
+    }
     case 'heartbeat.ping':
       if (evt.success) {
         return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} healthy (${evt.latencyMs}ms)` };
@@ -93,6 +100,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       // Exhaustive check: if a new event type is added to LiveEvent but not
       // handled above, the compiler will error here.
       const _exhaustive: ExhaustiveEventCheck = evt;
+      void _exhaustive;
       return null;
     }
   }
@@ -203,7 +211,7 @@ export function LiveEvents() {
       <div
         ref={logContainerRef}
         className={`overflow-y-auto font-mono text-[11px] leading-relaxed bg-muted text-muted-foreground rounded-b-3xl transition-all duration-200 ${
-          expanded ? 'max-h-[480px]' : 'max-h-[144px]'
+          expanded ? 'max-h-120' : 'max-h-36'
         }`}
       >
         {lines.length === 0 ? (
