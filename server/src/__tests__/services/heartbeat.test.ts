@@ -20,6 +20,7 @@ describe('Provider Health Heartbeat', () => {
   let initDegradation: () => void;
   let getKeyHealth: (keyId: number) => any;
   let isKeyHealthy: (keyId: number) => boolean;
+  let resetHeartbeatConfig: () => void;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -56,6 +57,7 @@ describe('Provider Health Heartbeat', () => {
     stopHeartbeat = heartbeatModule.stopHeartbeat;
     getKeyHealth = heartbeatModule.getKeyHealth;
     isKeyHealthy = heartbeatModule.isKeyHealthy;
+    resetHeartbeatConfig = heartbeatModule.resetHeartbeatConfig;
     initDb = dbModule.initDb;
     getDb = dbModule.getDb;
     setSetting = dbModule.setSetting;
@@ -119,7 +121,9 @@ describe('Provider Health Heartbeat', () => {
 
     it('cycle proceeds when activity is recent', async () => {
       setupProvider();
-      chatCompletion.mockResolvedValueOnce({
+      // Use mockResolvedValue (not Once) so both warmup and interval cycles
+      // get a successful response.
+      chatCompletion.mockResolvedValue({
         choices: [{ message: { role: 'assistant', content: 'hi' } }],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       });
@@ -144,7 +148,9 @@ describe('Provider Health Heartbeat', () => {
       const penaltyBefore = getPenalty(modelDbId);
       expect(penaltyBefore).toBeGreaterThan(0);
 
-      chatCompletion.mockResolvedValueOnce({
+      // Use mockResolvedValue (not Once) so both the warmup and interval cycles
+      // get a successful response. The warmup fires immediately on startHeartbeat().
+      chatCompletion.mockResolvedValue({
         choices: [{ message: { role: 'assistant', content: 'pong' } }],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       });
@@ -170,7 +176,9 @@ describe('Provider Health Heartbeat', () => {
     it('failed ping (5xx) records major failure and increases penalty', async () => {
       const { modelDbId, keyId } = setupProvider();
 
-      chatCompletion.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+      // Use mockRejectedValue (not Once) so both warmup and interval cycles
+      // consistently get a failure response.
+      chatCompletion.mockRejectedValue(new Error('503 Service Unavailable'));
 
       recordActivity();
       startHeartbeat();
@@ -194,7 +202,7 @@ describe('Provider Health Heartbeat', () => {
     it('failed ping (429) records minor failure', async () => {
       const { modelDbId, keyId } = setupProvider();
 
-      chatCompletion.mockRejectedValueOnce(new Error('429 Rate limited'));
+      chatCompletion.mockRejectedValue(new Error('429 Rate limited'));
 
       recordActivity();
       startHeartbeat();
@@ -212,7 +220,7 @@ describe('Provider Health Heartbeat', () => {
     it('non-retryable error (401) does NOT penalize the model but marks key unhealthy', async () => {
       const { modelDbId, keyId } = setupProvider();
 
-      chatCompletion.mockRejectedValueOnce(new Error('401 Unauthorized'));
+      chatCompletion.mockRejectedValue(new Error('401 Unauthorized'));
 
       recordActivity();
       startHeartbeat();
@@ -230,10 +238,53 @@ describe('Provider Health Heartbeat', () => {
     });
   });
 
+  // ── Cold Key Handling ──────────────────────────────────────────────────
+
+  describe('Cold key handling', () => {
+    it('isKeyHealthy returns false for a cold key when heartbeat is enabled', () => {
+      // Heartbeat is enabled in beforeEach — cold keys must be prewarmed
+      expect(isKeyHealthy(999)).toBe(false);
+    });
+
+    it('isKeyHealthy returns true for a cold key when heartbeat is disabled (backward compat)', () => {
+      // Disable heartbeat
+      setSetting('heartbeat_enabled', 'false');
+      resetHeartbeatConfig();
+
+      // When heartbeat is off, cold keys are assumed healthy for backward compat
+      expect(isKeyHealthy(999)).toBe(true);
+    });
+
+    it('isKeyHealthy returns true after a successful warmup ping', async () => {
+      const { modelDbId, keyId } = setupProvider();
+
+      // Key starts cold (not yet pinged)
+      expect(isKeyHealthy(keyId)).toBe(false);
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      startHeartbeat();
+
+      // The warmup cycle fires immediately — wait for it to complete
+      // by advancing a microtask tick
+      await vi.advanceTimersByTimeAsync(0);
+
+      // After warmup, the key should be healthy
+      expect(isKeyHealthy(keyId)).toBe(true);
+      const health = getKeyHealth(keyId);
+      expect(health).toBeDefined();
+      expect(health.healthy).toBe(true);
+    });
+  });
+
   // ── Per-Key Pinging ────────────────────────────────────────────────────
 
   describe('Per-key pinging', () => {
-    it('pings each key once per cycle even across multiple models', async () => {
+    it('pings each key once per cycle even across multiple models (warmup cycle)', async () => {
       const db = getDb();
       db.prepare('DELETE FROM fallback_config').run();
 
@@ -255,14 +306,16 @@ describe('Provider Health Heartbeat', () => {
 
       recordActivity();
       startHeartbeat();
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
+
+      // Advance time by 0 to drain microtask queue (warmup cycle completes)
+      await vi.advanceTimersByTimeAsync(0);
 
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
       // Key should be pinged exactly once (deduped across models)
       expect(pingEvents.length).toBe(1);
     });
 
-    it('pings multiple keys on the same platform', async () => {
+    it('pings multiple keys on the same platform (warmup cycle)', async () => {
       const db = getDb();
       db.prepare('DELETE FROM fallback_config').run();
 
@@ -280,7 +333,9 @@ describe('Provider Health Heartbeat', () => {
 
       recordActivity();
       startHeartbeat();
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
+
+      // Advance time by 0 to drain microtask queue (warmup cycle completes)
+      await vi.advanceTimersByTimeAsync(0);
 
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
       // Both keys should be pinged

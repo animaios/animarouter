@@ -37,11 +37,27 @@ export function getKeyHealth(keyId: number): KeyHealth | undefined {
   return keyHealthMap.get(keyId);
 }
 
-/** Check whether a key is currently healthy according to heartbeat pings. */
+/** Check whether a key is currently healthy according to heartbeat pings.
+ *  When heartbeat is enabled, cold keys (never pinged) return false — they
+ *  must be prewarmed first. Only keys that have been successfully pinged
+ *  at least once report true.
+ *  When heartbeat is disabled, cold keys are assumed healthy (backward-compat).
+ */
 export function isKeyHealthy(keyId: number): boolean {
   const h = keyHealthMap.get(keyId);
-  // No data = assume healthy (never pinged yet)
-  return h ? h.healthy : true;
+  // No data = cold key. If heartbeat is active it must be prewarmed first;
+  // if heartbeat is disabled, assume healthy for backward compatibility.
+  if (!h) return !isHeartbeatEnabled();
+  return h.healthy;
+}
+
+/**
+ * Check whether the heartbeat feature is enabled and active.
+ * Returns false when heartbeat is disabled, meaning all keys are usable
+ * without prewarming (backward-compatible mode for router.ts).
+ */
+export function isHeartbeatEnabled(): boolean {
+  return readConfig().enabled;
 }
 
 /** Get all key health states (for dashboard/debugging). */
@@ -102,6 +118,14 @@ export function startHeartbeat(): void {
     console.log(`[Heartbeat] Starting per-key timer (interval=${intervalMs / 1000}s)`);
     timerRef = setInterval(() => { runCycle().catch(e => console.error('[Heartbeat] Cycle error:', e)); }, intervalMs);
     timerRef.unref();
+
+    // ── Startup prewarm: immediately fire a cycle to warm up all keys ──
+    // This ensures keys are prewarmed before the first user request arrives,
+    // rather than waiting for the first interval tick (default 10 min delay).
+    // The activity gate is bypassed so keys are pinged even if no prior
+    // user request has been recorded (startup case).
+    console.log('[Heartbeat] Firing startup prewarm cycle');
+    runCycle(true).catch(e => console.error('[Heartbeat] Prewarm cycle error:', e));
   } catch (e) {
     // DB not ready or config read failed — log and skip
     console.error('[Heartbeat] Failed to start:', e);
@@ -119,7 +143,7 @@ export function stopHeartbeat(): void {
 
 // ── Internal: cycle logic ───────────────────────────────────────────────────
 
-async function runCycle(): Promise<void> {
+async function runCycle(skipGate = false): Promise<void> {
   if (cycleInProgress) return;
   cycleInProgress = true;
 
@@ -128,7 +152,10 @@ async function runCycle(): Promise<void> {
     const { activityWindowMs, staggerMs, pingTimeoutMs } = readConfig();
 
     // ── Activity gate ──
-    if (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs) {
+    // The gate is bypassed for the startup prewarm cycle (skipGate=true)
+    // so that keys are warmed up immediately on startup even when no prior
+    // user request has been recorded.
+    if (!skipGate && (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs)) {
       publish({
         type: 'heartbeat.cycle_skipped',
         reason: 'activity_gate',

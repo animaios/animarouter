@@ -12,15 +12,10 @@
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client\"",
     "dev:lan": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client -- --host\"",
-    "test": "npm run test -w server && npm run typecheck -w client && npm run proxy:test",
+    "test": "npm run test -w server && npm run typecheck -w client",
     "build": "npm run build -w server && npm run build -w client",
     "build:server": "npm run build -w server",
-    "postinstall": "node scripts/proxy-up.mjs init",
-    "proxy:deploy": "node scripts/proxy-up.mjs up",
-    "proxy:up": "node scripts/proxy-up.mjs up",
-    "proxy:dev": "node scripts/proxy-up.mjs dev",
-    "proxy:status": "node scripts/proxy-up.mjs status",
-    "proxy:test": "node scripts/proxy-up.mjs test"
+    "postinstall": "node scripts/proxy-up.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^3.2.6",

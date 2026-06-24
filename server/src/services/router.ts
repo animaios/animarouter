@@ -6,7 +6,7 @@ import { decrypt } from '../lib/crypto.js';
 // Rate-limit pre-checks removed — routing relies on heartbeat-based health
 // detection instead of predictive quota tracking. See PR: heartbeat per-key.
 // recordRequest/recordTokens still track usage for analytics purposes.
-import { isKeyHealthy } from './heartbeat.js';
+import { isKeyHealthy, isHeartbeatEnabled } from './heartbeat.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
@@ -619,13 +619,33 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
     ).get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
     const stickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
-    
+
+    // ── Key health filtering ──
+    // When the heartbeat is enabled, only keys that have been prewarmed
+    // and confirmed healthy by heartbeat pings are eligible for routing.
+    // Cold keys (never pinged) and unhealthy keys (failed pings) are
+    // excluded — they must first pass a heartbeat cycle to prove health.
+    // When heartbeat is disabled, all keys are usable (backward compat).
+    const heartbeatEnabled = isHeartbeatEnabled();
+    const healthyKeys = keys.filter(k => isKeyHealthy(k.id));
+
+    if (heartbeatEnabled && healthyKeys.length === 0) {
+      // No prewarmed healthy keys for this model — skip to the next model.
+      // In pin mode, throw immediately instead of falling through silently.
+      if (pinMode && preferredModelDbId && entry.model_db_id === preferredModelDbId) {
+        const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
+        pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+        pinErr.status = 429;
+        throw pinErr;
+      }
+      continue;
+    }
+
     // Split keys by health status so healthy keys are ALWAYS tried first,
     // regardless of round-robin offset. Apply round-robin within each group
     // independently to maintain fair distribution while respecting health.
-    const healthyKeys = keys.filter(k => isKeyHealthy(k.id));
-    const unhealthyKeys = keys.filter(k => !isKeyHealthy(k.id));
-    
+    const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id));
+
     // Build the key ordering array and starting index.
     // For sticky sessions: concatenate healthy+unhealthy and hash into it.
     // For round-robin: rotate within each health group independently so
@@ -646,7 +666,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       ];
       idx = 0; // start from beginning — healthy-first guaranteed by construction
     }
-    
+
     for (let attempt = 0; attempt < keyOrder.length; attempt++) {
       const key = keyOrder[attempt];
 

@@ -1,4 +1,0 @@
-[submodule "freellmproxy"]
-	path = freellmproxy
-	url = https://github.com/animaios/freeproxy.git
-	branch = main
