@@ -280,22 +280,36 @@ async function runCycle(skipGate = false): Promise<number> {
       }
     }
 
-    // ── Sort by modelDbId so all keys for the same model are pinged consecutively,
-    // reducing the window where a model has partial key coverage during prewarm.
-    pingTasks.sort((a, b) => a.modelDbId - b.modelDbId);
-
-    // ── Ping each key (staggered) ──
-    for (let i = 0; i < pingTasks.length; i++) {
-      const task = pingTasks[i];
-      try {
-        await pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs);
-      } catch (e) {
-        console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, e);
-      }
-      if (staggerMs > 0 && i < pingTasks.length - 1) {
-        await sleep(staggerMs);
-      }
+    // ── Group by provider and ping concurrently across providers ──
+    // Different providers are pinged in parallel, but within each provider,
+    // keys are pinged sequentially (with optional stagger) to avoid overwhelming
+    // the same provider with a burst of concurrent requests (DDoS).
+    const groupedByPlatform = new Map<string, typeof pingTasks>();
+    for (const task of pingTasks) {
+      const group = groupedByPlatform.get(task.platform) ?? [];
+      group.push(task);
+      groupedByPlatform.set(task.platform, group);
     }
+
+    // Sort each group by modelDbId so same-model keys are pinged consecutively
+    for (const [, tasks] of groupedByPlatform) {
+      tasks.sort((a, b) => a.modelDbId - b.modelDbId);
+    }
+
+    // Run all provider groups concurrently, but within each group ping sequentially
+    await Promise.all(Array.from(groupedByPlatform.entries()).map(async ([platform, tasks]) => {
+      for (let i = 0; i < tasks.length; i++) {
+        const task = tasks[i];
+        try {
+          await pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs);
+        } catch (e) {
+          console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, e);
+        }
+        if (staggerMs > 0 && i < tasks.length - 1) {
+          await sleep(staggerMs);
+        }
+      }
+    }));
 
     // ── Auto-disable evaluation ──
     // After all pings complete, evaluate each pinged model's key health.
@@ -440,6 +454,7 @@ function evaluateAutoDisable(
   modelId: string,
 ): AutoDisableResult | null {
   const threshold = getAutoDisableThresholdPct();
+  if (threshold === 0) return null; // Feature disabled by configuration
   const allKeys = db.prepare(
     "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
   ).all(platform) as Array<{ id: number }>;

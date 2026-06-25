@@ -396,7 +396,7 @@ describe('Provider Health Heartbeat', () => {
       // Both pings fail → 100% unhealthy ≥ 50% threshold → auto-disable
       chatCompletion.mockRejectedValue(new Error('503 Service Unavailable'));
 
-      // Set threshold to 50 (default)
+      // Set threshold to 50
       setSetting('heartbeat_auto_disable_pct', '50');
 
       recordActivity();
@@ -521,6 +521,34 @@ describe('Provider Health Heartbeat', () => {
       expect(afterReEnable.enabled).toBe(1);
       expect(afterReEnable.auto_disabled_at).toBeNull();
     });
+
+    it('does NOT disable model when threshold is 0 (feature disabled)', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('disabledprov', 'disabled-model', 'Disabled Model', 1, 1, 1)").run();
+      const modelId = (db.prepare("SELECT id FROM models WHERE platform = 'disabledprov' AND model_id = 'disabled-model'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelId);
+
+      // 2 keys — all fail (100% unhealthy)
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('disabledprov', 'Key 1', 'enc1', 'iv1', 'tag1', 'healthy', 1)").run();
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('disabledprov', 'Key 2', 'enc2', 'iv2', 'tag2', 'healthy', 1)").run();
+
+      chatCompletion.mockRejectedValue(new Error('503 Service Unavailable'));
+
+      // Do NOT set threshold — default is 0 (disabled). Feature off.
+      recordActivity();
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Model should remain enabled
+      const model = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(model.enabled).toBe(1);
+      expect(model.auto_disabled_at).toBeNull();
+
+      // No auto_disable event
+      const autoDisableEvents = publishedEvents.filter(e => e.type === 'heartbeat.auto_disable');
+      expect(autoDisableEvents.length).toBe(0);
+    });
   });
 
   // ── Startup Prewarm ──────────────────────────────────────────────────
@@ -576,18 +604,18 @@ describe('Provider Health Heartbeat', () => {
   // ── Ping Task Sorting ───────────────────────────────────────────────
 
   describe('Ping task sorting', () => {
-    it('sorts ping tasks by modelDbId ascending so same-model keys are pinged consecutively', async () => {
+    it('sorts ping tasks by modelDbId ascending within each provider group', async () => {
       const db = getDb();
       db.prepare('DELETE FROM fallback_config').run();
 
-      // Create two models on separate platforms with the same priority.
+      // Create two models on the SAME platform with the same priority.
       // model-b is inserted first (will get a lower id / modelDbId) and should
-      // be pinged first after the sort, regardless of insertion order.
-      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('sort-b', 'model-b', 'Model B', 2, 2, 1)").run();
-      const idB = (db.prepare("SELECT id FROM models WHERE platform = 'sort-b' AND model_id = 'model-b'").get() as any).id;
+      // be pinged first after the sort within its provider group.
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('sortprov', 'model-b', 'Model B', 2, 2, 1)").run();
+      const idB = (db.prepare("SELECT id FROM models WHERE platform = 'sortprov' AND model_id = 'model-b'").get() as any).id;
 
-      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('sort-a', 'model-a', 'Model A', 1, 1, 1)").run();
-      const idA = (db.prepare("SELECT id FROM models WHERE platform = 'sort-a' AND model_id = 'model-a'").get() as any).id;
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('sortprov', 'model-a', 'Model A', 1, 1, 1)").run();
+      const idA = (db.prepare("SELECT id FROM models WHERE platform = 'sortprov' AND model_id = 'model-a'").get() as any).id;
 
       // Verify idB < idA (insertion order) so the sort actually reorders
       expect(idB).toBeLessThan(idA);
@@ -595,9 +623,9 @@ describe('Provider Health Heartbeat', () => {
       db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(idB);
       db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(idA);
 
-      // One key per platform
-      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('sort-b', 'Key B', 'enc', 'iv', 'tag', 'healthy', 1)").run();
-      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('sort-a', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+      // Both keys on the same platform — they share a provider group
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('sortprov', 'Key B', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('sortprov', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)").run();
 
       chatCompletion.mockResolvedValue({
         choices: [{ message: { role: 'assistant', content: 'pong' } }],
@@ -611,10 +639,11 @@ describe('Provider Health Heartbeat', () => {
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
       expect(pingEvents.length).toBe(2);
 
-      // After sort by modelDbId ascending: model-b (lower modelDbId) before model-a
-      expect(pingEvents[0].provider).toBe('sort-b');
+      // Within the same provider group, keys are pinged in modelDbId order:
+      // model-b (lower modelDbId) before model-a (higher modelDbId)
+      expect(pingEvents[0].provider).toBe('sortprov');
       expect(pingEvents[0].model).toBe('model-b');
-      expect(pingEvents[1].provider).toBe('sort-a');
+      expect(pingEvents[1].provider).toBe('sortprov');
       expect(pingEvents[1].model).toBe('model-a');
     });
   });
