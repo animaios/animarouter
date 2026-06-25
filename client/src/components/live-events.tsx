@@ -89,20 +89,24 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
     case 'routing.key_evicted': {
       const rId = evt.id.slice(0, 8);
       return { id: evt.id, ts, kind: 'warn',
-        text: `🚫 [${rId}] Key #${evt.keyId} evicted (${evt.reason === 'rate_limited' ? '429 rate limit' : evt.reason === 'payment_required' ? '402 out of credits' : 'auth error'}) on ${evt.provider}/${evt.model}`
+        text: `🚫 [${rId}] Key #${evt.keyId} evicted (${evt.reason === 'rate_limited' ? '429 rate limit' : evt.reason === 'payment_required' ? '402 out of credits' : 'auth error'}) on ${evt.provider}/${evt.model}` };
     }
-    case 'heartbeat.ping':
+    case 'heartbeat.ping': {
       if (evt.success) {
         return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} healthy (${evt.latencyMs}ms)` };
       }
       return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
-    case 'heartbeat.cycle_skipped':
+    }
+    case 'heartbeat.cycle_skipped': {
       return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] Cycle skipped: ${evt.reason} (idle ${Math.round(evt.lastActivityAgeMs / 1000)}s)` };
-    case 'heartbeat.auto_disable':
+    }
+    case 'heartbeat.auto_disable': {
       return { id: 'hb', ts, kind: 'warn',
-        text: `\u{1F916} Auto-disabled ${evt.provider}/${evt.model}: ${evt.unhealthyKeys}/${evt.totalKeys} keys unhealthy (threshold ${evt.threshold}%)` };
-    case 'stream.chunk':
+        text: `🤖 Auto-disabled ${evt.provider}/${evt.model}: ${evt.unhealthyKeys}/${evt.totalKeys} keys unhealthy (threshold ${evt.threshold}%)` };
+    }
+    case 'stream.chunk': {
       return null; // Stream chunks are not rendered in the log feed
+    }
     default: {
       // Exhaustive check: if a new event type is added to LiveEvent but not
       // handled above, the compiler will error here.
