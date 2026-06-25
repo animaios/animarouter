@@ -164,6 +164,48 @@ export function stopHeartbeat(): void {
   }
 }
 
+/** Trigger a full heartbeat cycle immediately, bypassing the activity gate.
+ *  Equivalent to a manual prewarm — pings every enabled key for every enabled
+ *  model. If a cycle is already in progress, this is a no-op (guarded by
+ *  cycleInProgress). Useful for admin endpoints that need to force a health
+ *  refresh after bulk key changes. */
+export async function pokeAllKeys(): Promise<void> {
+  await runCycle(true);
+}
+
+/** Ping a single key immediately and update its health in keyHealthMap.
+ *  Returns true if the key is healthy after the ping. This is the on-demand
+ *  counterpart to the periodic cycle — it prewarms a newly-added key without
+ *  waiting for the next scheduled tick.
+ *
+ *  Does NOT block on cycleInProgress — a single-key ping runs independently
+ *  of the cycle state. When heartbeat is disabled, returns true immediately
+ *  (backward compat: all keys assumed healthy). */
+export async function pokeKey(keyId: number): Promise<boolean> {
+  if (!isHeartbeatEnabled()) return true;
+
+  const db = getDb();
+  const keyRow = db.prepare(
+    "SELECT * FROM api_keys WHERE id = ? AND enabled = 1"
+  ).get(keyId) as any | undefined;
+  if (!keyRow) return false;
+
+  // Get the highest-priority model for this key's platform
+  const model = db.prepare(`
+    SELECT m.id AS model_db_id, m.model_id
+    FROM fallback_config fc
+    JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+    WHERE fc.enabled = 1 AND m.platform = ?
+    ORDER BY fc.priority ASC
+    LIMIT 1
+  `).get(keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
+  if (!model) return false;
+
+  const { pingTimeoutMs } = readConfig();
+  await pingKey(keyRow.platform, model.model_db_id, model.model_id, keyRow, pingTimeoutMs);
+  return isKeyHealthy(keyId);
+}
+
 // ── Internal: cycle logic ───────────────────────────────────────────────────
 
 async function runCycle(skipGate = false): Promise<void> {

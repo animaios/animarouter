@@ -21,7 +21,9 @@ describe('Provider Health Heartbeat', () => {
   let getKeyHealth: (keyId: number) => any;
   let isKeyHealthy: (keyId: number) => boolean;
   let resetHeartbeatConfig: () => void;
-    let markKeyUnhealthy: (keyId: number, error?: string) => void;
+  let markKeyUnhealthy: (keyId: number, error?: string) => void;
+  let pokeKey: (keyId: number) => Promise<boolean>;
+  let pokeAllKeys: () => Promise<void>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -60,6 +62,8 @@ describe('Provider Health Heartbeat', () => {
     isKeyHealthy = heartbeatModule.isKeyHealthy;
     resetHeartbeatConfig = heartbeatModule.resetHeartbeatConfig;
     markKeyUnhealthy = heartbeatModule.markKeyUnhealthy;
+    pokeKey = heartbeatModule.pokeKey;
+    pokeAllKeys = heartbeatModule.pokeAllKeys;
     initDb = dbModule.initDb;
     getDb = dbModule.getDb;
     setSetting = dbModule.setSetting;
@@ -612,6 +616,62 @@ describe('Provider Health Heartbeat', () => {
   });
 
   // ── resetHeartbeatConfig ─────────────────────────────────────────────
+
+  describe('pokeKey', () => {
+    it('returns true when heartbeat is disabled (backward compat)', async () => {
+      setSetting('heartbeat_enabled', 'false');
+      resetHeartbeatConfig();
+
+      const result = await pokeKey(1);
+      expect(result).toBe(true);
+    });
+
+    it('pings a specific key and returns true when healthy', async () => {
+      const { keyId } = setupProvider();
+
+      // Key starts cold
+      expect(isKeyHealthy(keyId)).toBe(false);
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      const result = await pokeKey(keyId);
+      expect(result).toBe(true);
+
+      // Verify the key became healthy in keyHealthMap
+      const health = getKeyHealth(keyId);
+      expect(health).toBeDefined();
+      expect(health.healthy).toBe(true);
+    });
+
+    it('returns false for a non-existent key', async () => {
+      const result = await pokeKey(99999);
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('pokeAllKeys', () => {
+    it('triggers a full cycle making all keys healthy', async () => {
+      const { keyId } = setupProvider();
+
+      // Key starts cold
+      expect(isKeyHealthy(keyId)).toBe(false);
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      await pokeAllKeys();
+
+      // After a full cycle, the key should become healthy
+      const health = getKeyHealth(keyId);
+      expect(health).toBeDefined();
+      expect(health.healthy).toBe(true);
+    });
+  });
 
   describe('resetHeartbeatConfig', () => {
     it('clears keyHealthMap when called', () => {

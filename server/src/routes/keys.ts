@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getDb } from '../db/index.js';
 import { getProvider, buildProviderFor } from '../providers/index.js';
 import { encrypt, decrypt, maskKey } from '../lib/crypto.js';
+import { pokeKey } from '../services/heartbeat.js';
 
 export const keysRouter = Router();
 
@@ -136,6 +137,8 @@ keysRouter.post('/', (req: Request, res: Response) => {
     status: 'unknown',
     enabled: true,
   });
+  // Fire-and-forget: warm up the key immediately via heartbeat
+  pokeKey(Number(result.lastInsertRowid)).catch(() => {});
 });
 
 

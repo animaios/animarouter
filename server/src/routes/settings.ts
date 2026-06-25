@@ -6,6 +6,7 @@ import {
   saveFeatureSettings,
   hasPendingRestart,
 } from '../services/feature-settings.js';
+import { pokeKey, pokeAllKeys } from '../services/heartbeat.js';
 
 export const settingsRouter = Router();
 
@@ -42,4 +43,24 @@ settingsRouter.put('/features', (req: Request, res: Response) => {
     settings: getAllFeatureSettings(),
     pendingRestart: hasPendingRestart(),
   });
+});
+
+// ── Heartbeat admin ─────────────────────────────────────────────────────────
+
+// Poke a single key (by keyId) or all keys (omit keyId)
+settingsRouter.post('/heartbeat/poke', async (req: Request, res: Response) => {
+  const { keyId } = req.body ?? {};
+  if (keyId != null) {
+    const id = Number(keyId);
+    if (isNaN(id)) {
+      res.status(400).json({ error: { message: 'keyId must be a number' } });
+      return;
+    }
+    const healthy = await pokeKey(id);
+    res.json({ keyId: id, healthy });
+    return;
+  }
+  // Poke all keys
+  await pokeAllKeys();
+  res.json({ poked: 'all' });
 });
