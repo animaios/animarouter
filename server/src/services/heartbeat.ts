@@ -296,18 +296,24 @@ async function runCycle(skipGate = false): Promise<number> {
       tasks.sort((a, b) => a.modelDbId - b.modelDbId);
     }
 
-    // Run all provider groups concurrently, but within each group ping sequentially
+    // Run all provider groups concurrently, but within each group ping sequentially.
+    // Each group's promise is individually caught to prevent an unexpected error
+    // in one group from aborting all other in-flight groups (Promise.all fail-fast).
     await Promise.all(Array.from(groupedByPlatform.entries()).map(async ([platform, tasks]) => {
-      for (let i = 0; i < tasks.length; i++) {
-        const task = tasks[i];
-        try {
-          await pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs);
-        } catch (e) {
-          console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, e);
+      try {
+        for (let i = 0; i < tasks.length; i++) {
+          const task = tasks[i];
+          try {
+            await pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs);
+          } catch (e) {
+            console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, e);
+          }
+          if (staggerMs > 0 && i < tasks.length - 1) {
+            await sleep(staggerMs);
+          }
         }
-        if (staggerMs > 0 && i < tasks.length - 1) {
-          await sleep(staggerMs);
-        }
+      } catch (e) {
+        console.error(`[Heartbeat] Unexpected error in provider group ${platform}:`, e);
       }
     }));
 
