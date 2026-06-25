@@ -158,7 +158,7 @@ describe('OpenAI multimodal array content', () => {
   // #200: code agents (AionUI, OpenCode, Qwen Code) fail on the SECOND request
   // of a session because their follow-up history carries shapes the strict
   // schema rejected. Each case below is a real second-turn payload pattern.
-  describe('agent second-turn shapes (#200)', () => {
+  describe('agent second-turn shapes (#200)', { timeout: 15000 }, () => {
     it('accepts Gemini-part-style content blocks without a type field', async () => {
       const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
         messages: [

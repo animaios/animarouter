@@ -50,17 +50,17 @@ settingsRouter.put('/features', (req: Request, res: Response) => {
 // Poke a single key (by keyId) or all keys (omit keyId)
 settingsRouter.post('/heartbeat/poke', async (req: Request, res: Response) => {
   const { keyId } = req.body ?? {};
-  if (keyId != null) {
+  if (keyId != null && keyId !== '') {
     const id = Number(keyId);
     if (isNaN(id)) {
       res.status(400).json({ error: { message: 'keyId must be a number' } });
       return;
     }
-    const healthy = await pokeKey(id);
-    res.json({ keyId: id, healthy });
+    const ok = await pokeKey(id);
+    res.json({ success: ok ? 'key_ok' : 'key_unhealthy_or_missing' });
     return;
   }
   // Poke all keys
-  await pokeAllKeys();
-  res.json({ poked: 'all' });
+  const result = await pokeAllKeys();
+  res.json(result);
 });

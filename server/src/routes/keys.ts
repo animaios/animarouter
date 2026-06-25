@@ -138,7 +138,7 @@ keysRouter.post('/', (req: Request, res: Response) => {
     enabled: true,
   });
   // Fire-and-forget: warm up the key immediately via heartbeat
-  pokeKey(Number(result.lastInsertRowid)).catch(() => {});
+  pokeKey(Number(result.lastInsertRowid)).catch(e => console.warn('[Keys] pokeKey failed:', e));
 });
 
 

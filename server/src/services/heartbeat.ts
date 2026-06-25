@@ -169,8 +169,9 @@ export function stopHeartbeat(): void {
  *  model. If a cycle is already in progress, this is a no-op (guarded by
  *  cycleInProgress). Useful for admin endpoints that need to force a health
  *  refresh after bulk key changes. */
-export async function pokeAllKeys(): Promise<void> {
-  await runCycle(true);
+export async function pokeAllKeys(): Promise<{ poked: number; skipped: boolean }> {
+  const poked = await runCycle(true);
+  return { poked, skipped: poked === 0 };
 }
 
 /** Ping a single key immediately and update its health in keyHealthMap.
@@ -208,8 +209,8 @@ export async function pokeKey(keyId: number): Promise<boolean> {
 
 // ── Internal: cycle logic ───────────────────────────────────────────────────
 
-async function runCycle(skipGate = false): Promise<void> {
-  if (cycleInProgress) return;
+async function runCycle(skipGate = false): Promise<number> {
+  if (cycleInProgress) return 0;
   cycleInProgress = true;
 
   try {
@@ -227,7 +228,7 @@ async function runCycle(skipGate = false): Promise<void> {
         lastActivityAgeMs: lastActivityAt === 0 ? -1 : now - lastActivityAt,
         at: now,
       });
-      return;
+      return 0;
     }
 
     // ── Get enabled models from the fallback chain ──
@@ -245,7 +246,7 @@ async function runCycle(skipGate = false): Promise<void> {
       ORDER BY priority ASC
     `).all() as Array<{ platform: string; model_db_id: number; model_id: string }>;
 
-    if (models.length === 0) return;
+    if (models.length === 0) return 0;
 
     // ── Collect all keys for each platform+model combo ──
     const pingTasks: Array<{
@@ -319,6 +320,7 @@ async function runCycle(skipGate = false): Promise<void> {
         });
       }
     }
+    return pingTasks.length;
   } finally {
     cycleInProgress = false;
   }

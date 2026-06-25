@@ -11,8 +11,11 @@ import {
   canUseProvider,
   providerDailyRequestCount,
   getProviderDailyRequestCap,
+  getTransientCooldownMs,
+  computeRetryCooldownMs,
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';
+import { getFeatureSetting } from '../../services/feature-settings.js';
 
 function removeDbFile(dbPath: string) {
   for (const suffix of ['', '-shm', '-wal']) {
@@ -269,5 +272,41 @@ describe('parseRetryAfterMs', () => {
     expect(parseRetryAfterMs(null)).toBeUndefined();
     expect(parseRetryAfterMs('')).toBeUndefined();
     expect(parseRetryAfterMs('soon')).toBeUndefined();
+  });
+});
+
+
+
+
+describe('getCooldownDurationForLimit with heartbeat', () => {
+  let testId: number;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    testId = Math.floor(Math.random() * 1_000_000);
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  afterAll(() => {
+    process.env.HEARTBEAT_ENABLED = originalEnv.HEARTBEAT_ENABLED;
+    process.env.TRANSIENT_COOLDOWN_SEC = originalEnv.TRANSIENT_COOLDOWN_SEC;
+  });
+
+  it('uses 0ms transient cooldown when heartbeat enabled', async () => {
+    vi.resetModules();
+    process.env.HEARTBEAT_ENABLED = 'true';
+    const mod = await import('../../services/ratelimit.js');
+    expect(mod.getCooldownDurationForLimit('groq', 'model', testId, { rpd: null, tpd: null })).toBe(0);
+  });
+
+  it('uses normal transient cooldown when heartbeat disabled', async () => {
+    vi.resetModules();
+    process.env.HEARTBEAT_ENABLED = 'false';
+    process.env.TRANSIENT_COOLDOWN_SEC = '90';
+    const mod = await import('../../services/ratelimit.js');
+    expect(mod.getCooldownDurationForLimit('groq', 'model', testId, { rpd: null, tpd: null })).toBe(90_000);
   });
 });

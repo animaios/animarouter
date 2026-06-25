@@ -303,6 +303,9 @@ export function getNextCooldownDuration(platform: string, modelId: string, keyId
 // Short cooldown for a transient (per-minute) 429 — recovers within ~one window.
 // Now backed by the `transient_cooldown_sec` feature setting (seconds → ms).
 function getTransientCooldownMs(): number {
+  // When heartbeat is active, it evicts keys from the healthy pool on 429,
+  // making timer-based cooldown redundant and interfering.
+  if (getFeatureSetting('heartbeat_enabled') as boolean) return 0;
   return (getFeatureSetting('transient_cooldown_sec') as number) * 1000;
 }
 

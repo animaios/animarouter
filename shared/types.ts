@@ -378,6 +378,7 @@ export interface ModelStats {
   avgLatencyMs: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+  totalReasoningTokens: number;
   pinnedRequests: number;
   tokPerSec: number;
 }

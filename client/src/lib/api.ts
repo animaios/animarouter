@@ -69,6 +69,8 @@ export interface FeatureSetting {
   effect: 'live' | 'restart';
   group: string;
   parentToggle?: string;
+  /** When this referenced setting is ON (true), this setting is disabled. Inverse of parentToggle. */
+  disableWhen?: string;
 }
 
 export interface FeatureSettingsResponse {

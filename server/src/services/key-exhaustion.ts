@@ -10,12 +10,20 @@
  * State is in-memory for speed and persists across restarts via the existing
  * rate_limit_cooldowns table (any non-expired cooldown implies exhaustion).
  * On startup we rebuild the in-memory Map from that table.
+ *
+ * The map key is a composite `${keyId}:${modelId}` string so that a key can
+ * be independently exhausted for multiple models without overwrites.
  */
 
 import { getDb } from '../db/index.js';
 
-// keyId → { exhaustedAt (ms timestamp), provider slug, modelId }
-const exhaustionMap = new Map<number, { exhaustedAt: number; provider: string; modelId: string }>();
+/** Composite key for the exhaustion map: `${keyId}:${modelId}` */
+function mkKey(keyId: number, modelId: string): string {
+  return `${keyId}:${modelId}`;
+}
+
+// "keyId:modelId" → { exhaustedAt (ms timestamp), provider slug, modelId }
+const exhaustionMap = new Map<string, { exhaustedAt: number; provider: string; modelId: string }>();
 
 /** Rebuild the in-memory exhaustion map from persistent cooldowns on startup. */
 export function rebuildExhaustionFromDB(): void {
@@ -32,7 +40,7 @@ export function rebuildExhaustionFromDB(): void {
     // Estimate exhaustion time from expiry: a 90s cooldown means exhausted ~90s ago;
     // a 24h cooldown means exhausted ~24h ago. Approximate by assuming default 90s.
     const estimatedExhaustedAt = Math.min(row.expires_at_ms - 90_000, now);
-    exhaustionMap.set(row.key_id, {
+    exhaustionMap.set(mkKey(row.key_id, row.model_id), {
       exhaustedAt: estimatedExhaustedAt > 0 ? estimatedExhaustedAt : now,
       provider: row.platform,
       modelId: row.model_id,
@@ -42,12 +50,12 @@ export function rebuildExhaustionFromDB(): void {
 
 /** Mark a key as exhausted for a specific provider+model. */
 export function markExhausted(keyId: number, provider: string, modelId: string): void {
-  exhaustionMap.set(keyId, { exhaustedAt: Date.now(), provider, modelId });
+  exhaustionMap.set(mkKey(keyId, modelId), { exhaustedAt: Date.now(), provider, modelId });
 }
 
 /** Clear exhaustion — called when a key successfully handles a request. */
 export function clearExhausted(keyId: number, modelId: string): void {
-  exhaustionMap.delete(keyId);
+  exhaustionMap.delete(mkKey(keyId, modelId));
   // Also remove any persisted cooldown for this key so a restart
   // doesn't resurrect a stale exhaustion.
   const db = getDb();
@@ -63,9 +71,10 @@ export function clearExhausted(keyId: number, modelId: string): void {
  * When omitted, checks across all models (legacy behavior).
  */
 export function isExhausted(keyId: number, modelId?: string): boolean {
-  if (modelId === undefined) return exhaustionMap.has(keyId);
-  const entry = exhaustionMap.get(keyId);
-  return entry !== undefined && entry.modelId === modelId;
+  if (modelId === undefined) {
+    return [...exhaustionMap.keys()].some(k => k.startsWith(`${keyId}:`));
+  }
+  return exhaustionMap.has(mkKey(keyId, modelId));
 }
 
 /**
@@ -75,8 +84,9 @@ export function isExhausted(keyId: number, modelId?: string): boolean {
  */
 export function getExhaustedKeysForProvider(provider: string): Array<{ keyId: number; exhaustedAt: number; modelId: string }> {
   const result: Array<{ keyId: number; exhaustedAt: number; modelId: string }> = [];
-  for (const [keyId, info] of exhaustionMap) {
+  for (const [compositeKey, info] of exhaustionMap) {
     if (info.provider === provider) {
+      const keyId = Number(compositeKey.split(':')[0]);
       result.push({ keyId, exhaustedAt: info.exhaustedAt, modelId: info.modelId });
     }
   }
@@ -89,8 +99,9 @@ export function getExhaustedKeysForProvider(provider: string): Array<{ keyId: nu
  */
 export function getExhaustedKeysForModel(provider: string, modelId: string): Array<{ keyId: number; exhaustedAt: number }> {
   const result: Array<{ keyId: number; exhaustedAt: number }> = [];
-  for (const [keyId, info] of exhaustionMap) {
+  for (const [compositeKey, info] of exhaustionMap) {
     if (info.provider === provider && info.modelId === modelId) {
+      const keyId = Number(compositeKey.split(':')[0]);
       result.push({ keyId, exhaustedAt: info.exhaustedAt });
     }
   }
@@ -106,7 +117,7 @@ export function areAllKeysExhausted(provider: string, modelId: string): boolean 
   ).all(provider) as Array<{ id: number }>;
 
   if (keys.length === 0) return true;
-  return keys.every(k => exhaustionMap.has(k.id));
+  return keys.every(k => exhaustionMap.has(mkKey(k.id, modelId)));
 }
 
 /** Check if all enabled keys for a provider (across all models) are exhausted. */
@@ -117,7 +128,7 @@ export function areAllProviderKeysExhausted(provider: string): boolean {
   ).all(provider) as Array<{ id: number }>;
 
   if (keys.length === 0) return true;
-  return keys.every(k => exhaustionMap.has(k.id));
+  return keys.every(k => [...exhaustionMap.keys()].some(ek => ek.startsWith(`${k.id}:`)));
 }
 
 /** Remove exhaustion entries whose associated cooldown has expired in the DB.
@@ -126,13 +137,14 @@ export function sweepStaleExhaustion(): number {
   const db = getDb();
   const now = Date.now();
   let swept = 0;
-  for (const [keyId, info] of exhaustionMap) {
+  for (const [compositeKey, info] of exhaustionMap) {
+    const keyId = Number(compositeKey.split(':')[0]);
     const row = db.prepare(`
       SELECT 1 FROM rate_limit_cooldowns
       WHERE key_id = ? AND model_id = ? AND expires_at_ms > ?
     `).get(keyId, info.modelId, now) as unknown;
     if (!row) {
-      exhaustionMap.delete(keyId);
+      exhaustionMap.delete(compositeKey);
       swept++;
     }
   }

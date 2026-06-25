@@ -4,7 +4,11 @@
  * Each test re-imports modules in isolation to avoid cross-test contamination
  * from module-level cached config and state.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import type { Express } from 'express';
+import { createApp } from '../../app.js';
+import { mintDashboardToken } from '../helpers/auth.js';
+import { initDb, getDb, setSetting } from '../../db/index.js';
 
 describe('Provider Health Heartbeat', () => {
   let chatCompletion: ReturnType<typeof vi.fn>;
@@ -23,7 +27,7 @@ describe('Provider Health Heartbeat', () => {
   let resetHeartbeatConfig: () => void;
   let markKeyUnhealthy: (keyId: number, error?: string) => void;
   let pokeKey: (keyId: number) => Promise<boolean>;
-  let pokeAllKeys: () => Promise<void>;
+  let pokeAllKeys: () => Promise<{ poked: number; skipped: boolean }>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -664,12 +668,30 @@ describe('Provider Health Heartbeat', () => {
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       });
 
-      await pokeAllKeys();
+      const result = await pokeAllKeys();
 
       // After a full cycle, the key should become healthy
       const health = getKeyHealth(keyId);
       expect(health).toBeDefined();
       expect(health.healthy).toBe(true);
+
+      // Should return the number of keys poked
+      expect(result).toEqual({ poked: 1, skipped: false });
+    });
+
+    it('returns { poked: 0, skipped: true } when a cycle is already in progress', async () => {
+      const { keyId } = setupProvider();
+
+      // Make chatCompletion hang (never resolves) so the first cycle stays in progress
+      chatCompletion.mockReturnValue(new Promise(() => {}));
+
+      // Start the first cycle — this will enter runCycle, set cycleInProgress = true,
+      // then hang on the first await inside pingKey.
+      const firstPoke = pokeAllKeys();
+
+      // Second call should see cycleInProgress = true and return immediately
+      const result = await pokeAllKeys();
+      expect(result).toEqual({ poked: 0, skipped: true });
     });
   });
 
@@ -690,5 +712,71 @@ describe('Provider Health Heartbeat', () => {
       health = getKeyHealth(1);
       expect(health).toBeUndefined();
     });
+  });
+});
+
+// ── Route-level: POST /heartbeat/poke ─────────────────────────────────────
+
+describe('Heartbeat Poke API', () => {
+  let app: Express;
+  let dashToken: string;
+
+  beforeAll(() => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    initDb(':memory:');
+
+    // Enable heartbeat and add a model+key BEFORE createApp() so readConfig()
+    // caches the correct values during app startup.
+    setSetting('heartbeat_enabled', 'true');
+    setSetting('heartbeat_interval_min', '10');
+    setSetting('heartbeat_activity_window_min', '15');
+    setSetting('heartbeat_stagger_ms', '0');
+
+    app = createApp();
+    dashToken = mintDashboardToken();
+
+    // Add model+key for single-key poke tests
+    const db = getDb();
+    db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('route-test', 'route-model', 'Route Test', 1, 1, 1)").run();
+    const modelId = (db.prepare("SELECT id FROM models WHERE platform = 'route-test' AND model_id = 'route-model'").get() as any).id;
+    db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelId);
+    db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('route-test', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+  });
+
+  async function postPoke(body: Record<string, unknown>) {
+    const server = app.listen(0);
+    const addr = server.address() as any;
+    const url = `http://127.0.0.1:${addr.port}/api/settings/heartbeat/poke`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${dashToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => null);
+    server.close();
+    return { status: res.status, body: data };
+  }
+
+  it('returns { poked, skipped } for empty body (poke all keys)', async () => {
+    const { status, body } = await postPoke({});
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ poked: 1, skipped: false });
+  });
+
+  it('returns key_ok or key_unhealthy_or_missing for a valid keyId', async () => {
+    const keyRow = getDb().prepare("SELECT id FROM api_keys WHERE platform = 'route-test'").get() as any;
+
+    const { status, body } = await postPoke({ keyId: keyRow.id });
+    expect(status).toBe(200);
+    expect(['key_ok', 'key_unhealthy_or_missing']).toContain(body.success);
+  });
+
+  it('returns 400 for an invalid keyId', async () => {
+    const { status, body } = await postPoke({ keyId: 'not-a-number' });
+    expect(status).toBe(400);
+    expect(body.error.message).toBe('keyId must be a number');
   });
 });

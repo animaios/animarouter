@@ -16,6 +16,8 @@ export interface FeatureSettingDef {
   group: string;
   /** For number/string settings paired with a boolean/string toggle: the toggle's key. */
   parentToggle?: string;
+  /** For settings that should be disabled when another setting is ON (inverse of parentToggle). */
+  disableWhen?: string;
 }
 
 // ── Registry ───────────────────────────────────────────────────────────────
@@ -133,7 +135,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     description:
       'When ≥ this percentage of a model\'s API keys are unhealthy (heartbeat pings failing or 429-evicted), the model is automatically disabled. Set to 100 to disable only when all keys fail; set to 1 for aggressive single-key triggering.',
     type: 'number',
-    default: 50,
+    default: 100,
     min: 1,
     max: 100,
     envVar: 'HEARTBEAT_AUTO_DISABLE_PCT',
@@ -208,13 +210,14 @@ export const REGISTRY: FeatureSettingDef[] = [
     key: 'transient_cooldown_sec',
     label: 'Transient 429 Cooldown (sec)',
     description:
-      'How long a model+key is benched after a per-minute 429 (rate limit). Short values recover faster; long values avoid re-hitting a tight RPM quota.',
+      'How long a model+key is benched after a per-minute 429 (rate limit). Short values recover faster; long values avoid re-hitting a tight RPM quota. Disabled when Heartbeat is active — heartbeat evicts unhealthy keys from the routing pool instead.',
     type: 'number',
     default: 90,
     min: 5,
     max: 300,
     effect: 'live',
     group: 'Retry & Failover',
+    disableWhen: 'heartbeat_enabled',
   },
   {
     key: 'payment_cooldown_hours',
