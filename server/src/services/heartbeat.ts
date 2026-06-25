@@ -392,7 +392,7 @@ function evaluateAutoDisable(
 ): AutoDisableResult | null {
   const threshold = getAutoDisableThresholdPct();
   const allKeys = db.prepare(
-    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1"
+    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
   ).all(platform) as Array<{ id: number }>;
 
   const total = allKeys.length;
