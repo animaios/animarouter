@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { getFeatureSetting } from './feature-settings.js';
+import { publish } from './events.js';
 import { buildProviderFor } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
 // Rate-limit pre-checks removed — routing relies on heartbeat-based health
@@ -509,7 +510,7 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
 export interface RouteOptions {
   /** Don't fall through to other models when the preferred model's keys are exhausted. */
   pinMode?: boolean;
-  /** Session key for sticky key selection — when set and the provider has sticky_sessions_enabled, key selection is deterministic. */
+  /** Session key for key affinity — when set and key_affinity_enabled is true (or the provider has sticky_sessions_enabled), key selection is deterministic. */
   stickySessionKey?: string;
 }
 
@@ -612,14 +613,18 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
     // Try all keys for this model before giving up on it.
     const rrKey = `${entry.platform}:${entry.model_id}`;
-
-    // Sticky key selection: when a custom provider enables sticky sessions,
-    // hash the session key to pick a deterministic key. This maximizes
-    // upstream KV-cache reuse for cache-heavy providers like LongCat.
-    const stickyRow = db.prepare(
-      'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
-    ).get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
-    const stickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
+    const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
+    // Backward compat: when global key affinity is off, fall back to per-provider
+    // sticky_sessions_enabled column for custom providers.
+    let providerStickyEnabled = false;
+    if (!keyAffinityEnabled) {
+      const stickyRow = db.prepare(
+        'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
+      ).get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
+      providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
+    }
+    const useKeyAffinity = (keyAffinityEnabled || (providerStickyEnabled && options?.stickySessionKey))
+      && options?.stickySessionKey; // Only use affinity if we have a valid session key
 
     // ── Key health filtering ──
     // When the heartbeat is enabled, only keys that have been prewarmed
@@ -648,19 +653,20 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id));
 
     // Build the key ordering array and starting index.
-    // For sticky sessions: concatenate healthy+unhealthy and hash into it.
+    // For key affinity: concatenate healthy+unhealthy and hash into it.
     // For round-robin: rotate within each health group independently so
     // healthy keys are ALWAYS tried first regardless of the offset.
 
     let keyOrder: KeyRow[];
     let idx: number;
-    if (stickyEnabled && options?.stickySessionKey) {
+    let rrIdx = 0; // For round-robin increment tracking
+    if (useKeyAffinity) {
       keyOrder = [...healthyKeys, ...unhealthyKeys];
-      const hash = crypto.createHash('sha1').update(options.stickySessionKey).digest();
+      const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
       const hashInt = hash.readUInt32BE(0);
       idx = hashInt % keyOrder.length;
     } else {
-      const rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+      rrIdx = roundRobinIndex.get(rrKey) ?? 0;
       keyOrder = [
         ...rotateArray(healthyKeys, rrIdx),
         ...rotateArray(unhealthyKeys, rrIdx),
@@ -669,7 +675,8 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     }
 
     for (let attempt = 0; attempt < keyOrder.length; attempt++) {
-      const key = keyOrder[attempt];
+      const actualIdx = useKeyAffinity ? (idx + attempt) % keyOrder.length : attempt;
+      const key = keyOrder[actualIdx];
 
       const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
 
@@ -688,8 +695,8 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // a custom provider row was deleted), we already continued.
 
       // We found a working key for this model!
-      if (!(stickyEnabled && options?.stickySessionKey)) {
-        roundRobinIndex.set(rrKey, idx + attempt + 1);
+      if (!useKeyAffinity) {
+        roundRobinIndex.set(rrKey, rrIdx + attempt + 1);
       }
 
       // ── Parallel request gating (provider-level) ──
@@ -714,6 +721,18 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // Build the release function so callers can decrement the slot.
       const release = () => releaseSlot(entry.platform);
 
+      if (useKeyAffinity) {
+        console.log(`[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`);
+        publish({
+          type: 'routing.key_affinity_selected',
+          id: '',
+          sessionKey: options!.stickySessionKey!.slice(0, 8),
+          keyId: key.id,
+          model: entry.model_id,
+          at: Date.now(),
+        });
+      }
+
       return {
         provider: provider,
         modelId: entry.model_id,
@@ -731,7 +750,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
     // If we reach here, this specific model has NO available keys.
     // Update round-robin index even if we failed so we don't get stuck.
-    if (!(stickyEnabled && options?.stickySessionKey)) {
+    if (!useKeyAffinity) {
       roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
     }
 

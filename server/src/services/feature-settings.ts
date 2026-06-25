@@ -133,10 +133,10 @@ export const REGISTRY: FeatureSettingDef[] = [
     key: 'heartbeat_auto_disable_pct',
     label: 'Auto-Disable Unhealthy Key %',
     description:
-      'When ≥ this percentage of a model\'s API keys are unhealthy (heartbeat pings failing or 429-evicted), the model is automatically disabled. Set to 100 to disable only when all keys fail; set to 1 for aggressive single-key triggering.',
+      'When ≥ this percentage of a model\'s API keys are unhealthy (heartbeat pings failing or 429-evicted), the model is automatically disabled. Set to 0 to disable auto-disable entirely; set to 100 to disable only when all keys fail; set to 1 for aggressive single-key triggering.',
     type: 'number',
-    default: 100,
-    min: 1,
+    default: 0,
+    min: 0,
     max: 100,
     envVar: 'HEARTBEAT_AUTO_DISABLE_PCT',
     effect: 'live',
@@ -191,6 +191,17 @@ export const REGISTRY: FeatureSettingDef[] = [
     effect: 'restart',
     group: 'Sessions',
     parentToggle: 'sticky_session_enabled',
+  },
+  {
+    key: 'key_affinity_enabled',
+    label: 'Key Affinity Per Thread',
+    description:
+      'Route all requests in the same conversation thread (identified by the first message) to the same API key. Maximizes upstream KV-cache reuse for cache-heavy providers. When disabled, keys are rotated round-robin.',
+    type: 'boolean',
+    default: true,
+    envVar: 'KEY_AFFINITY_ENABLED',
+    effect: 'live',
+    group: 'Sessions',
   },
 
   // ── Retry & Failover ──

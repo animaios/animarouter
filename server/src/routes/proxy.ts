@@ -709,7 +709,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // be semantically wrong.
   const isAutoRouted = !requestedModel || isAutoModel(requestedModel);
   const handoffMode = isAutoRouted ? getContextHandoffMode() : ('off' as const);
-  const sessionKey = handoffMode !== 'off' ? getSessionKey(messages, sessionIdHeader) : '';
+  const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
+  const sessionKey = (keyAffinityEnabled || handoffMode !== 'off') ? getSessionKey(messages, sessionIdHeader) : '';
   if (handoffMode !== 'off' && sessionKey) {
     recordIncomingMessages(sessionKey, messages);
   }
