@@ -357,7 +357,7 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
     decryptedKey = decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag);
   } catch {
     // Decrypt failure is permanent — mark key unhealthy so the router
-    // deprioritizes it until the health checker disables it (enabled=0).
+    // deprioritizes it until a successful ping or manual key check restores it.
     keyHealthMap.set(keyRow.id, {
       penalty: 0,
       lastPingAt: Date.now(),

@@ -2,7 +2,6 @@ import './env.js';
 import { createApp } from './app.js';
 import { initDb, getDb } from './db/index.js';
 import { pruneSessions } from './services/auth.js';
-import { startHealthChecker } from './services/health.js';
 import { startRequestRetentionPruner } from './services/request-retention.js';
 import { rebuildExhaustionFromDB, startExhaustionSweep, stopExhaustionSweep } from './services/key-exhaustion.js';
 import { initDegradation, loadState, applyDecay, flushDirtyStates, evictGhostStates } from './services/degradation.js';
@@ -113,7 +112,7 @@ async function main() {
     const display = host.includes(':') ? `[${host}]` : host;
     console.log(`Server running on http://${display}:${PORT}`);
     console.log(`Proxy endpoint: http://${display}:${PORT}/v1/chat/completions`);
-    startHealthChecker();
+
     startHeartbeat();
     startExhaustionSweep();
   };

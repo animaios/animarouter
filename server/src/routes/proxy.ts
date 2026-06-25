@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import type { ChatMessage, ModelListRow } from '@api-gateway/shared/types.js';
+import type { ChatMessage, ModelListRow } from '@animarouter/shared/types.js';
 import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
 import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
 import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
@@ -21,7 +21,7 @@ import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../service
 export const proxyRouter = Router();
 
 // Virtual "auto" model. Clients like Hermes require a non-empty `model` field
-// on every request, but api-gateway's whole point is to pick the model itself.
+// on every request, but animarouter's whole point is to pick the model itself.
 // Requesting this id means "let the router decide" — identical to omitting
 // `model` entirely.
 const AUTO_MODEL_ID = 'auto';
@@ -174,7 +174,7 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
         id: AUTO_MODEL_ID,
         object: 'model',
         created: 0,
-        owned_by: 'api-gateway',
+        owned_by: 'animarouter',
         name: 'Auto (router picks the best available model)',
         context_window: null,
       },
@@ -189,9 +189,6 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
     ],
   });
 });
-
-
-const PER_KEY_RETRIES = 3;
 
 // Provider-outage fast-fail: when ≥N distinct models on the same provider
 // return 5xx in one request, skip ALL models from that provider.
@@ -388,10 +385,10 @@ export function isRetryableError(err: any): boolean {
     || msg.includes('request entity too large') || msg.includes('content too large')
     // 404: model deprecated/removed upstream (e.g. OpenRouter's "no endpoints found"
     // for a model that's been pulled). Rotate to the next model in the chain —
-    // setCooldown + the health checker will avoid this model on subsequent requests.
+    // setCooldown + the heartbeat will deprioritize unhealthy keys on this platform.
     || msg.includes('404') || msg.includes('not found') || msg.includes('no endpoints found')
-    // 403: the key is valid (it passed validateKey, and the health checker
-    // disables truly-forbidden keys) but this specific model is off-limits to
+    // 403: the key is valid (it passed validateKey, and on-demand health check
+    // marks truly-forbidden keys as invalid) but this specific model is off-limits to
     // the key's tier — e.g. gpt-4o on GitHub Models' free tier, subscription-only
     // models on Cloudflare. Another model in the chain is reachable, so fail over
     // instead of 502-ing the whole request. Paired with isModelAccessForbiddenError
@@ -442,8 +439,8 @@ export function isModelNotFoundError(err: any): boolean {
 // Drives the same whole-model skip as a 404: every key on this platform's tier
 // would be forbidden the same model, so rule it out for the rest of the request
 // rather than trying it again with a sibling key. Distinct from a dead key —
-// validateKey returns false on 401/403, so the health checker disables genuinely
-// forbidden keys; a 403 reaching here is model-not-on-this-tier. See issue #256.
+// validateKey returns false on 401/403, so the on-demand health check marks such keys
+// invalid; a 403 reaching here is model-not-on-that-tier. See issue #256.
 export function isModelAccessForbiddenError(err: any): boolean {
   if (err?.status === 403) return true;
   const msg = (err?.message ?? '').toLowerCase();
@@ -770,7 +767,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const pinnedModelId: string | undefined = requestedModel && !isAutoModel(requestedModel) ? requestedModel : undefined;
   const requestId = crypto.randomUUID();
   publish({ type: 'request.start', id: requestId, model: pinnedModelId, stream: !!stream, at: Date.now() });
-  // Retry loop: per-key 3-retry followed by model/key cycling.
+  // Outer loop: model/key cycling with exhaustion tracking.
   const skipKeys = new Set<string>();
   const skipModels = new Set<number>();
   let lastError: any = null;
@@ -850,10 +847,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // real bound lets the model actually generate.
     const effectiveMaxTokens = max_tokens ?? route.maxOutputTokens ?? undefined;
 
-    // ---- Per-key retry: up to PER_KEY_RETRIES immediate attempts ----
-    let keySucceeded = false;
-    keyRetry: for (let keyAttempt = 0; keyAttempt < PER_KEY_RETRIES; keyAttempt++) {
-      try {
+    try {
       if (stream) {
         // — Stream turn-integrity (#231 audit) —
         // The old loop forwarded upstream chunks verbatim and called any
@@ -1205,74 +1199,65 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
       if (isRetryableError(err)) {
         // Dead-turn errors (in-band error, empty completion, stream stall,
-        // unparseable dialect): in-band error means the key WORKS but this
-        // specific model can't handle the request. Skip the model, not the
-        // key — retrying a different model on the same key is valid.
-        const msg = (err.message ?? '').toLowerCase();
-        const skipImmediately = msg.includes('in-band provider error')
-          || msg.includes('empty completion')
-          || msg.includes('stream ended unexpectedly')
-          || msg.includes('stream stalled')
-          || msg.includes('unparseable inline tool-call dialect')
-          || msg.includes('api error 400');
+        // unparseable dialect): the key WORKS but this specific model
+        // can't handle the request. Skip the model, keep the key.
+        if (!(isPinned && route.modelDbId === preferredModel)) {
+          const msg = (err.message ?? '').toLowerCase();
+          const isDeadTurn = msg.includes('in-band provider error')
+            || msg.includes('empty completion')
+            || msg.includes('stream ended unexpectedly')
+            || msg.includes('stream stalled')
+            || msg.includes('unparseable inline tool-call dialect')
+            || msg.includes('api error 400');
 
-        if (skipImmediately && !(isPinned && route.modelDbId === preferredModel)) {
-          skipModels.add(route.modelDbId);
-          continue outerLoop;
+          if (isDeadTurn) {
+            skipModels.add(route.modelDbId);
+            lastError = err;
+            continue outerLoop;
+          }
         }
 
-        // ── 429/402 key eviction ──────────────────────────────────
-        // When a key returns a rate-limit or payment-required error
-        // and heartbeat is enabled, mark it unhealthy immediately so
-        // the router excludes it from the healthy pool. Only a successful
-        // heartbeat ping can restore it — saving wasted retry attempts.
-        if (classifyError(err) === 'minor' && isHeartbeatEnabled()) {
-          markKeyUnhealthy(route.keyId, err?.message?.slice(0, 120) ?? '429 rate limit');
+        // ── Key eviction ──────────────────────────────────────────
+        // Transient/retryable error from a key: skip the key. If
+        // heartbeat is enabled, mark it unhealthy so the router
+        // excludes it from the healthy pool. Only a successful ping
+        // can restore it.
+        if (isHeartbeatEnabled()) {
+          const reason = isPaymentRequiredError(err) ? 'payment_required' : 'rate_limited';
+          markKeyUnhealthy(route.keyId, err?.message?.slice(0, 120) ?? 'error');
           publish({
             type: 'routing.key_evicted',
             id: requestId,
             provider: route.platform,
             keyId: route.keyId,
             model: route.modelId,
-            reason: isPaymentRequiredError(err) ? 'payment_required' : 'rate_limited',
+            reason,
             at: Date.now(),
           });
-          // Skip remaining retries on this key — it told us it's at capacity.
-          lastError = err;
-          break keyRetry;
         }
-
-        if (keyAttempt < PER_KEY_RETRIES - 1) {
-          // Transient limit: retry same key immediately.
-          lastError = err;
-          publish({ type: 'routing.key_retry', id: requestId, provider: route.platform, keyId: route.keyId, model: route.modelId, attempt: keyAttempt + 1, max: PER_KEY_RETRIES, at: Date.now() });
-          console.log(`[Proxy] ${safeError.slice(0, 60)} from ${route.displayName}, retry ${keyAttempt + 1}/${PER_KEY_RETRIES} (same key)`);
-          continue keyRetry;
-        }
-        // Last retry attempt exhausted → fall through to key exhaustion.
         lastError = err;
-        break keyRetry;
       } else {
-        // Non-retryable error (auth, 4xx, etc.): don't retry.
-        const errorMsg = `Provider error (${route.displayName}): ${safeError}`;
-        publish({ type: 'request.error', id: requestId, error: errorMsg, at: Date.now() });
-        res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
-        if (totalAttempt > 0) res.setHeader('X-Fallback-Attempts', String(totalAttempt));
-        res.status(502).json({
-          error: {
-            message: errorMsg,
-            type: 'provider_error',
-          },
-        });
-        return;
+        // Non-retryable error (auth, 4xx, etc.): also evict from
+        // healthy pool when heartbeat is enabled, then skip key.
+        if (isHeartbeatEnabled()) {
+          markKeyUnhealthy(route.keyId, err?.message?.slice(0, 120) ?? 'auth error');
+          publish({
+            type: 'routing.key_evicted',
+            id: requestId,
+            provider: route.platform,
+            keyId: route.keyId,
+            model: route.modelId,
+            reason: 'auth_error',
+            at: Date.now(),
+          });
+        }
+        lastError = err;
       }
     } finally {
       route.release();
     }
-    } // end keyRetry
 
-    // Key exhausted: all PER_KEY_RETRIES attempts failed.
-    // Mark it so the router cycles to the next key.
+    // Key exhausted — mark it so the router cycles to the next key.
     markExhausted(route.keyId, route.platform, route.modelId);
     const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
     skipKeys.add(skipId);
@@ -1322,7 +1307,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       }
     }
 
-    console.log(`[Proxy] Key ${route.keyId} exhausted after ${PER_KEY_RETRIES} failures from ${route.displayName}`);
+    console.log(`[Proxy] Key ${route.keyId} exhausted on ${route.displayName}`);
     // Continue outer loop → routeRequest picks next key.
   }
 

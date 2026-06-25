@@ -8,7 +8,7 @@ import type {
   TokenUsage,
   ThinkingConfig,
   ThinkingEffort,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
 import { contentToString } from '../lib/content.js';
 import { extractErrorMessage } from '../lib/error-body.js';
@@ -680,7 +680,7 @@ export class GoogleProvider extends BaseProvider {
 
   async validateKey(apiKey: string): Promise<boolean> {
     // Transport errors propagate — health.ts marks status='error' without
-    // counting toward auto-disable. Only confirmed 401/403 disables a key.
+    // marking the key invalid. Only confirmed 401/403 returns false.
     const res = await this.fetchWithTimeout(
       `${API_BASE}/models?key=${apiKey}`,
       { method: 'GET' },

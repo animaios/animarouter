@@ -1,13 +1,7 @@
 import { getDb } from '../db/index.js';
 import { buildProviderFor } from '../providers/index.js';
 import { decrypt } from '../lib/crypto.js';
-import type { KeyStatus } from '@api-gateway/shared/types.js';
-
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const CONSECUTIVE_FAILURES_TO_DISABLE = 3;
-
-// Track consecutive failures per key
-const failureCount = new Map<number, number>();
+import type { KeyStatus } from '@animarouter/shared/types.js';
 
 export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   const db = getDb();
@@ -17,47 +11,25 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
   const provider = buildProviderFor(row.platform);
   if (!provider) return 'error';
 
-  // Decrypt the stored key first — a failure here means the key is
-  // permanently unreadable (wrong encryption key or corrupt data),
-  // not a transient network issue.
   let apiKey: string;
   try {
     apiKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
   } catch (err: any) {
     console.error(`[Health] Key ${keyId} decrypt failed:`, err.message);
-    // Decrypt failure is permanent (wrong encryption key or corrupt data).
-    // Disable the key outright — it can never succeed, and routing to it
-    // wastes CPU on every request (Fix 1 includes status='error' keys).
-    db.prepare("UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?")
+    // Decrypt failure is permanent — mark key invalid but do NOT auto-disable.
+    // The user decides whether to disable the key.
+    db.prepare("UPDATE api_keys SET status = 'invalid', last_checked_at = datetime('now') WHERE id = ?")
       .run(keyId);
-    return 'error';
+    return 'invalid';
   }
 
   try {
     const isValid = await provider.validateKey(apiKey);
-
     const status: KeyStatus = isValid ? 'healthy' : 'invalid';
-
     db.prepare("UPDATE api_keys SET status = ?, last_checked_at = datetime('now') WHERE id = ?")
       .run(status, keyId);
-
-    if (isValid) {
-      failureCount.delete(keyId);
-    } else {
-      const count = (failureCount.get(keyId) ?? 0) + 1;
-      failureCount.set(keyId, count);
-
-      if (count >= CONSECUTIVE_FAILURES_TO_DISABLE) {
-        db.prepare('UPDATE api_keys SET enabled = 0 WHERE id = ?').run(keyId);
-        console.log(`[Health] Auto-disabled key ${keyId} after ${count} consecutive failures`);
-      }
-    }
-
     return status;
   } catch (err: any) {
-    // Transport errors (DNS/timeout/TLS) — provider unreachable, not necessarily
-    // a bad key. Mark status='error' but do NOT increment failure counter — auto-
-    // disable is reserved for confirmed 401/403 (returned by validateKey as false).
     console.error(`[Health] Key ${keyId} transport error:`, err.message);
     db.prepare("UPDATE api_keys SET status = ?, last_checked_at = datetime('now') WHERE id = ?")
       .run('error', keyId);
@@ -67,30 +39,10 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
 
 export async function checkAllKeys(): Promise<void> {
   const db = getDb();
-  const keys = db.prepare('SELECT id, platform FROM api_keys WHERE enabled = 1').all() as { id: number; platform: string }[];
-
+  const keys = db.prepare('SELECT id, platform FROM api_keys').all() as { id: number; platform: string }[];
   console.log(`[Health] Checking ${keys.length} keys...`);
-
   for (const key of keys) {
     await checkKeyHealth(key.id);
   }
-
   console.log(`[Health] Check complete.`);
-}
-
-let intervalId: ReturnType<typeof setInterval> | null = null;
-
-export function startHealthChecker(): void {
-  if (intervalId) return;
-  console.log(`[Health] Starting health checker (every ${CHECK_INTERVAL_MS / 1000}s)`);
-  intervalId = setInterval(() => {
-    checkAllKeys().catch(err => console.error('[Health] Check failed:', err));
-  }, CHECK_INTERVAL_MS);
-}
-
-export function stopHealthChecker(): void {
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
 }

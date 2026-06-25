@@ -2,7 +2,7 @@ import type {
   ChatMessage,
   ChatCompletionResponse,
   ChatCompletionChunk,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
 import { contentToString } from '../lib/content.js';
 import { extractErrorMessage } from '../lib/error-body.js';
@@ -112,7 +112,7 @@ export class CloudflareProvider extends BaseProvider {
 
   async validateKey(apiKey: string): Promise<boolean> {
     // Transport errors propagate — health.ts marks status='error' without
-    // counting toward auto-disable. Only confirmed bad/inactive tokens disable.
+    // marking the key invalid. Only confirmed bad/inactive tokens return false.
     const { token } = this.parseKey(apiKey);
     const res = await this.fetchWithTimeout(
       'https://api.cloudflare.com/client/v4/user/tokens/verify',
