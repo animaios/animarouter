@@ -54,9 +54,18 @@ export function clearExhausted(keyId: number, modelId: string): void {
   db.prepare('DELETE FROM rate_limit_cooldowns WHERE key_id = ? AND model_id = ?').run(keyId, modelId);
 }
 
-/** Check whether a key is currently marked exhausted. */
-export function isExhausted(keyId: number): boolean {
-  return exhaustionMap.has(keyId);
+/**
+ * Check whether a key is currently marked exhausted.
+ *
+ * When `modelId` is provided, the check is model-aware — a key exhausted
+ * for one model is NOT considered exhausted for another model, allowing
+ * fast-fail to accumulate failures across models sharing the same key.
+ * When omitted, checks across all models (legacy behavior).
+ */
+export function isExhausted(keyId: number, modelId?: string): boolean {
+  if (modelId === undefined) return exhaustionMap.has(keyId);
+  const entry = exhaustionMap.get(keyId);
+  return entry !== undefined && entry.modelId === modelId;
 }
 
 /**

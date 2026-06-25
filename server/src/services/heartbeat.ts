@@ -113,6 +113,7 @@ export function resetHeartbeatConfig(): void {
   _activityWindowMs = null;
   _pingTimeoutMs = null;
   _staggerMs = null;
+  keyHealthMap.clear();
 }
 
 // ── Module-level state ──────────────────────────────────────────────────────
@@ -235,6 +236,10 @@ async function runCycle(skipGate = false): Promise<void> {
         });
       }
     }
+
+    // ── Sort by modelDbId so all keys for the same model are pinged consecutively,
+    // reducing the window where a model has partial key coverage during prewarm.
+    pingTasks.sort((a, b) => a.modelDbId - b.modelDbId);
 
     // ── Ping each key (staggered) ──
     for (let i = 0; i < pingTasks.length; i++) {

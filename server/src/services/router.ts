@@ -7,6 +7,7 @@ import { decrypt } from '../lib/crypto.js';
 // detection instead of predictive quota tracking. See PR: heartbeat per-key.
 // recordRequest/recordTokens still track usage for analytics purposes.
 import { isKeyHealthy, isHeartbeatEnabled } from './heartbeat.js';
+import { isExhausted } from './key-exhaustion.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
   reliabilityPosterior, expectedReliability, sampleBeta,
@@ -675,6 +676,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // skipKeys accumulation gates attempts to avoid
       // re-hammering the same key within one request sweep.
       if (skipKeys?.has(skipId)) continue;
+      if (isExhausted(key.id, entry.model_id)) continue;
 
       // Rate-limit pre-checks removed. Key health is determined by the
       // heartbeat system (per-key degradation) instead of predictive quota

@@ -208,7 +208,7 @@ export default function AnalyticsPage() {
                         {showPinnedCol && <TableHead className="text-right">Pinned</TableHead>}
                         <TableHead className="text-right">Success</TableHead>
                         <TableHead className="text-right">Latency</TableHead>
-                        <TableHead className="text-right">Speed</TableHead>
+                        <TableHead className="text-right"><HoverTooltip text="Output tokens + reasoning tokens per second. Reasoning tokens are included for fair comparison across model types."><span className="underline decoration-dotted underline-offset-2 cursor-help">Speed</span></HoverTooltip></TableHead>
                         <TableHead className="text-right">In tokens</TableHead>
                         <TableHead className="text-right pr-4">Out tokens</TableHead>
                       </TableRow>

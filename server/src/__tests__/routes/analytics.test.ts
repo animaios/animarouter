@@ -425,4 +425,60 @@ describe('Analytics API', () => {
       expect(fbRows).toHaveLength(0);
     });
   });
+
+  describe('tok/s computation in by-model', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    function insertTokRequest(
+      platform: string,
+      modelId: string,
+      outputTokens: number,
+      reasoningTokens: number,
+      latencyMs: number,
+      createdAt: string,
+      inputTokens = 0,
+    ) {
+      getDb().prepare(`
+        INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, reasoning_tokens, latency_ms, error, created_at)
+        VALUES (?, ?, 'success', ?, ?, ?, ?, NULL, ?)
+      `).run(platform, modelId, inputTokens, outputTokens, reasoningTokens, latencyMs, createdAt);
+    }
+
+    it('includes reasoning_tokens in tok_per_sec computation', async () => {
+      // 90 output + 10 reasoning = 100 total tokens; 1000 ms → 100 tok/s
+      insertTokRequest('test', 'test-model', 90, 10, 1_000, '2026-05-29 11:00:00');
+
+      const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      expect(status).toBe(200);
+      const row = body.find((r: any) => r.modelId === 'test-model');
+      expect(row).toBeDefined();
+      expect(row.tokPerSec).toBe(100);
+      // Without reasoning_tokens the formula would yield 90; confirm they're included
+      expect(row.totalOutputTokens).toBe(90);
+      expect(row.totalReasoningTokens).toBe(10);
+    });
+
+    it('returns empty array when there are no requests', async () => {
+      // Parent beforeEach clears requests — no inserts means zero data
+      const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toEqual([]);
+    });
+
+    it('handles zero latency gracefully', async () => {
+      insertTokRequest('test', 'test-model', 100, 50, 0, '2026-05-29 11:00:00');
+
+      const { status, body } = await request(app, '/api/analytics/by-model?range=24h');
+
+      expect(status).toBe(200);
+      const row = body.find((r: any) => r.modelId === 'test-model');
+      expect(row).toBeDefined();
+      expect(row.tokPerSec).toBe(0);
+    });
+  });
 });

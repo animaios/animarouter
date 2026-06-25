@@ -21,6 +21,7 @@ describe('Provider Health Heartbeat', () => {
   let getKeyHealth: (keyId: number) => any;
   let isKeyHealthy: (keyId: number) => boolean;
   let resetHeartbeatConfig: () => void;
+    let markKeyUnhealthy: (keyId: number, error?: string) => void;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -58,6 +59,7 @@ describe('Provider Health Heartbeat', () => {
     getKeyHealth = heartbeatModule.getKeyHealth;
     isKeyHealthy = heartbeatModule.isKeyHealthy;
     resetHeartbeatConfig = heartbeatModule.resetHeartbeatConfig;
+    markKeyUnhealthy = heartbeatModule.markKeyUnhealthy;
     initDb = dbModule.initDb;
     getDb = dbModule.getDb;
     setSetting = dbModule.setSetting;
@@ -510,6 +512,123 @@ describe('Provider Health Heartbeat', () => {
       const afterReEnable = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
       expect(afterReEnable.enabled).toBe(1);
       expect(afterReEnable.auto_disabled_at).toBeNull();
+    });
+  });
+
+  // ── Startup Prewarm ──────────────────────────────────────────────────
+
+  describe('Startup prewarm', () => {
+    it('fires immediately on startHeartbeat() without waiting for interval tick', async () => {
+      const { modelDbId, keyId } = setupProvider();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      // No recordActivity() call — prewarm fires independently
+      startHeartbeat();
+
+      // Advance only microtasks (not the timer interval)
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Key should be healthy after prewarm completes — proves the cycle
+      // ran immediately without waiting for the 10 min interval
+      expect(isKeyHealthy(keyId)).toBe(true);
+      const health = getKeyHealth(keyId);
+      expect(health).toBeDefined();
+      expect(health!.healthy).toBe(true);
+      expect(health!.penalty).toBe(0);
+    });
+
+    it('bypasses the activity gate when no prior user request exists', async () => {
+      const { modelDbId, keyId } = setupProvider();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      // Explicitly NOT calling recordActivity() — lastActivityAt remains 0.
+      // A normal cycle would skip due to the activity gate (see Activity gating
+      // tests above), but prewarm (skipGate=true) bypasses the gate entirely.
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Keys should still be pinged because prewarm bypasses the activity gate
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBeGreaterThanOrEqual(1);
+      expect(pingEvents[0].success).toBe(true);
+
+      // Key should be healthy in keyHealthMap
+      expect(isKeyHealthy(keyId)).toBe(true);
+    });
+  });
+
+  // ── Ping Task Sorting ───────────────────────────────────────────────
+
+  describe('Ping task sorting', () => {
+    it('sorts ping tasks by modelDbId ascending so same-model keys are pinged consecutively', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+
+      // Create two models on separate platforms with the same priority.
+      // model-b is inserted first (will get a lower id / modelDbId) and should
+      // be pinged first after the sort, regardless of insertion order.
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('sort-b', 'model-b', 'Model B', 2, 2, 1)").run();
+      const idB = (db.prepare("SELECT id FROM models WHERE platform = 'sort-b' AND model_id = 'model-b'").get() as any).id;
+
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('sort-a', 'model-a', 'Model A', 1, 1, 1)").run();
+      const idA = (db.prepare("SELECT id FROM models WHERE platform = 'sort-a' AND model_id = 'model-a'").get() as any).id;
+
+      // Verify idB < idA (insertion order) so the sort actually reorders
+      expect(idB).toBeLessThan(idA);
+
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(idB);
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(idA);
+
+      // One key per platform
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('sort-b', 'Key B', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('sort-a', 'Key A', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(2);
+
+      // After sort by modelDbId ascending: model-b (lower modelDbId) before model-a
+      expect(pingEvents[0].provider).toBe('sort-b');
+      expect(pingEvents[0].model).toBe('model-b');
+      expect(pingEvents[1].provider).toBe('sort-a');
+      expect(pingEvents[1].model).toBe('model-a');
+    });
+  });
+
+  // ── resetHeartbeatConfig ─────────────────────────────────────────────
+
+  describe('resetHeartbeatConfig', () => {
+    it('clears keyHealthMap when called', () => {
+      // Mark a key unhealthy — this populates keyHealthMap
+      markKeyUnhealthy(1, 'forced test failure');
+
+      // Verify the key is now in the health map and unhealthy
+      let health = getKeyHealth(1);
+      expect(health).toBeDefined();
+      expect(health!.healthy).toBe(false);
+
+      // Reset clears the map
+      resetHeartbeatConfig();
+
+      // Key should be gone from the map
+      health = getKeyHealth(1);
+      expect(health).toBeUndefined();
     });
   });
 });
