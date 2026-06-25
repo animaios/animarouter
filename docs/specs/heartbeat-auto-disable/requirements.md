@@ -82,9 +82,9 @@ The auto-disable check runs **after** each heartbeat cycle completes, not as par
 
 | Setting | Env var | Default | Min | Max | Effect | Group |
 |---|---|---|---|---|---|---|
-| `heartbeat_auto_disable_pct` | `HEARTBEAT_AUTO_DISABLE_PCT` | `50` | `1` | `100` | `live` | Resilience |
+| `heartbeat_auto_disable_pct` | `HEARTBEAT_AUTO_DISABLE_PCT` | `0` | `0` | `100` | `live` | Resilience |
 
-Value represents the percentage of all keys for a model that must be unhealthy to trigger auto-disable. At `100`, all keys must be unhealthy. At `1`, a single unhealthy key triggers it (aggressive).
+Value represents the percentage of all keys for a model that must be unhealthy to trigger auto-disable. Set to `0` to disable the feature entirely. At `100`, all keys must be unhealthy. At `1`, a single unhealthy key triggers it (aggressive).
 
 The setting is `live`-effect (not `restart`), so operators can adjust it without restarting the server.
 

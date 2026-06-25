@@ -34,10 +34,10 @@ Find the `REGISTRY` array and add a new entry in the `Resilience` group, after t
     key: 'heartbeat_auto_disable_pct',
     label: 'Auto-Disable Unhealthy Key %',
     description:
-      'When ≥ this percentage of a model\'s API keys are unhealthy (heartbeat pings failing or 429-evicted), the model is automatically disabled. Set to 100 to disable only when all keys fail; set to 1 for aggressive single-key triggering.',
+      'When ≥ this percentage of a model\'s API keys are unhealthy (heartbeat pings failing or 429-evicted), the model is automatically disabled. Set to 0 to disable auto-disable entirely; set to 100 to disable only when all keys fail; set to 1 for aggressive single-key triggering.',
     type: 'number',
-    default: 50,
-    min: 1,
+    default: 0,
+    min: 0,
     max: 100,
     envVar: 'HEARTBEAT_AUTO_DISABLE_PCT',
     effect: 'live',
@@ -50,7 +50,7 @@ Find the `REGISTRY` array and add a new entry in the `Resilience` group, after t
 
 ```typescript
 // Unit test:
-expect(getFeatureSetting('heartbeat_auto_disable_pct')).toBe(50);
+expect(getFeatureSetting('heartbeat_auto_disable_pct')).toBe(0);
 
 // With env var override:
 process.env.HEARTBEAT_AUTO_DISABLE_PCT = '75';
