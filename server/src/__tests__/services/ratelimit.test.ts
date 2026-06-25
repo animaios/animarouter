@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import {
   canMakeRequest,
   canUseTokens,
@@ -11,7 +11,6 @@ import {
   canUseProvider,
   providerDailyRequestCount,
   getProviderDailyRequestCap,
-  getTransientCooldownMs,
   computeRetryCooldownMs,
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';

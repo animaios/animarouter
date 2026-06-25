@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
+import type { RoutingStrategy } from '../../services/scoring.js';
 
 describe('Provider-Outage Fast-Fail — Integration', () => {
   let app: Express;
@@ -15,7 +16,7 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
   let publishedEvents: any[];
   let getDb: () => any;
   let encrypt: (key: string) => { encrypted: string; iv: string; authTag: string };
-  let setRoutingStrategy: (s: string) => void;
+  let setRoutingStrategy: (strategy: RoutingStrategy) => void;
   let post: (app: Express, path: string, body: any, key: string) => Promise<{ status: number; body: any; raw: string; headers: Headers }>;
 
   // Model IDs
