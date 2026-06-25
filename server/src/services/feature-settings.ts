@@ -163,7 +163,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     type: 'string',
     default: 'off',
     options: ['off', 'on_model_switch'],
-    envVar: 'API_GATEWAY_CONTEXT_HANDOFF',
+    envVar: 'ANIMAROUTER_CONTEXT_HANDOFF',
     effect: 'live',
     group: 'Sessions',
   },

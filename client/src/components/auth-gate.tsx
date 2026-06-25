@@ -49,7 +49,7 @@ function AuthForm({ mode, onAuthed }: { mode: 'setup' | 'login'; onAuthed: () =>
     <Centered>
       <div className="mb-6 flex items-center gap-2">
         <span className="inline-block size-2 rounded-full bg-foreground" />
-        <span className="font-semibold tracking-tight text-sm">API-Gateway</span>
+        <span className="font-semibold tracking-tight text-sm">AnimaRouter</span>
       </div>
       <div className="rounded-3xl border bg-card p-6">
         <h1 className="text-base font-medium">{isSetup ? 'Create your account' : 'Sign in'}</h1>

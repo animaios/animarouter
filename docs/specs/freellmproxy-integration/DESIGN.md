@@ -5,7 +5,7 @@
 ## D1: Current Architecture (As-Is)
 
 ```
-~/freellmapi/                         ~/freeproxy/
+~/animarouter/                         ~/freeproxy/
 ├── server/  (Express + SQLite)        ├── src/
 ├── client/  (React + Vite)           │   ├── worker.ts       (dispatch by WORKER_ROLE)
 ├── shared/  (Types)                  │   ├── router.ts       (auth, URL decode, proxy select)
@@ -25,7 +25,7 @@ Two separate repos. The proxy requires `ROUTER_DOMAIN` in `.env` and hardcodes `
 ## D2: Target Architecture (To-Be)
 
 ```
-~/freellmapi/
+~/animarouter/
 ├── server/
 ├── client/
 ├── shared/

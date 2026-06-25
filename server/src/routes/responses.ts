@@ -7,7 +7,7 @@ import type {
   ChatToolCall,
   ChatToolDefinition,
   ChatToolChoice,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 import { routeRequest, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
 import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
 import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs } from '../services/ratelimit.js';

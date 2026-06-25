@@ -95,7 +95,7 @@ function Brand() {
   return (
     <Link to="/" className="flex items-center gap-2 transition-opacity hover:opacity-70">
       <span className="inline-block size-2 rounded-full bg-foreground" />
-      <span className="font-semibold tracking-tight text-sm">API-Gateway</span>
+      <span className="font-semibold tracking-tight text-sm">AnimaRouter</span>
     </Link>
   )
 }
@@ -104,9 +104,9 @@ function Brand() {
 // sets this). The navbar then doubles as the window title bar: draggable,
 // padded for the macOS traffic lights, and the page background is glass.
 // Set by the desktop app's preload script (desktop/src/preload.ts).
-interface ApiGatewayWindow { __API_GATEWAY_DESKTOP__?: boolean }
+interface AnimaRouterWindow { __ANIMAROUTER_DESKTOP__?: boolean }
 const isDesktopApp = typeof window !== 'undefined'
-  && (window as ApiGatewayWindow).__API_GATEWAY_DESKTOP__ === true
+  && (window as AnimaRouterWindow).__ANIMAROUTER_DESKTOP__ === true
 
 // The preload's own early classList.add can be lost (it may run before this
 // document exists), so the client claims the class itself at module load —

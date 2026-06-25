@@ -4,7 +4,7 @@
 
 ## Overview
 
-This document records the surgical removal of cost/savings calculation from the FreeLLMApi stack. The change spanned 6 files across server, client, shared types, and tests. No new code was introduced — only deletion and minimal rewrites.
+This document records the surgical removal of cost/savings calculation from the AnimaRouter stack. The change spanned 6 files across server, client, shared types, and tests. No new code was introduced — only deletion and minimal rewrites.
 
 ## Files Changed
 

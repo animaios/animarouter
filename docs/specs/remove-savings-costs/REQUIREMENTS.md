@@ -4,7 +4,7 @@
 
 ## Context
 
-FreeLLMApi is a free-tier LLM proxy — all models are accessed via free API keys. The analytics dashboard previously showed a misleading "Est. savings" figure that calculated "what the same tokens would have cost on paid APIs." Since the project is fundamentally a free-tier aggregator and users are not paying anything, this metric was nonsensical and has been removed.
+AnimaRouter is a free-tier LLM proxy — all models are accessed via free API keys. The analytics dashboard previously showed a misleading "Est. savings" figure that calculated "what the same tokens would have cost on paid APIs." Since the project is fundamentally a free-tier aggregator and users are not paying anything, this metric was nonsensical and has been removed.
 
 ## What Was Done
 

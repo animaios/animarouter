@@ -1,6 +1,6 @@
 # Docker Guide
 
-Docker Compose is the recommended way to run API-Gateway for personal use. The container serves the Express API and the built React dashboard from one process on port 3001, with SQLite persisted in a named volume.
+Docker Compose is the recommended way to run AnimaRouter for personal use. The container serves the Express API and the built React dashboard from one process on port 3001, with SQLite persisted in a named volume.
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ Start the app:
 docker compose up -d
 ```
 
-Open http://localhost:3001, add provider keys on the **Keys** page, then use the generated `api-gateway-...` key with any OpenAI-compatible client.
+Open http://localhost:3001, add provider keys on the **Keys** page, then use the generated `animarouter-...` key with any OpenAI-compatible client.
 
 ## Example API Call
 
@@ -33,7 +33,7 @@ curl http://localhost:3001/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",
-    "messages": [{"role": "user", "content": "Say hello from API-Gateway."}]
+    "messages": [{"role": "user", "content": "Say hello from AnimaRouter."}]
   }'
 ```
 
@@ -48,7 +48,7 @@ docker compose ps
 Tail logs:
 
 ```bash
-docker compose logs -f api-gateway
+docker compose logs -f animarouter
 ```
 
 Stop the app:

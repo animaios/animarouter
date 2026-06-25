@@ -1,4 +1,4 @@
-import type { ChatMessage } from '@api-gateway/shared/types.js';
+import type { ChatMessage } from '@animarouter/shared/types.js';
 import { contentToString } from '../lib/content.js';
 import { getFeatureSetting } from './feature-settings.js';
 
@@ -133,13 +133,13 @@ export function maybeInjectContextHandoff(params: {
   const alreadyPresent = messages.some(m => {
     if (m.role !== 'system') return false;
     const text = typeof m.content === 'string' ? m.content : contentToString(m.content);
-    return text.startsWith('API-Gateway context handoff:');
+    return text.startsWith('AnimaRouter context handoff:')
   });
   if (alreadyPresent) return { messages, injected: false, injectedTokens: 0 };
 
   const summary = buildSummary(ctx.recentMessages);
   const handoffContent = [
-    'API-Gateway context handoff:',
+    'AnimaRouter context handoff:',
     `You are taking over an ongoing conversation from another model (${ctx.lastModelKey} → ${selectedModelKey}).`,
     'Continue the user\'s task using the conversation context already provided in this request.',
     'Do not restart the task, re-ask already answered setup questions, or discard prior tool results.',

@@ -1,7 +1,7 @@
 # Analytics Provider Filtering — Tasks
 
 > **Branch:** `feat/analytics-filter`
-> **Workspace:** `cp -r /home/vi/freellmapi /home/vi/freellmapi-analytics-filter && cd /home/vi/freellmapi-analytics-filter && git checkout -b feat/analytics-filter`
+> **Workspace:** `cp -r /home/vi/animarouter /home/vi/animarouter-analytics-filter && cd /home/vi/animarouter-analytics-filter && git checkout -b feat/analytics-filter`
 > **Touch:** Only `server/src/routes/analytics.ts` + `server/src/__tests__/routes/analytics.test.ts`
 > **Do NOT touch:** client code, other server routes, DB migrations
 
@@ -203,7 +203,7 @@ Add after the existing test blocks in `analytics.test.ts`:
 ## Task 10: Broader test run & regression check
 
 ```bash
-cd /home/vi/freellmapi-analytics-filter
+cd /home/vi/animarouter-analytics-filter
 npm run test -w server -- --run
 ```
 

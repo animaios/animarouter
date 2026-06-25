@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #
-# API-Gateway one-line installer (#250, idea by @StealthTensor).
+# AnimaRouter one-line installer (#250, idea by @StealthTensor).
 #
 #   curl -fsSL https://tashfeenahmed.github.io/api-gateway/install.sh | bash
 #
 # What it does:
 #   1. Checks for Docker + Compose.
-#   2. Creates an install dir (default ~/api-gateway, override API_GATEWAY_DIR).
+#   2. Creates an install dir (default ~/animarouter, override ANIMAROUTER_DIR).
 #   3. Writes a docker-compose.yml pinned to ghcr.io/tashfeenahmed/api-gateway:latest
 #      and a .env with a freshly generated ENCRYPTION_KEY (kept on re-runs).
 #   4. Pulls the image, starts the container, waits for the health endpoint.
 #
 # Options (env vars):
-#   API_GATEWAY_DIR   install directory            (default: ~/api-gateway)
+#   ANIMAROUTER_DIR   install directory            (default: ~/animarouter)
 #   PORT             host port for the dashboard  (default: 3001)
 #   HOST_BIND        host interface to publish on (default: 127.0.0.1).
 #                    Set HOST_BIND=0.0.0.0 to reach it from your LAN — only on
@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-INSTALL_DIR="${API_GATEWAY_DIR:-$HOME/api-gateway}"
+INSTALL_DIR="${ANIMAROUTER_DIR:-$HOME/animarouter}"
 PORT="${PORT:-3001}"
 HOST_BIND="${HOST_BIND:-127.0.0.1}"
 IMAGE="ghcr.io/tashfeenahmed/api-gateway:latest"
@@ -77,14 +77,14 @@ fi
 cat > docker-compose.yml <<EOF
 # Written by install.sh — safe to edit; re-running the installer rewrites it.
 services:
-  api-gateway:
+  animarouter:
     image: $IMAGE
     env_file:
       - .env
     environment:
       NODE_ENV: production
       PORT: 3001
-    # Bound to localhost by default — API-Gateway is single-user and must not
+    # Bound to localhost by default — AnimaRouter is single-user and must not
     # be exposed to the internet. Set HOST_BIND=0.0.0.0 in .env for LAN access.
     ports:
       - "\${HOST_BIND:-127.0.0.1}:\${PORT:-3001}:3001"
@@ -111,7 +111,7 @@ EOF
 # ── 5. pull + start ──────────────────────────────────────────────────────────
 say "Pulling $IMAGE"
 "${COMPOSE[@]}" pull --quiet 2>/dev/null || "${COMPOSE[@]}" pull
-say "Starting API-Gateway"
+say "Starting AnimaRouter"
 "${COMPOSE[@]}" up -d
 
 # ── 6. wait for health ───────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ done
 if [ "${HEALTHY:-0}" = "1" ]; then
   cat <<EOF
 
-  API-Gateway is running.
+  AnimaRouter is running.
 
     Dashboard      http://localhost:$PORT
     Next steps     add provider keys on the Keys page, then grab your

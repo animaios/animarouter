@@ -464,7 +464,7 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
         signal: controller.signal,
         headers: {
           'Accept': 'application/json',
-          'User-Agent': 'FreeLLMApi-Gateway/1.0 (benchmark sync)',
+          'User-Agent': 'AnimaRouter/1.0 (benchmark sync)',
         },
       });
 

@@ -1,10 +1,10 @@
 <div align="center">
 
-# [AnimAIOS](https://github.com/animaios/airi) - FreeRouter
+# [AnimAIOS](https://github.com/animaios/airi) - AnimaRouter
 
 **One endpoint. Any provider. Every free tier. Smart routing that learns.**
 
-> Fork of [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) (which itself forks [tashfeenahmed/freellmapi](https://github.com/tashfeenahmed/freellmapi)). What follows is only what FreeRouter adds on top of api-gateway.
+> Fork of [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) (which itself forks [tashfeenahmed/freellmapi](https://github.com/tashfeenahmed/freellmapi)). What follows is only what AnimaRouter adds on top of api-gateway.
 
 <img width="256" height="384" alt="kawaii anima-chan" src="https://github.com/user-attachments/assets/992ae2fc-0473-40c9-b99b-cea7840b6543" />
 
@@ -24,7 +24,7 @@
 
 ## Contents
 
-- [What FreeRouter adds](#what-freerouter-adds)
+- [What AnimaRouter adds](#what-animarouter-adds)
 - [In Development](#in-development)
 - [Quick Start](#quick-start)
 - [Docker](#docker)
@@ -40,7 +40,7 @@
 - [Disclaimer](#disclaimer)
 - [License](#license)
 
-## What FreeRouter adds
+## What AnimaRouter adds
 
 Everything below is **on top of** [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) — which already ships OpenAI-compatible routing, Thompson-sampling bandits, per-key rate tracking, recovery, custom provider CRUD, context handoff, encrypted storage, dark-mode dashboard, Docker support, and more. If it's not listed here, api-gateway already has it.
 
@@ -50,7 +50,7 @@ Everything below is **on top of** [MLuqmanBR/api-gateway](https://github.com/MLu
 |---------|------|---------------|
 | **Dynamic Degradation** | Severity-weighted progressive penalties replacing the flat `rateLimitFactor`. 429 → minor (2 min half-life), 5xx → major (15 min), consecutive hard failures → critical (60 min). Compounding exponential penalties + sigmoid degradation factor. Dashboard-visible + env-configurable. | Flat rate-limit penalties can't distinguish a polite retry from a burning server. Degradation matches the penalty to the problem. *(spec: `docs/specs/dynamic-degradation/`)* |
 | **Strict model pinning** | When you pin a model, it stays pinned — even on error. | Upstream silently falls through to a different model on failure, which breaks workflows that depend on a specific model's behaviour. |
-| **Free-only enforcement** | OpenRouter and OpenCode routes restricted to `:free` models only. Monthly token budget system removed in favour of simpler quotas. | FreeRouter is about stacking free tiers; accidentally hitting a paid endpoint through those routes costs real money. |
+| **Free-only enforcement** | OpenRouter and OpenCode routes restricted to `:free` models only. Monthly token budget system removed in favour of simpler quotas. | AnimaRouter is about stacking free tiers; accidentally hitting a paid endpoint through those routes costs real money. |
 | **Keyless custom providers** | Local servers that don't need auth can be added without a key. | Upstream requires a key for every provider — a blocker for self-hosted/Ollama-style endpoints that have no auth layer. |
 | **Archive instead of hard-delete** | Custom providers and models get archived (restorable), not cascade-deleted. | Upstream cascade-deletes on removal. One misclick and your whole custom provider config is gone. Archive is reversible. |
 
@@ -104,8 +104,8 @@ Everything below is **on top of** [MLuqmanBR/api-gateway](https://github.com/MLu
 **Prerequisites:** Node.js 20+, npm. (Docker also works — see [Docker](#docker).)
 
 ```bash
-git clone https://github.com/animaios/freerouter.git
-cd freerouter
+git clone https://github.com/animaios/animarouter.git
+cd animarouter
 npm install
 cp .env.example .env
 
@@ -134,8 +134,8 @@ Request analytics are retained for 90 days or 100000 request rows by default, wh
 ## Docker
 
 ```bash
-git clone https://github.com/animaios/freerouter.git
-cd freerouter
+git clone https://github.com/animaios/animarouter.git
+cd animarouter
 
 # Generate an encryption key
 ENCRYPTION_KEY="$(openssl rand -hex 32)"
@@ -158,7 +158,7 @@ More Docker operations and examples live in [docker/README.md](./docker/README.m
 
 ## Cloud Proxy
 
-API-Gateway ships a Cloudflare Workers proxy layer for IP rotation and header stripping. Deploy it to route requests through geographically-distributed exit IPs so upstream providers see consistent, non-identifying IP addresses instead of your real one.
+AnimaRouter ships a Cloudflare Workers proxy layer for IP rotation and header stripping. Deploy it to route requests through geographically-distributed exit IPs so upstream providers see consistent, non-identifying IP addresses instead of your real one.
 
 **Prerequisites:** [wrangler](https://developers.cloudflare.com/workers/wrangler/) installed and logged in (`npm i -g wrangler && wrangler login`).
 
@@ -338,10 +338,10 @@ The default family, per-provider toggles, and priorities live on the dashboard's
 
 ## Context Handoff
 
-When FreeRouter falls over to a different model mid-conversation (quota, rate limit, cooldown), the new model has no idea it is picking up someone else's task. **Context handoff** adds a single compact `system` message to the outbound request that tells the new model exactly that:
+When AnimaRouter falls over to a different model mid-conversation (quota, rate limit, cooldown), the new model has no idea it is picking up someone else's task. **Context handoff** adds a single compact `system` message to the outbound request that tells the new model exactly that:
 
 ```
-FreeRouter context handoff:
+AnimaRouter context handoff:
 You are taking over an ongoing conversation from another model (groq:llama-3 → google:gemini-flash).
 Continue the user's task using the conversation context already provided in this request.
 Do not restart the task, re-ask already answered setup questions, or discard prior tool results.
@@ -355,7 +355,7 @@ Assistant: …
 **Enable it in `.env`:**
 
 ```env
-API_GATEWAY_CONTEXT_HANDOFF=on_model_switch
+ANIMAROUTER_CONTEXT_HANDOFF=on_model_switch
 ```
 
 **How it works:**
@@ -366,7 +366,7 @@ API_GATEWAY_CONTEXT_HANDOFF=on_model_switch
 - Session key: `X-Session-Id` header if present, otherwise SHA-1 of the first user message (same as sticky sessions).
 - Storage is in-memory only. Nothing is written to disk or logged.
 
-> **Important:** Context Handoff improves continuity for conversations routed through FreeRouter. It cannot recover provider-internal hidden state or messages that were never sent to the proxy.
+> **Important:** Context Handoff improves continuity for conversations routed through AnimaRouter. It cannot recover provider-internal hidden state or messages that were never sent to the proxy.
 
 ## Supported Providers
 
@@ -403,7 +403,7 @@ API_GATEWAY_CONTEXT_HANDOFF=on_model_switch
 </tr>
 </table>
 
-<p align="center"><strong>Don't see yours? Add it.</strong> Any OpenAI-compatible endpoint — cloud service, local server, homelab GPU — becomes a provider in under a minute. It gets the same fallback chain, the same intelligent routing, the same rate-limit protection as every built-in. <a href="#what-freerouter-adds">See Custom Providers →</a></p>
+<p align="center"><strong>Don't see yours? Add it.</strong> Any OpenAI-compatible endpoint — cloud service, local server, homelab GPU — becomes a provider in under a minute. It gets the same fallback chain, the same intelligent routing, the same rate-limit protection as every built-in. <a href="#what-animarouter-adds">See Custom Providers →</a></p>
 
 ## Custom Platforms and Models
 
@@ -455,7 +455,7 @@ Stacking free tiers — even with custom providers in the mix — has real trade
 - **Intelligence degrades as the day progresses.** Your top-ranked models have the lowest daily caps. Once they hit their limits, the router falls down your priority chain to smaller/weaker models. Expect the effective intelligence to drop in the late hours — then reset at UTC midnight.
 - **Latency is highly variable.** Cerebras and Groq are extremely fast; others are not. You get whichever one is available at the moment.
 - **Free tiers can change without notice.** Providers regularly tighten, loosen, or remove free tiers. When that happens you'll see 429s or auth errors until the catalog catches up.
-- **No SLA, by definition.** If you need reliability, use a paid provider with a contract — either directly or plugged into FreeRouter as a custom platform.
+- **No SLA, by definition.** If you need reliability, use a paid provider with a contract — either directly or plugged into AnimaRouter as a custom platform.
 - **Local-first.** No multi-tenant auth. Run this for yourself; don't expose it to the internet.
 
 ## Contributing
@@ -545,7 +545,7 @@ Rules of thumb: **one account per provider**, **no reselling**, **no sharing you
 
 ## Disclaimer
 
-**This project is for personal experimentation and learning, not production.** Free tiers exist so developers can prototype against them; they aren't a stable, supported inference substrate and shouldn't be treated as one. If you build something real on top of FreeRouter, swap in a paid API before you ship. Your relationship with each upstream provider is governed by the terms you accepted when you created your account — those terms still apply when the traffic is proxied through this project, and you're responsible for complying with them.
+**This project is for personal experimentation and learning, not production.** Free tiers exist so developers can prototype against them; they aren't a stable, supported inference substrate and shouldn't be treated as one. If you build something real on top of AnimaRouter, swap in a paid API before you ship. Your relationship with each upstream provider is governed by the terms you accepted when you created your account — those terms still apply when the traffic is proxied through this project, and you're responsible for complying with them.
 
 ***
 

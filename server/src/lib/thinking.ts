@@ -25,7 +25,7 @@
 // shape names — it maps every request knob down to a wire field that
 // documentation confirms the provider accepts. (#290)
 
-import type { ThinkingConfig, ThinkingEffort } from '@api-gateway/shared/types.js';
+import type { ThinkingConfig, ThinkingEffort } from '@animarouter/shared/types.js';
 
 // ─── Combined request view ────────────────────────────────────────────────
 

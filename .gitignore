@@ -11,8 +11,8 @@ server/data/
 .DS_Store
 
 # Runtime artifacts
-.api-gateway.pid
-.api-gateway.instances
+.animarouter.pid
+.animarouter.instances
 server.log
 server.log.*
 

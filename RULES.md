@@ -1,4 +1,4 @@
-# Repository Rules — API-Gateway
+# Repository Rules — AnimaRouter
 
 > **Audience:** AI agents + human maintainers. Follow these rules exactly. Order matters.
 > 
@@ -682,7 +682,7 @@ api logs                  Tail server.log
 api help                  Show help
 ```
 
-The CLI tracks instances via `.api-gateway.instances` (gitignored). Multiple
+The CLI tracks instances via `.animarouter.instances` (gitignored). Multiple
 instances on different ports are supported. The `api` command is registered
 via the `bin` field in `package.json` — run `npm link` after cloning to
 activate it globally.
@@ -704,7 +704,7 @@ npm run build -w server  # server only
 |---|---|
 | `ENCRYPTION_KEY` | 64-char hex key for API key encryption (required) |
 | `PORT` | Server port (default 3001) |
-| `API_GATEWAY_CONTEXT_HANDOFF` | Enable context handoff (`on_model_switch`) |
+| `ANIMAROUTER_CONTEXT_HANDOFF` | Enable context handoff (`on_model_switch`) |
 | `REQUEST_ANALYTICS_RETENTION_DAYS` | Analytics retention (default 90) |
 | `REQUEST_ANALYTICS_MAX_ROWS` | Max analytics rows (default 100000) |
 
@@ -1064,7 +1064,7 @@ Run with `npx tsx scripts/import-keys.ts`, then `rm scripts/import-keys.ts`.
 ### 12.3 Multi-Field Credentials
 
 Some providers require more than one credential field (e.g., account ID +
-API key, or project ID + token). API-Gateway handles these with a colon-
+API key, or project ID + token). AnimaRouter handles these with a colon-
 separated combined format. The "Add a provider key" form in the dashboard
 automatically shows multiple input fields for platforms that need them.
 

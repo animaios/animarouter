@@ -7,7 +7,7 @@ import type {
   ChatToolDefinition,
   TokenUsage,
   Platform,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
 import { contentToString, normalizeOutboundContent } from '../lib/content.js';
 import { anthropicThinking, normalizeThinking } from '../lib/thinking.js';

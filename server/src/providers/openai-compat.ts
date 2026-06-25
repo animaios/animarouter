@@ -3,7 +3,7 @@ import type {
   ChatCompletionResponse,
   ChatCompletionChunk,
   Platform,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
 import { extractErrorMessage } from '../lib/error-body.js';
 /**

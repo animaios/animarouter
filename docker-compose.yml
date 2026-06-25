@@ -1,5 +1,5 @@
 services:
-  api-gateway:
+  animarouter:
     image: ghcr.io/tashfeenahmed/api-gateway:latest
     build:
       context: .
@@ -9,7 +9,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
-    # Bound to localhost by default — API-Gateway is single-user and must not be
+    # Bound to localhost by default — AnimaRouter is single-user and must not be
     # exposed to the internet. Set HOST_BIND=0.0.0.0 to reach it from your LAN.
     ports:
       - "${HOST_BIND:-127.0.0.1}:${PORT:-3001}:3001"
@@ -22,7 +22,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3001/api/ping').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1));"
+          "fetch('http://127.0.0.1:3001/api/ping').then((res) => { if (!res.ok) process.exit(1); }).catch(() => process.exit(1));",
         ]
       interval: 30s
       timeout: 5s

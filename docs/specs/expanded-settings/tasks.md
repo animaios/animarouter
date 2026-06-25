@@ -13,7 +13,7 @@
 
 - [ ] **T2.1** Migrate `ratelimit.ts` — replace `TRANSIENT_COOLDOWN_MS`, `PAYMENT_REQUIRED_COOLDOWN_MS`, `MODEL_FORBIDDEN_COOLDOWN_MS` with getter functions backed by `getFeatureSetting()`; update `computeRetryCooldownMs`, `getCooldownDurationForLimit`, and all other references
 - [ ] **T2.2** Migrate `degradation.ts` — replace `envFloat`/`envMinutesToMs`/`envInt` calls in `initDegradation()` with `getFeatureSetting()` for the 6 surfaced settings; keep remaining niche env vars (`DEGRADE_MINOR_WEIGHT` etc.) as `envFloat()` fallback but route through `getFeatureSetting()` so they're in the registry
-- [ ] **T2.3** Migrate `context-handoff.ts` — replace `process.env.API_GATEWAY_CONTEXT_HANDOFF` with `getFeatureSetting('context_handoff_mode')`; replace `SESSION_TTL_MS` constant with `getSessionTtlMs()`
+- [ ] **T2.3** Migrate `context-handoff.ts` — replace `process.env.ANIMAROUTER_CONTEXT_HANDOFF` with `getFeatureSetting('context_handoff_mode')`; replace `SESSION_TTL_MS` constant with `getSessionTtlMs()`
 - [ ] **T2.4** Migrate `proxy.ts` — replace `STICKY_TTL_MS` constant with `getStickyTtlMs()`
 - [ ] **T2.5** Migrate `router.ts` — replace `WINDOW_MS`, `HALF_LIFE_DAYS`, `CACHE_TTL_MS` with getter functions; migrate `getGlobalRetryLimit()` to use `getFeatureSetting('global_retry_limit')` with the existing `getSetting('global_retry_limit')` as fallback
 - [ ] **T2.6** Migrate `request-retention.ts` — replace `readNonNegativeInt()` env var reads with `getFeatureSetting()`; simplify `getRequestAnalyticsRetentionConfig()`

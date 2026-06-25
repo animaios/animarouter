@@ -29,7 +29,7 @@ This leaves operators either unable to tune the system or forced to learn env va
 | Key | Label | Type | Default | Min | Max | Effect | Env Var | Notes |
 |---|---|---|---|---|---|---|---|---|
 | `sticky_session_enabled` | Sticky Sessions | boolean | `false` | — | — | live | `STICKY_SESSION_ENABLED` | *existing* |
-| `context_handoff_mode` | Context Handoff | string (`off` · `on_model_switch`) | `off` | — | — | live | `API_GATEWAY_CONTEXT_HANDOFF` | New type — see §3.1 |
+| `context_handoff_mode` | Context Handoff | string (`off` \u00b7 `on_model_switch`) | `off` | \u2014 | \u2014 | live | `ANIMAROUTER_CONTEXT_HANDOFF` | New type \u2014 see \u00a73.1 |
 | `session_ttl_min` | Session Memory TTL (min) | number | `180` | `30` | `1440` | restart | — | Controls `SESSION_TTL_MS` in context-handoff |
 | `sticky_session_ttl_min` | Sticky Session TTL (min) | number | `30` | `5` | `1440` | restart | — | Controls `STICKY_TTL_MS` in proxy |
 

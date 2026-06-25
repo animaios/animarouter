@@ -5,7 +5,7 @@ import type {
   ChatToolDefinition,
   ChatToolChoice,
   Platform,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 
 /** A provider HTTP error carrying the upstream status and, when the response
  *  included a Retry-After header, the parsed delay so the router can bench the
@@ -51,7 +51,7 @@ export interface CompletionOptions {
   reasoning_effort?: 'max' | 'xhigh' | 'high' | 'medium' | 'low' | 'minimal';
   // Richer thinking-control object. Providers translate into their native
   // vocab (`thinking`, `thinkingConfig`, `reasoning_effort`). See #290.
-  thinking?: import('@api-gateway/shared/types.js').ThinkingConfig;
+  thinking?: import('@animarouter/shared/types.js').ThinkingConfig;
   /** Per-call HTTP timeout override. Not part of the OpenAI wire format (it is
    * stripped before the request body is built); used by the probe script so
    * NVIDIA's 15-60s serverless cold starts don't read as failures. */

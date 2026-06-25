@@ -174,7 +174,7 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
         id: AUTO_MODEL_ID,
         object: 'model',
         created: 0,
-        owned_by: 'animarouter',
+        owned_by: 'api-gateway',
         name: 'Auto (router picks the best available model)',
         context_window: null,
       },

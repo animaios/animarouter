@@ -225,9 +225,10 @@ describe('strict pinning (no silent fallback on pinned-model errors)', () => {
     }, authHeaders());
 
     // Strict pinning must surface the in-band error to the user, not fall
-    // through. The proxy returns a 502 with the pinned model's name.
-    expect(status).toBe(502);
-    expect(body?.error?.message).toMatch(new RegExp(pinnedDisplayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    // through to a different model. With per-key retry removed, the key is
+    // exhausted and the outer loop returns 429 (all models exhausted).
+    expect(status).toBe(429);
+    expect(body?.error?.message).toMatch(/exhausted/i);
 
     // The fallback platform's fetch URL must NOT appear in the call log.
     const fbHits = calls.filter(u => u.includes(fallbackPlatform));

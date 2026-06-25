@@ -1,4 +1,4 @@
-import type { Platform } from '@api-gateway/shared/types.js';
+import type { Platform } from '@animarouter/shared/types.js';
 import { getDb } from '../db/index.js';
 import { OpenAICompatProvider } from './openai-compat.js';
 import { BaseProvider } from './base.js';
@@ -61,7 +61,7 @@ register(new OpenAICompatProvider({
   baseUrl: 'https://openrouter.ai/api/v1',
   extraHeaders: {
     'HTTP-Referer': 'http://localhost:3001',
-    'X-Title': 'API-Gateway',
+    'X-Title': 'AnimaRouter',
   },
 }));
 

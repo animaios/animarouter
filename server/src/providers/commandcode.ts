@@ -4,7 +4,7 @@ import type {
   ChatCompletionChunk,
   ChatToolCall,
   ChatToolDefinition,
-} from '@api-gateway/shared/types.js';
+} from '@animarouter/shared/types.js';
 import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
 import { contentToString } from '../lib/content.js';
 

@@ -19,10 +19,9 @@ interface RequestDoneEvent extends RequestEventBase { type: 'request.done'; mode
 interface RequestErrorEvent extends RequestEventBase { type: 'request.error'; error: string; }
 interface RequestAbortedEvent extends RequestEventBase { type: 'request.aborted'; }
 interface KeyExhaustedEvent extends RequestEventBase { type: 'routing.key_exhausted'; provider: string; keyId: number; model: string; reason: string; }
-interface KeyRetryEvent extends RequestEventBase { type: 'routing.key_retry'; provider: string; keyId: number; model: string; attempt: number; max: number; }
 interface ModelSwitchEvent extends RequestEventBase { type: 'routing.model_switch'; from: string; to: string; reason: string; }
 interface ProviderFastFailEvent extends RequestEventBase { type: 'routing.provider_fastfail'; provider: string; failedModelCount: number; }
-interface KeyEvictedEvent extends RequestEventBase { type: 'routing.key_evicted'; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required'; }
+interface KeyEvictedEvent extends RequestEventBase { type: 'routing.key_evicted'; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required' | 'auth_error'; }
 interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; }
 interface HeartbeatCycleSkippedEvent extends TimestampOnly { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; }
 interface HeartbeatAutoDisableEvent extends TimestampOnly {
@@ -38,7 +37,7 @@ interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text
 
 type LiveEvent =
   | RequestStartEvent | RequestDoneEvent | RequestErrorEvent | RequestAbortedEvent
-  | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent | ProviderFastFailEvent
+  | KeyExhaustedEvent | ModelSwitchEvent | ProviderFastFailEvent
   | KeyEvictedEvent
   | HeartbeatPingEvent | HeartbeatCycleSkippedEvent | HeartbeatAutoDisableEvent
   | StreamChunkEvent;
@@ -79,10 +78,6 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       const rId = evt.id.slice(0, 8);
       return { id: evt.id, ts, kind: 'info', text: `⚠ [${rId}] Key #${evt.keyId} exhausted on ${evt.provider}/${evt.model}: ${evt.reason.slice(0, 80)}` };
     }
-    case 'routing.key_retry': {
-      const rId = evt.id.slice(0, 8);
-      return { id: evt.id, ts, kind: 'info', text: `↻ [${rId}] Retrying ${evt.provider}/${evt.model} key#${evt.keyId} (${evt.attempt}/${evt.max})` };
-    }
     case 'routing.model_switch': {
       const rId = evt.id.slice(0, 8);
       return { id: evt.id, ts, kind: 'info', text: `→ [${rId}] Switching model: ${evt.from} → ${evt.to}` };
@@ -94,7 +89,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
     case 'routing.key_evicted': {
       const rId = evt.id.slice(0, 8);
       return { id: evt.id, ts, kind: 'warn',
-        text: `🚫 [${rId}] Key #${evt.keyId} evicted (${evt.reason === 'rate_limited' ? '429 rate limit' : '402 out of credits'}) on ${evt.provider}/${evt.model}` };
+        text: `🚫 [${rId}] Key #${evt.keyId} evicted (${evt.reason === 'rate_limited' ? '429 rate limit' : evt.reason === 'payment_required' ? '402 out of credits' : 'auth error'}) on ${evt.provider}/${evt.model}`
     }
     case 'heartbeat.ping':
       if (evt.success) {

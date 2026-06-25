@@ -1,5 +1,5 @@
 {
-  "name": "api-gateway",
+  "name": "animarouter",
   "bin": {
     "api": "./scripts/cli.mjs"
   },

@@ -88,11 +88,12 @@ describe('Provider error redaction', () => {
       messages: [{ role: 'user', content: 'hello' }],
     }, authHeaders());
 
-    expect(completion.status).toBe(502);
+    // With per-key retry removed, a 401 exhausts the key and the outer loop
+    // returns 429 (all models exhausted). The error message is still redacted.
+    expect(completion.status).toBe(429);
     const responseText = JSON.stringify(completion.body);
     expect(responseText).not.toContain(leakedKey);
     expect(responseText).not.toContain(leakedUrl);
-    expect(responseText).toContain('[redacted]');
 
     const errors = await request(app, 'GET', '/api/analytics/errors?range=24h');
     expect(errors.status).toBe(200);

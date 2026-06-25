@@ -121,7 +121,7 @@ export async function fetchSWERebenchLeaderboard(): Promise<SWERebenchEntry[]> {
       signal: controller.signal,
       headers: {
         'Accept': 'text/html',
-        'User-Agent': 'FreeLLMApi-Gateway/1.0 (SWE-rebench sync)',
+        'User-Agent': 'AnimaRouter/1.0 (SWE-rebench sync)',
       },
     });
 

@@ -69,7 +69,7 @@ Add the following entries to `REGISTRY` in `server/src/services/feature-settings
   type: 'string',
   default: 'off',
   options: ['off', 'on_model_switch'],
-  envVar: 'API_GATEWAY_CONTEXT_HANDOFF',
+  envVar: 'ANIMAROUTER_CONTEXT_HANDOFF',
   effect: 'live',
   group: 'Sessions',
 },
@@ -415,7 +415,7 @@ Update `computeRetryCooldownMs` and `getCooldownDurationForLimit` to call the ne
 import { getFeatureSetting } from './feature-settings.js';
 
 // Replace: export function getContextHandoffMode(): ContextHandoffMode {
-//   const raw = process.env.API_GATEWAY_CONTEXT_HANDOFF?.trim().toLowerCase();
+//   const raw = process.env.ANIMAROUTER_CONTEXT_HANDOFF?.trim().toLowerCase();
 //   return raw === 'on_model_switch' ? 'on_model_switch' : 'off';
 // }
 
@@ -597,7 +597,7 @@ Every file that currently reads one of the migrated constants MUST be updated:
 | `degradation.ts` | `envFloat('DEGRADE_...')` | env read | `getFeatureSetting('degrade_...')` |
 | `degradation.ts` | `envMinutesToMs('DEGRADE_...')` | env read | `getFeatureSetting('degrade_...')` × 60000 |
 | `degradation.ts` | `envInt('DEGRADE_...')` | env read | `getFeatureSetting('degrade_...')` |
-| `context-handoff.ts` | `process.env.API_GATEWAY_CONTEXT_HANDOFF` | env read | `getFeatureSetting('context_handoff_mode')` |
+| `context-handoff.ts` | `process.env.ANIMAROUTER_CONTEXT_HANDOFF` | env read | `getFeatureSetting('context_handoff_mode')` |
 | `context-handoff.ts` | `SESSION_TTL_MS` | const | `getSessionTtlMs()` |
 | `proxy.ts` | `STICKY_TTL_MS` | const | `getStickyTtlMs()` |
 | `router.ts` | `WINDOW_MS` | const | `getScoringWindowMs()` |

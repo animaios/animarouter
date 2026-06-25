@@ -1,4 +1,4 @@
-# API-Gateway (freellmapi)
+# AnimaRouter
 
 Multi-provider LLM proxy with an Express backend, React dashboard, and SQLite storage. Users add API keys for providers (OpenAI, Google, Anthropic, Cerebras, Cohere, Cloudflare), the server routes requests across keys with automatic failover, rate-limit awareness, and weighted scoring.
 

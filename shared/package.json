@@ -1,5 +1,5 @@
 {
-  "name": "@api-gateway/shared",
+  "name": "@animarouter/shared",
   "version": "0.1.0",
   "private": true,
   "main": "./types.ts",

@@ -14,7 +14,7 @@ describe('CLIENT_DIST override', () => {
   beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-gateway-client-dist-'));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'animarouter-client-dist-'));
     fs.writeFileSync(path.join(tmpDir, 'index.html'), '<!doctype html><title>custom-dist</title>');
   });
 

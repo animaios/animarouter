@@ -17,11 +17,11 @@ const messages = [userMsg, assistantMsg];
 
 beforeEach(() => {
   _clearStoreForTesting();
-  delete process.env.API_GATEWAY_CONTEXT_HANDOFF;
+  delete process.env.ANIMAROUTER_CONTEXT_HANDOFF;
 });
 
 afterEach(() => {
-  delete process.env.API_GATEWAY_CONTEXT_HANDOFF;
+  delete process.env.ANIMAROUTER_CONTEXT_HANDOFF;
 });
 
 describe('getContextHandoffMode', () => {
@@ -30,12 +30,12 @@ describe('getContextHandoffMode', () => {
   });
 
   it('reads on_model_switch', () => {
-    process.env.API_GATEWAY_CONTEXT_HANDOFF = 'on_model_switch';
+    process.env.ANIMAROUTER_CONTEXT_HANDOFF = 'on_model_switch';
     expect(getContextHandoffMode()).toBe('on_model_switch');
   });
 
   it('treats unknown value as off', () => {
-    process.env.API_GATEWAY_CONTEXT_HANDOFF = 'always';
+    process.env.ANIMAROUTER_CONTEXT_HANDOFF = 'always';
     expect(getContextHandoffMode()).toBe('off');
   });
 });
@@ -93,7 +93,7 @@ describe('maybeInjectContextHandoff — on_model_switch', () => {
     expect(result.injected).toBe(true);
     const injected = result.messages.find(m => m.role === 'system');
     expect(injected).toBeDefined();
-    expect(injected!.content).toContain('API-Gateway context handoff:');
+    expect(injected!.content).toContain('AnimaRouter context handoff:');
     expect(injected!.content).toContain('groq:llama-3');
     expect(injected!.content).toContain('google:gemini-flash');
   });
@@ -144,7 +144,7 @@ describe('maybeInjectContextHandoff — on_model_switch', () => {
     recordIncomingMessages('sess1', messages);
     recordSuccessfulModel({ sessionKey: 'sess1', modelKey: 'groq:llama-3' });
 
-    const existingHandoff = msg('system', 'API-Gateway context handoff: prior injection');
+    const existingHandoff = msg('system', 'AnimaRouter context handoff: prior injection');
     const result = maybeInjectContextHandoff({
       mode,
       sessionKey: 'sess1',
@@ -160,7 +160,7 @@ describe('maybeInjectContextHandoff — on_model_switch', () => {
 
     const arrayHandoff = {
       role: 'system',
-      content: [{ type: 'text', text: 'API-Gateway context handoff: prior injection' }],
+      content: [{ type: 'text', text: 'AnimaRouter context handoff: prior injection' }],
     } as any;
     const result = maybeInjectContextHandoff({
       mode,
@@ -187,7 +187,7 @@ describe('maybeInjectContextHandoff — on_model_switch', () => {
     expect(result.injected).toBe(true);
     expect(result.messages[0]).toBe(sysMsg);
     expect(result.messages[1].role).toBe('system');
-    expect(result.messages[1].content).toContain('API-Gateway context handoff:');
+    expect(result.messages[1].content).toContain('AnimaRouter context handoff:');
   });
 
   it('isolates sessions by sessionKey', () => {

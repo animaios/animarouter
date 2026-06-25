@@ -158,7 +158,7 @@ describe('Rate Limiter', () => {
   describe('persistent state', () => {
     it('preserves per-key usage and cooldowns after the limiter module reloads', async () => {
       process.env.ENCRYPTION_KEY = '0'.repeat(64);
-      const dbPath = `/tmp/api-gateway-ratelimit-${Date.now()}-${Math.random()}.db`;
+      const dbPath = `/tmp/animarouter-ratelimit-${Date.now()}-${Math.random()}.db`;
       const keyId = 4242;
       let db: { close: () => void } | undefined;
 

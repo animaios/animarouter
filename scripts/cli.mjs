@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const INSTANCES_FILE = join(ROOT, '.api-gateway.instances');
+const INSTANCES_FILE = join(ROOT, '.animarouter.instances');
 const LOG_FILE = join(ROOT, 'server.log');
 
 // Log rotation: cap the active log at 50 MiB; keep at most 3 archived copies.
@@ -47,7 +47,7 @@ function rotateLogIfNeeded() {
 
 function usage() {
   console.log(`
-API-Gateway CLI
+AnimaRouter CLI
 
   api start [--port <number>]   Start the server (uses .env PORT by default)
   api stop [--port <number>]    Stop a specific instance, or the only one
@@ -99,7 +99,7 @@ function cleanInstances() {
 
 function build() {
   return new Promise((resolve, reject) => {
-    console.log('Building API-Gateway…');
+    console.log('Building AnimaRouter…');
     const child = spawn('npm', ['run', 'build'], { cwd: ROOT, stdio: 'inherit' });
     child.on('close', (code) => {
       if (code === 0) resolve();

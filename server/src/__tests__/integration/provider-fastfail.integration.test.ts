@@ -107,13 +107,8 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
   });
 
   it('2 distinct models with 5xx on same provider triggers fast-fail — routes to fallback provider', async () => {
-    // PER_KEY_RETRIES=3: model-a1 gets 3 attempts (all 503), model-a2 gets 3 attempts (all 503)
-    // Fast-fail triggers after both alpha models fail, then beta succeeds
+    // model-a1 gets 1 attempt (503), model-a2 gets 1 attempt (503), then beta succeeds
     chatCompletion
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockResolvedValueOnce({
@@ -137,10 +132,8 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
   });
 
   it('single model 5xx does NOT trigger fast-fail (below threshold)', async () => {
-    // model-a1 gets 3 retries (all 503), then model-a2 succeeds
+    // model-a1 fails once (503), then model-a2 succeeds
     chatCompletion
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockResolvedValueOnce({
         choices: [{ message: { role: 'assistant', content: 'alpha a2 answer' } }],
@@ -160,14 +153,9 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
   });
 
   it('429 (minor) does NOT count toward fast-fail threshold — only major (5xx) counts', async () => {
-    // model-a1 gets 3 retries of 429 (minor), model-a2 gets 3 retries of 503 (major)
-    // Only 1 distinct model with major error → threshold not met
+    // model-a1 gets 1 attempt (429 minor), model-a2 gets 1 attempt (503 major)
     chatCompletion
       .mockRejectedValueOnce(new Error('alpha API error 429: Rate limited'))
-      .mockRejectedValueOnce(new Error('alpha API error 429: Rate limited'))
-      .mockRejectedValueOnce(new Error('alpha API error 429: Rate limited'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockRejectedValueOnce(new Error('alpha API error 503: Service Unavailable'))
       .mockResolvedValueOnce({
         choices: [{ message: { role: 'assistant', content: 'beta answer' } }],
@@ -192,10 +180,6 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
     chatCompletion
       .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockResolvedValueOnce({
         choices: [{ message: { role: 'assistant', content: 'beta ok' } }],
         usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
@@ -214,10 +198,6 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
 
   it('key_exhausted events are emitted before fast-fail event', async () => {
     chatCompletion
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockResolvedValueOnce({
@@ -247,10 +227,6 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
     chatCompletion
       .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
-      .mockRejectedValueOnce(new Error('alpha API error 503: down'))
       .mockResolvedValueOnce({
         choices: [{ message: { role: 'assistant', content: 'beta answer' } }],
         usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
@@ -263,6 +239,6 @@ describe('Provider-Outage Fast-Fail — Integration', () => {
     expect(status).toBe(200);
     expect(body.choices[0].message.content).toBe('beta answer');
     // All attempts on alpha should have failed, only beta should succeed
-    expect(chatCompletion).toHaveBeenCalledTimes(7); // 6 failures + 1 success
+    expect(chatCompletion).toHaveBeenCalledTimes(3); // 2 failures + 1 success
   });
 });
