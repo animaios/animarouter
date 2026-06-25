@@ -116,7 +116,7 @@ To:
 
 ```typescript
 // ── New: concurrent batches ──
-const { concurrency } = readConfig();
+const { concurrency, staggerMs, pingTimeoutMs } = readConfig();
 for (let i = 0; i < pingTasks.length; i += concurrency) {
   const batch = pingTasks.slice(i, i + concurrency);
   await Promise.allSettled(batch.map(task =>
@@ -125,6 +125,9 @@ for (let i = 0; i < pingTasks.length; i += concurrency) {
         console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, err);
       })
   ));
+  if (concurrency === 1 && staggerMs > 0 && i + concurrency < pingTasks.length) {
+    await sleep(staggerMs);
+  }
 }
 ```
 

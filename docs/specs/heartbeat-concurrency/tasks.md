@@ -146,7 +146,7 @@ Replace with:
 
 ```typescript
     // ── Ping each key (concurrent batches) ──
-    const { concurrency } = readConfig();
+    const { concurrency, staggerMs, pingTimeoutMs } = readConfig();
     for (let i = 0; i < pingTasks.length; i += concurrency) {
       const batch = pingTasks.slice(i, i + concurrency);
       await Promise.allSettled(batch.map(task =>
@@ -155,8 +155,6 @@ Replace with:
             console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, err);
           })
       ));
-      // Stagger is only applied when concurrency=1 (sequential mode)
-      // to preserve backward compatibility for users who customized staggerMs.
       if (concurrency === 1 && staggerMs > 0 && i + concurrency < pingTasks.length) {
         await sleep(staggerMs);
       }
