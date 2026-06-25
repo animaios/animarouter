@@ -368,4 +368,148 @@ describe('Provider Health Heartbeat', () => {
       expect(publishedEvents.length).toBe(eventsBefore);
     });
   });
+
+  // ── Auto-Disable ────────────────────────────────────────────────
+
+  describe('Auto-disable', () => {
+    it('disables model when unhealthy key percentage >= threshold', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('autoprov', 'auto-model', 'Auto Model', 1, 1, 1)").run();
+      const modelId = (db.prepare("SELECT id FROM models WHERE platform = 'autoprov' AND model_id = 'auto-model'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelId);
+
+      // 2 keys for the platform
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('autoprov', 'Key 1', 'enc1', 'iv1', 'tag1', 'healthy', 1)").run();
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('autoprov', 'Key 2', 'enc2', 'iv2', 'tag2', 'healthy', 1)").run();
+
+      // Both pings fail → 100% unhealthy ≥ 50% threshold → auto-disable
+      chatCompletion.mockRejectedValue(new Error('503 Service Unavailable'));
+
+      // Set threshold to 50 (default)
+      setSetting('heartbeat_auto_disable_pct', '50');
+
+      recordActivity();
+      startHeartbeat();
+
+      // Wait for warmup cycle to complete
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Model should be disabled
+      const model = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(model.enabled).toBe(0);
+      expect(model.auto_disabled_at).not.toBeNull();
+
+      // Event should have been published
+      const autoDisableEvents = publishedEvents.filter(e => e.type === 'heartbeat.auto_disable');
+      expect(autoDisableEvents.length).toBeGreaterThanOrEqual(1);
+      expect(autoDisableEvents[0].provider).toBe('autoprov');
+      expect(autoDisableEvents[0].model).toBe('auto-model');
+      expect(autoDisableEvents[0].totalKeys).toBe(2);
+      expect(autoDisableEvents[0].unhealthyKeys).toBe(2);
+      expect(autoDisableEvents[0].threshold).toBe(50);
+    });
+
+    it('does NOT disable model when unhealthy percentage < threshold', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('belowprov', 'below-model', 'Below Model', 1, 1, 1)").run();
+      const modelId = (db.prepare("SELECT id FROM models WHERE platform = 'belowprov' AND model_id = 'below-model'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelId);
+
+      // 2 keys — one will succeed, one will fail (50% unhealthy but threshold is 51%)
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('belowprov', 'Key 1', 'enc1', 'iv1', 'tag1', 'healthy', 1)").run();
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('belowprov', 'Key 2', 'enc2', 'iv2', 'tag2', 'healthy', 1)").run();
+
+      // First ping succeeds, second fails
+      chatCompletion
+        .mockResolvedValueOnce({
+          choices: [{ message: { role: 'assistant', content: 'pong' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        })
+        .mockRejectedValueOnce(new Error('503 Service Unavailable'));
+
+      // Set threshold to 51% so 50% unhealthy is below threshold
+      setSetting('heartbeat_auto_disable_pct', '51');
+
+      recordActivity();
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Model should still be enabled
+      const model = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(model.enabled).toBe(1);
+
+      // No auto_disable event
+      const autoDisableEvents = publishedEvents.filter(e => e.type === 'heartbeat.auto_disable');
+      expect(autoDisableEvents.length).toBe(0);
+    });
+
+    it('is idempotent: no repeated DB write or event for already-disabled model', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('idemprov', 'idem-model', 'Idem Model', 1, 1, 1)").run();
+      const modelId = (db.prepare("SELECT id FROM models WHERE platform = 'idemprov' AND model_id = 'idem-model'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelId);
+
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('idemprov', 'Key 1', 'enc1', 'iv1', 'tag1', 'healthy', 1)").run();
+
+      chatCompletion.mockRejectedValue(new Error('503 Service Unavailable'));
+      setSetting('heartbeat_auto_disable_pct', '50');
+
+      recordActivity();
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // First cycle: model gets disabled
+      const afterFirst = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(afterFirst.enabled).toBe(0);
+      const firstAutoDisabledAt = afterFirst.auto_disabled_at;
+      expect(firstAutoDisabledAt).not.toBeNull();
+
+      const firstEventCount = publishedEvents.filter(e => e.type === 'heartbeat.auto_disable').length;
+
+      // Second cycle: model is already disabled — no new DB write, no new event
+      // Advance to trigger another heartbeat cycle
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
+
+      const afterSecond = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(afterSecond.enabled).toBe(0);
+      // auto_disabled_at should NOT change (no new write)
+      expect(afterSecond.auto_disabled_at).toBe(firstAutoDisabledAt);
+
+      // No new auto_disable event on the second cycle
+      const secondEventCount = publishedEvents.filter(e => e.type === 'heartbeat.auto_disable').length;
+      expect(secondEventCount).toBe(firstEventCount);
+    });
+
+    it('clears auto_disabled_at when model is manually re-enabled', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('reenprov', 'reen-model', 'Reen Model', 1, 1, 1)").run();
+      const modelId = (db.prepare("SELECT id FROM models WHERE platform = 'reenprov' AND model_id = 'reen-model'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelId);
+
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('reenprov', 'Key 1', 'enc1', 'iv1', 'tag1', 'healthy', 1)").run();
+
+      chatCompletion.mockRejectedValue(new Error('503 Service Unavailable'));
+      setSetting('heartbeat_auto_disable_pct', '50');
+
+      recordActivity();
+      startHeartbeat();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Model auto-disabled
+      const afterDisable = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(afterDisable.enabled).toBe(0);
+      expect(afterDisable.auto_disabled_at).not.toBeNull();
+
+      // Manual re-enable via direct DB update (simulating the custom-models PATCH endpoint)
+      db.prepare("UPDATE models SET enabled = 1, auto_disabled_at = NULL WHERE id = ?").run(modelId);
+
+      const afterReEnable = db.prepare('SELECT enabled, auto_disabled_at FROM models WHERE id = ?').get(modelId) as any;
+      expect(afterReEnable.enabled).toBe(1);
+      expect(afterReEnable.auto_disabled_at).toBeNull();
+    });
+  });
 });

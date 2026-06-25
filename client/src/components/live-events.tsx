@@ -25,13 +25,22 @@ interface ProviderFastFailEvent extends RequestEventBase { type: 'routing.provid
 interface KeyEvictedEvent extends RequestEventBase { type: 'routing.key_evicted'; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required'; }
 interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; }
 interface HeartbeatCycleSkippedEvent extends TimestampOnly { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; }
+interface HeartbeatAutoDisableEvent extends TimestampOnly {
+  type: 'heartbeat.auto_disable';
+  provider: string;
+  model: string;
+  modelDbId: number;
+  totalKeys: number;
+  unhealthyKeys: number;
+  threshold: number;
+}
 interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text: string; }
 
 type LiveEvent =
   | RequestStartEvent | RequestDoneEvent | RequestErrorEvent | RequestAbortedEvent
   | KeyExhaustedEvent | KeyRetryEvent | ModelSwitchEvent | ProviderFastFailEvent
   | KeyEvictedEvent
-  | HeartbeatPingEvent | HeartbeatCycleSkippedEvent
+  | HeartbeatPingEvent | HeartbeatCycleSkippedEvent | HeartbeatAutoDisableEvent
   | StreamChunkEvent;
 
 /** Exhaustive-check helper: assigning a LiveEvent to this type in a switch
@@ -94,6 +103,9 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
     case 'heartbeat.cycle_skipped':
       return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] Cycle skipped: ${evt.reason} (idle ${Math.round(evt.lastActivityAgeMs / 1000)}s)` };
+    case 'heartbeat.auto_disable':
+      return { id: 'hb', ts, kind: 'warn',
+        text: `\u{1F916} Auto-disabled ${evt.provider}/${evt.model}: ${evt.unhealthyKeys}/${evt.totalKeys} keys unhealthy (threshold ${evt.threshold}%)` };
     case 'stream.chunk':
       return null; // Stream chunks are not rendered in the log feed
     default: {

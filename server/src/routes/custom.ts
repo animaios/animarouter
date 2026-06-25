@@ -675,7 +675,13 @@ customRouter.patch('/api/custom-models/:id', (req: Request, res: Response) => {
   if (d.tpmLimit !== undefined) { updates.push('tpm_limit = ?'); values.push(d.tpmLimit); }
   if (d.tpdLimit !== undefined) { updates.push('tpd_limit = ?'); values.push(d.tpdLimit); }
   if (d.maxOutputTokens !== undefined) { updates.push('max_output_tokens = ?'); values.push(d.maxOutputTokens); }
-  if (d.enabled !== undefined) { updates.push('enabled = ?'); values.push(d.enabled ? 1 : 0); }
+  if (d.enabled !== undefined) {
+    updates.push('enabled = ?');
+    values.push(d.enabled ? 1 : 0);
+    // Clear auto_disabled_at on manual enable; set to NULL on manual disable too
+    updates.push('auto_disabled_at = ?');
+    values.push(null);
+  }
 
   if (updates.length === 0) {
     res.json({ success: true, id });

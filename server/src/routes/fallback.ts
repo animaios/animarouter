@@ -118,14 +118,15 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
 fallbackRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
+    SELECT fc.model_db_id, fc.priority, fc.enabled as fc_enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit,
-           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools
+           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
+           m.auto_disabled_at, m.enabled as model_enabled
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
-    WHERE m.enabled = 1
+    WHERE m.enabled = 1 OR m.auto_disabled_at IS NOT NULL
     ORDER BY fc.priority ASC
   `).all() as any[];
 
@@ -149,7 +150,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       effectivePriority: r.priority + (penalty?.penalty ?? 0),
       penalty: penalty?.penalty ?? 0,
       rateLimitHits: penalty?.count ?? 0,
-      enabled: r.enabled === 1,
+      enabled: r.model_enabled === 1 && r.fc_enabled === 1,
       platform: r.platform,
       modelId: r.model_id,
       displayName: r.display_name,
@@ -165,6 +166,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       supportsVision: r.supports_vision === 1,
       supportsTools: r.supports_tools === 1,
       keyCount: keyCountMap.get(r.platform) ?? 0,
+      autoDisabledAt: r.auto_disabled_at ?? null,
     };
   }));
 });
@@ -188,9 +190,14 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
     UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
   `);
 
+  const updateModelEnabled = db.prepare(`
+    UPDATE models SET enabled = ?, auto_disabled_at = CASE WHEN ? = 1 THEN NULL ELSE auto_disabled_at END WHERE id = ?
+  `);
+
   const updateAll = db.transaction(() => {
     for (const entry of parsed.data) {
       update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
+      updateModelEnabled.run(entry.enabled ? 1 : 0, entry.enabled ? 1 : 0, entry.modelDbId);
     }
   });
   updateAll();

@@ -17,7 +17,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { AlertTriangle, ChevronDown, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 
 import { Button } from '@/components/ui/button'
@@ -52,6 +52,7 @@ interface FallbackEntry {
   supportsVision: boolean
   supportsTools: boolean
   keyCount: number
+  autoDisabledAt?: string | null
   // Real performance metrics
   actualTokPerSec?: number
   actualAvgTtfbMs?: number | null
@@ -62,6 +63,15 @@ interface FallbackEntry {
 type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
 
 type RoutingWeights = { reliability: number; speed: number; intelligence: number; latency: number }
+type ThresholdAxis = 'intelligence' | 'fastness' | 'reliability'
+type RoutingThresholds = { intelligence: number; fastness: number; reliability: number }
+
+interface EligibilityResult {
+  eligible: boolean
+  filteredBy: ThresholdAxis | null
+  value: number | null
+  threshold: number | null
+}
 
 interface RoutingScore {
   modelDbId: number
@@ -72,12 +82,15 @@ interface RoutingScore {
   boost: number
   score: number
   totalRequests: number
+  eligibility: EligibilityResult
 }
 
 interface RoutingData {
   strategy: RoutingStrategy
   weights: RoutingWeights | null
   customWeights: RoutingWeights
+  thresholds: RoutingThresholds
+  thresholdFallbackActive: boolean
   scores: (RoutingScore & { platform: string; modelId: string; displayName: string; enabled: boolean })[]
 }
 
@@ -100,6 +113,26 @@ const WEIGHT_AXES: { key: keyof RoutingWeights; label: string; color: string }[]
   { key: 'intelligence', label: 'Intelligence', color: '#a855f7' },
   { key: 'latency', label: 'Latency', color: '#f59e0b' },
 ]
+
+const THRESHOLD_AXIS_LABELS: Record<ThresholdAxis, string> = {
+  intelligence: 'Intelligence',
+  fastness: 'Fastness',
+  reliability: 'Reliability',
+}
+
+function eligibilityChipText(eligibility?: EligibilityResult): string | null {
+  if (
+    !eligibility ||
+    eligibility.eligible ||
+    eligibility.filteredBy === null ||
+    eligibility.value === null ||
+    eligibility.threshold === null
+  ) {
+    return null
+  }
+
+  return `${THRESHOLD_AXIS_LABELS[eligibility.filteredBy]} ${Math.round(eligibility.value * 100)} < ${Math.round(eligibility.threshold * 100)}`
+}
 
 // Slider popover for the 'custom' strategy. Sliders are independent (0-100)
 // and the server renormalizes any vector, so we just show each axis's
@@ -346,6 +379,7 @@ function RowContent({
   onToggle,
   onEdit,
   onBoost,
+  showEligibilityChip = true,
 }: {
   row: Row
   rank: number
@@ -354,7 +388,10 @@ function RowContent({
   onToggle: (modelDbId: number, enabled: boolean) => void
   onEdit: (row: Row) => void
   onBoost: (modelDbId: number, direction: 'up' | 'down') => void
+  showEligibilityChip?: boolean
 }) {
+  const eligibilityChip = showEligibilityChip ? eligibilityChipText(row.eligibility) : null
+
   return (
     <>
       <td className="py-2 pl-3 pr-1 w-6 align-middle">
@@ -392,6 +429,19 @@ function RowContent({
           )}
           {row.totalRequests !== undefined && row.totalRequests > 0 && (
             <span className="text-[10px] text-muted-foreground/60 tabular-nums">{row.totalRequests} obs</span>
+          )}
+          {eligibilityChip && (
+            <span className="text-[10px] rounded-full px-1.5 py-0.5 border border-muted-foreground/30 text-muted-foreground bg-muted/30 whitespace-nowrap">
+              {eligibilityChip}
+            </span>
+          )}
+          {row.autoDisabledAt && (
+            <span
+              title={`Auto-disabled at ${row.autoDisabledAt}`}
+              className="text-[10px] rounded-full px-1.5 py-0.5 bg-amber-600/15 text-amber-700 dark:bg-amber-400/15 dark:text-amber-400"
+            >
+              🤖 auto
+            </span>
           )}
         </div>
         <div className="text-[11px] text-muted-foreground/70 tabular-nums mt-0.5">
@@ -479,7 +529,7 @@ function ThumbsButton({ direction, active, onClick }: {
   )
 }
 
-function SortableRow({ row, rank, onToggle, onEdit, onBoost }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void }) {
+function SortableRow({ row, rank, onToggle, onEdit, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.modelDbId })
   const handle = (
     <button
@@ -501,7 +551,7 @@ function SortableRow({ row, rank, onToggle, onEdit, onBoost }: { row: Row; rank:
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`border-b last:border-0 bg-card group ${isDragging ? 'opacity-50' : ''} ${row.enabled ? '' : 'opacity-50'}`}
     >
-      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} onBoost={onBoost} />
+      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} onBoost={onBoost} showEligibilityChip={showEligibilityChip} />
     </tr>
   )
 }
@@ -612,6 +662,14 @@ export default function FallbackPage() {
     : sortByRealSpeed
       ? [...rows].sort((a, b) => (b.actualTokPerSec ?? 0) - (a.actualTokPerSec ?? 0))
       : [...rows].sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+  const isFailOpen = routing?.thresholdFallbackActive ?? false
+  const activeRows = isFailOpen
+    ? ordered
+    : ordered.filter(row => row.eligibility?.eligible !== false)
+  const filteredRows = isFailOpen
+    ? []
+    : ordered.filter(row => row.eligibility?.eligible === false)
+  const strategyLabel = STRATEGIES.find(s => s.key === strategy)?.label ?? strategy
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -626,20 +684,18 @@ export default function FallbackPage() {
     // interval on drag end.
     const { active, over } = event
     if (!over || active.id === over.id) return
-    // SortableContext only ever sees the filtered `ordered` rows; drag-end
-    // re-emits a merged fallback list with the SAME permutation the user
-    // acted on, but applied to the unfiltered configured rows. Anything
-    // currently hidden by the search keeps its current priority, so the
-    // hidden block doesn't get reshuffled by a UI-level reorder.
-    const oldIndex = ordered.findIndex(e => e.modelDbId === active.id)
-    const newIndex = ordered.findIndex(e => e.modelDbId === over.id)
+    // SortableContext only sees active rows; threshold-filtered rows are
+    // stitched back underneath with their current relative order.
+    const oldIndex = activeRows.findIndex(e => e.modelDbId === active.id)
+    const newIndex = activeRows.findIndex(e => e.modelDbId === over.id)
     if (oldIndex < 0 || newIndex < 0) return
-    const reorderedVisible = arrayMove(ordered, oldIndex, newIndex)
+    const reorderedActive = arrayMove(activeRows, oldIndex, newIndex)
     const unconfigured = allEntries.filter(e => e.keyCount === 0)
     const merged: FallbackEntry[] = [
-      ...reorderedVisible.map((e, i) => ({ ...(e as FallbackEntry), priority: i + 1 })),
-      ...unconfigured.map((e, i) => ({ ...e, priority: reorderedVisible.length + i + 1 })),
-    ]
+      ...reorderedActive,
+      ...filteredRows,
+      ...unconfigured,
+    ].map((e, i) => ({ ...(e as FallbackEntry), priority: i + 1 }))
     setLocalEntries(merged)
   }
 
@@ -869,63 +925,92 @@ export default function FallbackPage() {
               <>
                 {/* DndContext must wrap OUTSIDE the table: it renders hidden a11y
                     live-region <div>s, which are invalid as direct <table> children. */}
-                {isManual && query === '' ? (
-                  <DndContext
-                    sensors={sensors}
-                    collisionDetection={closestCenter}
-                    onDragEnd={handleDragEnd}
-                    autoScroll={{
-                      // Smooth, decisive edge-scroll. dnd-kit watches the dragged
-                      // item's rect against the scroll container's rect and
-                      // ramps a setInterval-driven scrollBy. The drag handle
-                      // travels with the pointer, so this is equivalent to
-                      // "pointer near the edge of the viewport" but uses the
-                      // engine's optimised path.
-                      // - threshold.y = 12% of viewport height: autoscroll
-                      //   only fires when the dragged row is well inside the
-                      //   top/bottom edge band (~85 px on a 700-px viewport).
-                      //   Lower than the 20% default to avoid scrolling when
-                      //   the user is just resting the pointer near the edge.
-                      // - acceleration = 30 px per interval at the edge.
-                      //   With interval=8, peak scroll speed = 30 / 0.008 s
-                      //   = 3750 px/s, smooth on a 60 Hz display because
-                      //   each call is small (4..30 px).
-                      // - interval = 8 ms ≈ 125 Hz, clamped by the browser
-                      //   to 60 Hz on a 60 Hz display. The ramp is what
-                      //   reads as "smooth" — dnd-kit computes
-                      //   `acceleration * (distance / threshold)` per tick.
-                      enabled: true,
-                      acceleration: 30,
-                      interval: 8,
-                      threshold: { x: 0.05, y: 0.12 },
-                    }}
-                  >
+                {activeRows.length > 0 && (
+                  isManual && query === '' ? (
+                    <DndContext
+                      sensors={sensors}
+                      collisionDetection={closestCenter}
+                      onDragEnd={handleDragEnd}
+                      autoScroll={{
+                        // Smooth, decisive edge-scroll. dnd-kit watches the dragged
+                        // item's rect against the scroll container's rect and
+                        // ramps a setInterval-driven scrollBy. The drag handle
+                        // travels with the pointer, so this is equivalent to
+                        // "pointer near the edge of the viewport" but uses the
+                        // engine's optimised path.
+                        // - threshold.y = 12% of viewport height: autoscroll
+                        //   only fires when the dragged row is well inside the
+                        //   top/bottom edge band (~85 px on a 700-px viewport).
+                        //   Lower than the 20% default to avoid scrolling when
+                        //   the user is just resting the pointer near the edge.
+                        // - acceleration = 30 px per interval at the edge.
+                        //   With interval=8, peak scroll speed = 30 / 0.008 s
+                        //   = 3750 px/s, smooth on a 60 Hz display because
+                        //   each call is small (4..30 px).
+                        // - interval = 8 ms ≈ 125 Hz, clamped by the browser
+                        //   to 60 Hz on a 60 Hz display. The ramp is what
+                        //   reads as "smooth" — dnd-kit computes
+                        //   `acceleration * (distance / threshold)` per tick.
+                        enabled: true,
+                        acceleration: 30,
+                        interval: 8,
+                        threshold: { x: 0.05, y: 0.12 },
+                      }}
+                    >
+                      <div className="rounded-2xl border overflow-x-auto">
+                        <table className="w-full text-sm">
+                          {tableHead}
+                          <SortableContext items={activeRows.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
+                            <tbody>
+                              {activeRows.map((row, i) => (
+                                <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                              ))}
+                            </tbody>
+                          </SortableContext>
+                        </table>
+                      </div>
+                    </DndContext>
+                  ) : (
                     <div className="rounded-2xl border overflow-x-auto">
                       <table className="w-full text-sm">
                         {tableHead}
-                        <SortableContext items={ordered.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
-                          <tbody>
-                            {ordered.map((row, i) => (
-                              <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
-                            ))}
-                          </tbody>
-                        </SortableContext>
+                        <tbody>
+                          {activeRows.map((row, i) => (
+                            <tr key={row.modelDbId} className={`border-b last:border-0 group ${row.enabled ? '' : 'opacity-50'}`}>
+                              <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                            </tr>
+                          ))}
+                        </tbody>
                       </table>
                     </div>
-                  </DndContext>
-                ) : (
-                  <div className="rounded-2xl border overflow-x-auto">
-                    <table className="w-full text-sm">
-                      {tableHead}
-                      <tbody>
-                        {ordered.map((row, i) => (
-                          <tr key={row.modelDbId} className={`border-b last:border-0 group ${row.enabled ? '' : 'opacity-50'}`}>
-                            <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  )
+                )}
+
+                {isFailOpen && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 px-4 py-2 rounded-lg text-xs flex items-center gap-2">
+                    <AlertTriangle className="size-4 shrink-0" />
+                    <span>Threshold too strict. Filtering disabled to prevent routing failure.</span>
                   </div>
+                )}
+
+                {filteredRows.length > 0 && (
+                  <details className="group border rounded-xl overflow-hidden" open={query !== ''}>
+                    <summary className="px-4 py-2.5 text-xs text-muted-foreground cursor-pointer bg-muted/30 hover:bg-muted/50 transition-colors list-none flex items-center justify-between">
+                      <span>Filtered by {strategyLabel} threshold ({filteredRows.length})</span>
+                      <ChevronDown className="size-3.5 group-open:rotate-180 transition-transform" />
+                    </summary>
+                    <div className="border-t overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <tbody className="bg-card/50">
+                          {filteredRows.map((row) => (
+                            <tr key={row.modelDbId} className={`border-b last:border-0 group opacity-[0.55] ${row.enabled ? '' : 'opacity-50'}`}>
+                              <RowContent row={row} rank={row.priority} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
                 )}
 
                 {/* Floating action bar — fixed to the viewport so it's always visible,
