@@ -36,6 +36,7 @@ import { addToast } from '@/lib/toast'
 import type { Model } from '../../../shared/types'
 
 interface FallbackEntry {
+  isGroup?: boolean
   modelDbId: number
   priority: number
   effectivePriority: number
@@ -58,6 +59,14 @@ interface FallbackEntry {
   groupId?: number | null
   groupKey?: string | null
   groupDisplayName?: string | null
+  providerCount?: number
+  providers?: Array<{
+    modelDbId: number
+    platform: string
+    modelId: string
+    displayName: string
+    keyCount: number
+  }>
   keyCount: number
   boost: number
   // Real performance metrics
@@ -99,6 +108,18 @@ interface RoutingData {
   thresholds: RoutingThresholds
   thresholdFallbackActive: boolean
   scores: (RoutingScore & { platform: string; modelId: string; displayName: string; enabled: boolean })[]
+  groupedScores?: Array<{
+    groupKey: string
+    groupId: number
+    groupScore: number
+    providers: Array<{
+      modelDbId: number
+      platform: string
+      modelId: string
+      subScore: number
+      degradation: { penalty: number; tier: string }
+    }>
+  }>
 }
 
 type BoostResponse = { modelDbId: number; boost: number }
@@ -115,6 +136,10 @@ const UNGROUPED_GROUP_KEY = '__ungrouped__'
 
 // A merged row: fallback-chain metadata + live bandit scores.
 type Row = FallbackEntry & Partial<RoutingScore>
+
+function rowKey(row: Pick<Row, 'isGroup' | 'groupId' | 'modelDbId'>): string | number {
+  return row.isGroup && row.groupId != null ? `group-${row.groupId}` : row.modelDbId
+}
 
 const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
   { key: 'priority', label: 'Manual', blurb: 'Route in the exact order you set below. Drag the handles to reorder. No scoring; the chain is followed top-to-bottom.' },
@@ -468,6 +493,11 @@ function RowContent({
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-sm">{row.displayName}</span>
           <span className="text-xs text-muted-foreground">{row.platform}</span>
+          {row.isGroup && (
+            <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-foreground/10 text-foreground">
+              {row.providerCount ?? row.providers?.length ?? 0} provider{(row.providerCount ?? row.providers?.length ?? 0) === 1 ? '' : 's'}
+            </span>
+          )}
           {row.groupKey && (
             <span
               title={row.groupKey}
@@ -512,10 +542,14 @@ function RowContent({
 
         </div>
         <div className="text-[11px] text-muted-foreground/70 tabular-nums mt-0.5">
-          {row.rpmLimit ? `${row.rpmLimit} rpm` : ''}
-          {row.rpmLimit && row.rpdLimit ? ' · ' : ''}
-          {row.rpdLimit ? `${row.rpdLimit} rpd` : ''}
-          {!row.rpmLimit && !row.rpdLimit ? '—' : ''}
+          {row.isGroup
+            ? row.providers?.map(provider => provider.platform).join(' · ') || '—'
+            : <>
+                {row.rpmLimit ? `${row.rpmLimit} rpm` : ''}
+                {row.rpmLimit && row.rpdLimit ? ' · ' : ''}
+                {row.rpdLimit ? `${row.rpdLimit} rpd` : ''}
+                {!row.rpmLimit && !row.rpdLimit ? '—' : ''}
+              </>}
         </div>
       </td>
       <td className="py-2 pr-3 align-middle"><AxisBar value={row.reliability} color="#22c55e" /></td>
@@ -558,24 +592,28 @@ function RowContent({
       </td>
       <td className="py-2 pr-3 align-middle text-right">
         <div className="flex items-center gap-1 justify-end">
-          <ThumbsButton direction="up" active={(row.boost ?? 1) > 1.01} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'up') }} />
-          <ThumbsButton direction="down" active={(row.boost ?? 1) < 0.99} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'down') }} />
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onEdit(row); }}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-            title="Edit model"
-          >
-            <Pencil className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onArchive(row); }}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors"
-            title="Archive model"
-          >
-            <Archive className="size-3.5" />
-          </button>
+          {!row.isGroup && (
+            <>
+              <ThumbsButton direction="up" active={(row.boost ?? 1) > 1.01} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'up') }} />
+              <ThumbsButton direction="down" active={(row.boost ?? 1) < 0.99} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'down') }} />
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEdit(row); }}
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                title="Edit model"
+              >
+                <Pencil className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onArchive(row); }}
+                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors"
+                title="Archive model"
+              >
+                <Archive className="size-3.5" />
+              </button>
+            </>
+          )}
         </div>
       </td>
     </>
@@ -604,7 +642,7 @@ function ThumbsButton({ direction, active, onClick }: {
 }
 
 function SortableRow({ row, rank, onEdit, onArchive, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onEdit: (row: Row) => void; onArchive: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.modelDbId })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: rowKey(row) })
   const handle = (
     <button
       {...attributes}
@@ -672,7 +710,7 @@ export default function FallbackPage() {
   })
 
   const saveMutation = useMutation({
-    mutationFn: (data: { modelDbId: number; priority: number }[]) =>
+    mutationFn: (data: Array<{ modelDbId?: number; groupId?: number; priority: number }>) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
@@ -763,6 +801,7 @@ export default function FallbackPage() {
   const allEntries = localEntries ?? entries
   // Merge fallback metadata with live scores, keyed by model.
   const scoreById = new Map((routing?.scores ?? []).map(s => [s.modelDbId, s]))
+  const groupedScoreById = new Map((routing?.groupedScores ?? []).map(s => [s.groupId, s]))
   const boostById = new Map(allEntries.map(e => [e.modelDbId, e.boost ?? 1]))
   const configured = allEntries.filter(e => e.keyCount > 0)
   const unconfiguredPlatforms = [...new Set(allEntries.filter(e => e.keyCount === 0).map(e => e.platform))]
@@ -789,11 +828,22 @@ export default function FallbackPage() {
 
   // Entry fields win on overlap: the routing snapshot also carries `enabled`
   // (and identity fields), which would otherwise clobber unsaved local toggles.
-  const rows: Row[] = filteredConfigured.map(e => ({
-    ...(scoreById.get(e.modelDbId) ?? {}),
-    ...entriesWithPerformance.find(p => p.modelDbId === e.modelDbId),
-    ...e
-  }))
+  const rows: Row[] = filteredConfigured.map(e => {
+    if (e.isGroup && e.groupId != null) {
+      const groupedScore = groupedScoreById.get(e.groupId)
+      return {
+        ...e,
+        score: groupedScore?.groupScore ?? 0,
+        intelligence: groupedScore?.groupScore ?? undefined,
+        totalRequests: e.providers?.reduce((sum, provider) => sum + (scoreById.get(provider.modelDbId)?.totalRequests ?? 0), 0),
+      }
+    }
+    return {
+      ...(scoreById.get(e.modelDbId) ?? {}),
+      ...entriesWithPerformance.find(p => p.modelDbId === e.modelDbId),
+      ...e
+    }
+  })
   const archivedModels = models.filter(model => !model.enabled)
   // The unfiltered set is what drag-reorder operates on. If we let drag
   // fire on a filtered slice, `setLocalEntries` would persist that *slice*
@@ -831,8 +881,8 @@ export default function FallbackPage() {
     if (!over || active.id === over.id) return
     // SortableContext only sees active rows; threshold-filtered rows are
     // stitched back underneath with their current relative order.
-    const oldIndex = activeRows.findIndex(e => e.modelDbId === active.id)
-    const newIndex = activeRows.findIndex(e => e.modelDbId === over.id)
+    const oldIndex = activeRows.findIndex(e => rowKey(e) === active.id)
+    const newIndex = activeRows.findIndex(e => rowKey(e) === over.id)
     if (oldIndex < 0 || newIndex < 0) return
     const reorderedActive = arrayMove(activeRows, oldIndex, newIndex)
     const unconfigured = allEntries.filter(e => e.keyCount === 0)
@@ -886,7 +936,11 @@ export default function FallbackPage() {
       if (localEntries !== null) {
         const ordered = [...localEntries].sort((a, b) => a.priority - b.priority)
         const rebased = ordered.map((e, i) => ({ ...e, priority: i + 1 }))
-        await saveMutation.mutateAsync(rebased.map(e => ({ modelDbId: e.modelDbId, priority: e.priority })))
+        await saveMutation.mutateAsync(rebased.map(e => (
+          e.isGroup && e.groupId != null
+            ? { groupId: e.groupId, priority: e.priority }
+            : { modelDbId: e.modelDbId, priority: e.priority }
+        )))
         saved.push('sort order')
       }
       // All API calls succeeded — clear pending state and invalidate caches.
@@ -1085,10 +1139,10 @@ export default function FallbackPage() {
                       <div className="rounded-2xl border overflow-x-auto">
                         <table className="w-full text-sm">
                           {tableHead}
-                          <SortableContext items={activeRows.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
+                          <SortableContext items={activeRows.map(rowKey)} strategy={verticalListSortingStrategy}>
                             <tbody>
                               {activeRows.map((row, i) => (
-                                <SortableRow key={row.modelDbId} row={row} rank={i + 1} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                                <SortableRow key={rowKey(row)} row={row} rank={i + 1} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
                               ))}
                             </tbody>
                           </SortableContext>
@@ -1101,7 +1155,7 @@ export default function FallbackPage() {
                         {tableHead}
                         <tbody>
                           {activeRows.map((row, i) => (
-                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group">
+                            <motion.tr key={rowKey(row)} layout="position" layoutId={`model-${rowKey(row)}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group">
                               <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
                             </motion.tr>
                           ))}
@@ -1128,7 +1182,7 @@ export default function FallbackPage() {
                       <table className="w-full text-sm">
                         <tbody>
                           {filteredRows.map((row) => (
-                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group bg-card/50 opacity-[0.55]">
+                            <motion.tr key={rowKey(row)} layout="position" layoutId={`model-${rowKey(row)}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group bg-card/50 opacity-[0.55]">
                               <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} />
                             </motion.tr>
                           ))}

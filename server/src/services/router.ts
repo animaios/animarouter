@@ -525,15 +525,77 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
 // at the GROUP level (which group is smarter), speed/reliability at the
 // provider level (which provider within the group is faster/more reliable).
 
-function orderGroupChain(chain: GroupChainRow[], strategy: RoutingStrategy): GroupChainRow[] {
+function orderGroupChain(
+  chain: GroupChainRow[],
+  strategy: RoutingStrategy,
+  providersByGroup = new Map<number, ProviderRow[]>(),
+  weights: RoutingWeights = BANDIT_PRESETS.balanced,
+  speedMin = 0,
+  speedMax = 0,
+  latencyMin = 0,
+  latencyMax = 0,
+  sampled = false,
+): GroupChainRow[] {
   if (strategy === 'priority') return chain;
-  // Bandit strategies: sort groups by representative intelligence (descending).
-  // Higher intelligence composite = better group = tried first.
+  const groupComposites = chain.map(g =>
+    intelligenceComposite(g.size_label, g.intelligence_rank ?? 0, g.benchmark_score)
+  );
+  const groupIntelMin = groupComposites.length ? Math.min(...groupComposites) : 0;
+  const groupIntelMax = groupComposites.length ? Math.max(...groupComposites) : 0;
+
   return [...chain].sort((a, b) => {
-    const aIntel = intelligenceComposite(a.size_label, a.intelligence_rank ?? 0, a.benchmark_score);
-    const bIntel = intelligenceComposite(b.size_label, b.intelligence_rank ?? 0, b.benchmark_score);
-    return bIntel - aIntel;
+    const aScore = groupRepresentativeScore(
+      a,
+      providersByGroup.get(a.group_id) ?? [],
+      weights,
+      groupIntelMin,
+      groupIntelMax,
+      speedMin,
+      speedMax,
+      latencyMin,
+      latencyMax,
+      sampled,
+    );
+    const bScore = groupRepresentativeScore(
+      b,
+      providersByGroup.get(b.group_id) ?? [],
+      weights,
+      groupIntelMin,
+      groupIntelMax,
+      speedMin,
+      speedMax,
+      latencyMin,
+      latencyMax,
+      sampled,
+    );
+    return bScore - aScore || a.priority - b.priority;
   });
+}
+
+function groupRepresentativeScore(
+  group: GroupChainRow,
+  providers: ProviderRow[],
+  weights: RoutingWeights,
+  groupIntelMin: number,
+  groupIntelMax: number,
+  speedMin: number,
+  speedMax: number,
+  latencyMin: number,
+  latencyMax: number,
+  sampled: boolean,
+): number {
+  const intelligence = intelligenceScore(
+    intelligenceComposite(group.size_label, group.intelligence_rank ?? 0, group.benchmark_score),
+    groupIntelMin,
+    groupIntelMax,
+  );
+  const bestProviderSubScore = providers.length > 0
+    ? Math.max(...providers.map(provider =>
+        providerSubScore(provider, weights, speedMin, speedMax, latencyMin, latencyMax, sampled).subScore
+      ))
+    : 0;
+  const providerWeight = weights.reliability + weights.speed + weights.latency;
+  return (weights.intelligence * intelligence) + (providerWeight * bestProviderSubScore);
 }
 
 /** Compute a sub-score for a provider within a group.
@@ -642,7 +704,41 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       WHERE fc.enabled = 1 AND mg.enabled = 1
     `).all() as GroupChainRow[];
 
-    const sortedGroupChain = orderGroupChain(groupChain, strategy);
+    // Pre-compute normalization ranges for provider sub-scoring
+    // Load providers once and group them in memory to avoid N+1 queries on the
+    // API hot path.
+    const allGroupIds = groupChain.map(g => g.group_id);
+    let allProviders: ProviderRow[] = [];
+    if (allGroupIds.length > 0) {
+      const placeholders = allGroupIds.map(() => '?').join(', ');
+      allProviders = db.prepare(`
+        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
+               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+               m.max_output_tokens
+        FROM models m
+        WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
+      `).all(...allGroupIds) as ProviderRow[];
+    }
+    const providersByGroup = new Map<number, ProviderRow[]>();
+    for (const provider of allProviders) {
+      const providers = providersByGroup.get(provider.group_id);
+      if (providers) providers.push(provider);
+      else providersByGroup.set(provider.group_id, [provider]);
+    }
+
+    // Compute min/max for speed/latency normalization across all providers
+    const speedComposites = allProviders.map(p => speedCompositeFromRank(p.speed_rank, p.size_label));
+    const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
+    const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
+
+    const latencyComposites = allProviders.map(p => latencyCompositeFromSize(p.size_label));
+    const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
+    const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+
+    const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+    const sortedGroupChain = orderGroupChain(groupChain, strategy, providersByGroup, weights, speedMin, speedMax, latencyMin, latencyMax, true);
     const pinMode = options?.pinMode ?? false;
 
     // Sticky/group pinning: move the preferred group to the front. Explicit
@@ -672,41 +768,6 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       throw pinnedModelExhaustedError();
     }
 
-    // Pre-compute normalization ranges for provider sub-scoring
-    // Load providers once and group them in memory to avoid N+1 queries on the
-    // API hot path.
-    const routeGroupIds = routeGroupChain.map(g => g.group_id);
-    let allProviders: ProviderRow[] = [];
-    if (routeGroupIds.length > 0) {
-      const placeholders = routeGroupIds.map(() => '?').join(', ');
-      allProviders = db.prepare(`
-        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
-               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
-               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
-               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
-               m.max_output_tokens
-        FROM models m
-        WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
-      `).all(...routeGroupIds) as ProviderRow[];
-    }
-    const providersByGroup = new Map<number, ProviderRow[]>();
-    for (const provider of allProviders) {
-      const providers = providersByGroup.get(provider.group_id);
-      if (providers) providers.push(provider);
-      else providersByGroup.set(provider.group_id, [provider]);
-    }
-
-    // Compute min/max for speed/latency normalization across all providers
-    const speedComposites = allProviders.map(p => speedCompositeFromRank(p.speed_rank, p.size_label));
-    const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
-    const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
-
-    const latencyComposites = allProviders.map(p => latencyCompositeFromSize(p.size_label));
-    const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
-    const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
-
-    const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-
     for (const group of routeGroupChain) {
       const isPreferredGroup = preferredGroupId != null && group.group_id === preferredGroupId;
       // Filter by vision/tools/context at the GROUP level
@@ -731,13 +792,13 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       }
 
       // Score and sort providers within this group
-            const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-            const providersScored = providers
-              .map(p => {
-                const { subScore, axes } = providerSubScore(p, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, true);
-                return { p, subScore, axes };
-              })
-              .sort((a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank);
+      const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+      const providersScored = providers
+        .map(p => {
+          const { subScore, axes } = providerSubScore(p, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, true);
+          return { p, subScore, axes };
+        })
+        .sort((a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank);
 
       for (const { p: provider } of providersScored) {
         // Models the caller has ruled out for this request
@@ -1225,22 +1286,25 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       WHERE fc.enabled = 1 AND mg.enabled = 1
     `).all() as GroupChainRow[];
 
-    // Sort groups same way as routing: priority mode = priority order, bandit = intelligence desc
-    const sortedGroups = orderGroupChain(groupChain, strategy);
-
     // Collect all providers for normalization ranges
-    const allProviders: ProviderRow[] = [];
-    for (const group of sortedGroups) {
-      const providers = db.prepare(`
+    let allProviders: ProviderRow[] = [];
+    if (groupChain.length > 0) {
+      const placeholders = groupChain.map(() => '?').join(', ');
+      allProviders = db.prepare(`
         SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
                m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
                m.key_id, m.enabled, m.supports_vision, m.supports_tools,
                m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
                m.max_output_tokens
         FROM models m
-        WHERE m.group_id = ? AND m.enabled = 1
-      `).all(group.group_id) as ProviderRow[];
-      allProviders.push(...providers);
+        WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
+      `).all(...groupChain.map(g => g.group_id)) as ProviderRow[];
+    }
+    const providersByGroup = new Map<number, ProviderRow[]>();
+    for (const provider of allProviders) {
+      const providers = providersByGroup.get(provider.group_id);
+      if (providers) providers.push(provider);
+      else providersByGroup.set(provider.group_id, [provider]);
     }
 
     // Min-max for provider sub-scoring
@@ -1253,6 +1317,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
 
     const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+    const sortedGroups = orderGroupChain(groupChain, strategy, providersByGroup, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, false);
 
     groupedScores = [];
     // Compute intelligence composites for all groups and min-max normalize
@@ -1263,17 +1328,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     const groupIntelMax = groupComposites.length ? Math.max(...groupComposites) : 0;
 
     for (const group of sortedGroups) {
-      // Load enabled providers for this group
-      const providers = db.prepare(`
-        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
-               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
-               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
-               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
-               m.max_output_tokens
-        FROM models m
-        WHERE m.group_id = ? AND m.enabled = 1
-      `).all(group.group_id) as ProviderRow[];
-
+      const providers = providersByGroup.get(group.group_id) ?? [];
       if (providers.length === 0) continue;
 
       // Score providers within this group (deterministic, not sampled)
@@ -1294,15 +1349,18 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
         })
         .sort((a, b) => b.subScore - a.subScore);
 
-      // Group score = min-max normalized intelligence across groups (for bandit)
-      // or 0 for priority mode
-      let groupScore = 0;
-      if (strategy !== 'priority') {
-        groupScore = intelligenceScore(
-          intelligenceComposite(group.size_label, group.intelligence_rank ?? 0, group.benchmark_score),
-          groupIntelMin, groupIntelMax,
-        );
-      }
+      const groupScore = groupRepresentativeScore(
+        group,
+        providers,
+        weightsForSub,
+        groupIntelMin,
+        groupIntelMax,
+        speedMin,
+        speedMax,
+        latencyMin,
+        latencyMax,
+        false,
+      );
 
       groupedScores.push({
         groupKey: group.group_key,

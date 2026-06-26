@@ -604,4 +604,32 @@ describe('group-aware routing', () => {
     const r = routeRequest(100);
     expect(r.modelId).toBe('b/front');
   });
+
+  it('weighted scores rank each model group as one slot using provider sub-scores', () => {
+    addGroup({
+      groupKey: 'slow-group', displayName: 'Slow Group',
+      intelligenceRank: 5, sizeLabel: 'Large',
+      priority: 1,
+      providers: [
+        { platform: 'slow-provider', modelId: 'slow/model', name: 'Slow Model', speedRank: 90 },
+      ],
+    });
+    addGroup({
+      groupKey: 'fast-group', displayName: 'Fast Group',
+      intelligenceRank: 5, sizeLabel: 'Large',
+      priority: 2,
+      providers: [
+        { platform: 'fast-provider', modelId: 'fast/model', name: 'Fast Model', speedRank: 1 },
+      ],
+    });
+
+    setSetting('model_grouping_enabled', 'true');
+    setRoutingStrategy('fastest');
+    refreshStatsCache(getDb(), true);
+
+    const scores = getRoutingScores().groupedScores ?? [];
+    expect(scores.map(score => score.groupKey)).toEqual(['fast-group', 'slow-group']);
+    expect(scores[0].providers).toHaveLength(1);
+    expect(scores[1].providers).toHaveLength(1);
+  });
 });
