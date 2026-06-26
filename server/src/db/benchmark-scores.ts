@@ -5,8 +5,7 @@ import { getDb } from './index.js';
  * Benchmark-derived intelligence scores for LLM models.
  *
  * Source: Artificial Analysis Intelligence Index v4.0 (served/default mode,
- * June 2026), with cross-references from SWE-rebench, Terminal-Bench 2,
- * TAU-Bench, Aider Polyglot, and BFCL v3. Score range [0, 100] where higher
+ * cross-references from live AA API. Score range [0, 100] where higher
  * = smarter. 0 = no published score (unknown/stealth model).
  *
  * This mirrors the tier bands from V17:
@@ -109,9 +108,7 @@ export function recomputeBenchmarkComposite(
   let recomputed = 0;
 
   const select = db.prepare(`
-    SELECT id, aa_score, aa_score_updated, aa_confidence,
-           swe_rebench_score, swe_rebench_score_updated, swe_rebench_confidence,
-           nim_score, nim_score_updated, nim_confidence
+    SELECT id, aa_score, aa_score_updated, aa_confidence
     FROM models WHERE id = ?
   `);
 
@@ -161,20 +158,7 @@ export function recomputeBenchmarkComposite(
         totalWeight += w;
       }
 
-      // SWE-rebench source
-      const sweW = weights.get('swe_rebench');
-      if (sweW?.enabled && row.swe_rebench_score != null) {
-        const w = effectiveWeight(sweW.weight, row.swe_rebench_score_updated, row.swe_rebench_confidence, 'swe_rebench');
-        totalWeightedScore += row.swe_rebench_score * w;
-        totalWeight += w;
-      }
-
-      // NIM source — EXCLUDED from intelligence composite.
-      // NIMStats measures speed/reliability (response time, throughput, uptime),
-      // NOT intelligence or accuracy. Including it in the composite corrupted
-      // benchmark_score for models that lacked AA/SWE-rebench scores.
-      // NIM data (nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct) is
-      // stored per-source for future use as speed/reliability seed data.
+      // (SWE-rebench and NIMStats purged — only AA is used as intelligence source)
 
       if (totalWeight <= 0) continue; // no valid sources (R4.4)
 
@@ -186,14 +170,7 @@ export function recomputeBenchmarkComposite(
         continue;
       }
 
-      // Composite timestamp = max of available source timestamps
-      const timestamps = [row.aa_score_updated, row.swe_rebench_score_updated]
-        .filter((t: string | null) => t != null)
-        .map((t: string) => new Date(t).getTime())
-        .filter((ms: number) => Number.isFinite(ms));
-      const lastUpdate = timestamps.length > 0
-        ? new Date(Math.max(...timestamps)).toISOString()
-        : null;
+      const lastUpdate = row.aa_score_updated;
 
       update.run(
         composite,

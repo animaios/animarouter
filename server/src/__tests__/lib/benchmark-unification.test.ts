@@ -237,45 +237,36 @@ describe('recomputeBenchmarkComposite', () => {
     expect(row.benchmark_composite_version).toBe(1);
   });
 
-  it('R4.1: 2 intelligence sources → weighted average with spec weights (0.50/0.30, NIM=0.0)', () => {
+  it('R4.1: single intelligence source (AA) → pass-through', () => {
     const now = new Date().toISOString();
     const id = insertModel({
       model_id: 'all-sources-model',
       canonical_model_key: 'all-sources-model',
       aa_score: 58, aa_score_updated: now, aa_confidence: 1.0,
-      swe_rebench_score: 52, swe_rebench_score_updated: now, swe_rebench_confidence: 1.0,
-      nim_score: 48, nim_score_updated: now, nim_confidence: 1.0,
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    // NIM is excluded from intelligence composite (weight=0.0), so only
-    // AA and SWE-rebench contribute: (58×0.50 + 52×0.30) / 0.80 = 54.25
-    const totalWeight = 0.50 + 0.30; // 0.80 (NIM excluded)
-    const expected = (58 * 0.50 + 52 * 0.30) / totalWeight;
-    expect(row.benchmark_score).toBeCloseTo(expected, 1);
+    // AA is the sole intelligence source → pass-through
+    expect(row.benchmark_score).toBeCloseTo(58, 1);
     expect(row.benchmark_composite_version).toBe(1);
   });
 
-  it('R4.2: 2 sources → weights re-normalized to sum to 1.0', () => {
+  it('R4.2: single source → weight is 1.0 (pass-through)', () => {
     const now = new Date().toISOString();
     const id = insertModel({
       model_id: 'two-sources-model',
       canonical_model_key: 'two-sources-model',
       aa_score: 58, aa_score_updated: now, aa_confidence: 1.0,
-      swe_rebench_score: 52, swe_rebench_score_updated: now, swe_rebench_confidence: 1.0,
-      // nim_score: null
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    // Per spec D4 worked example: (58×0.50 + 52×0.30) / 0.80 = 57.25
-    const expected = (58 * 0.50 + 52 * 0.30) / 0.80;
-    expect(row.benchmark_score).toBeCloseTo(expected, 1);
+    expect(row.benchmark_score).toBeCloseTo(58, 1);
   });
 
   it('R4.4: no sources → benchmark_score stays NULL (skipped)', () => {
@@ -331,32 +322,22 @@ describe('recomputeBenchmarkComposite', () => {
     expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(50));
   });
 
-  it('staleness decay reduces composite for stale sources (R4.5)', () => {
-    const fresh = new Date().toISOString();
+  it('staleness decay reduces composite for stale source (R4.5)', () => {
     const stale = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days ago
 
     const id = insertModel({
       model_id: 'stale-source-model',
       canonical_model_key: 'stale-source-model',
-      aa_score: 58, aa_score_updated: stale, aa_confidence: 1.0,  // stale
-      swe_rebench_score: 52, swe_rebench_score_updated: fresh, swe_rebench_confidence: 1.0, // fresh
-      nim_score: 48, nim_score_updated: fresh, nim_confidence: 1.0, // fresh
+      aa_score: 58, aa_score_updated: stale, aa_confidence: 1.0,
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    // AA decay at 10 days = 0.5, so effective AA weight = 0.50 * 0.5 = 0.25
-    // SWE weight = 0.30 * 1.0 = 0.30
-    // NIM weight = 0.0 (excluded from intelligence composite)
-    // Total weight = 0.25 + 0.30 = 0.55
-    const aaDecay = Math.pow(0.5, 10 / 10); // 0.5
-    const aaW = 0.50 * aaDecay;
-    const sweW = 0.30;
-    const totalW = aaW + sweW; // NIM excluded
-    const expected = (58 * aaW + 52 * sweW) / totalW;
-    expect(row.benchmark_score).toBeCloseTo(expected, 0);
+    // AA is sole source with decay: effective weight = 1.0 * decay, score still 58
+    // Single source → pass-through regardless of staleness decay
+    expect(row.benchmark_score).toBeCloseTo(58, 1);
   });
 
   it('confidence reduces effective weight (R4.6)', () => {
@@ -387,21 +368,19 @@ describe('recomputeBenchmarkComposite', () => {
     expect(count).toBe(0);
   });
 
-  it('last_benchmark_update = max of available source timestamps', () => {
-    const older = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
-    const newer = new Date().toISOString();
+  it('last_benchmark_update = AA source timestamp', () => {
+    const ts = new Date().toISOString();
     const id = insertModel({
       model_id: 'timestamp-model',
       canonical_model_key: 'timestamp-model',
-      aa_score: 50, aa_score_updated: older, aa_confidence: 1.0,
-      swe_rebench_score: 40, swe_rebench_score_updated: newer, swe_rebench_confidence: 1.0,
+      aa_score: 50, aa_score_updated: ts, aa_confidence: 1.0,
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    expect(row.last_benchmark_update).toBe(newer);
+    expect(row.last_benchmark_update).toBe(ts);
   });
 });
 
@@ -412,30 +391,24 @@ describe('loadSourceWeights', () => {
     initDb(':memory:');
   });
 
-  it('loads 3 source weights from DB (R4.1)', () => {
+  it('loads 1 source weight from DB (AA only)', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
-    expect(weights.size).toBe(3);
+    expect(weights.size).toBe(1);
     expect(weights.has('aa')).toBe(true);
-    expect(weights.has('swe_rebench')).toBe(true);
-    expect(weights.has('nim')).toBe(true);
   });
 
-  it('seed weights match spec: aa=0.50, swe=0.30, nim=0.0 (excluded from intelligence)', () => {
+  it('seed weights: aa=1.0 (sole intelligence source)', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
-    expect(weights.size).toBe(3);
-    expect(weights.get('aa')?.weight).toBeCloseTo(0.50, 2);
-    expect(weights.get('swe_rebench')?.weight).toBeCloseTo(0.30, 2);
-    expect(weights.get('nim')?.weight).toBeCloseTo(0.0, 2);
+    expect(weights.size).toBe(1);
+    expect(weights.get('aa')?.weight).toBeCloseTo(1.0, 2);
   });
 
-  it('all sources enabled by default', () => {
+  it('AA source enabled by default', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
     expect(weights.get('aa')?.enabled).toBe(true);
-    expect(weights.get('swe_rebench')?.enabled).toBe(true);
-    expect(weights.get('nim')?.enabled).toBe(true);
   });
 
   it('caches weights (second call returns same Map)', () => {

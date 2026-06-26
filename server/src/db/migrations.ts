@@ -73,19 +73,19 @@ export function migrateDbSchema(db: Database.Database) {
   migrateQuirksV1(db);
   migrateModelsV32CommandCode(db);
   migrateModelsV33BenchmarkScore(db);
-  migrateNIMWeightZero(db);
+  migrateModelsV36PurgeSweNim(db);
 
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
 
-  // SWE-rebench + NIM + AA composite pipeline — fire-and-forget
+  // AA benchmark fetch pipeline — fire-and-forget
   // (AA fetch is included inside updateAllBenchmarkScores — no separate call needed)
   new BenchmarkService().updateAllBenchmarkScores()
     .then(({ updated, errors }) => {
-      if (updated > 0) console.log(`[Boot] SWE-rebench updated ${updated} models`);
+      if (updated > 0) console.log(`[Boot] Benchmarks updated ${updated} models`);
       if (errors.length > 0) console.warn('[Boot] Benchmark errors:', errors.join('; '));
     })
-    .catch(err => console.warn('[Boot] SWE-rebench fetch failed:', err));
+    .catch(err => console.warn('[Boot] Benchmark fetch failed:', err));
 }
 
 function createTables(db: Database.Database) {
@@ -247,7 +247,7 @@ function createTables(db: Database.Database) {
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
-// Adds per-source score columns (aa_*, swe_rebench_*, nim_*) so each source
+// Adds per-source score columns (aa_*) so each source
 // writes ONLY its own columns. The composite step derives benchmark_score.
 // Also adds canonical_model_key for deterministic cross-source matching.
 function ensureBenchmarkUnificationColumns(db: Database.Database) {
@@ -258,15 +258,7 @@ function ensureBenchmarkUnificationColumns(db: Database.Database) {
     ['aa_score', 'REAL'],
     ['aa_score_updated', 'TEXT'],
     ['aa_confidence', 'REAL'],
-    ['swe_rebench_score', 'REAL'],
-    ['swe_rebench_score_updated', 'TEXT'],
-    ['swe_rebench_confidence', 'REAL'],
-    ['nim_score', 'REAL'],
-    ['nim_score_updated', 'TEXT'],
-    ['nim_confidence', 'REAL'],
-    ['nim_throughput_tps', 'REAL'],
-    ['nim_avg_response_ms', 'REAL'],
-    ['nim_uptime_pct', 'REAL'],
+
     ['benchmark_composite_version', 'INTEGER'],
   ];
 
@@ -296,14 +288,10 @@ function ensureBenchmarkSourceWeightsTable(db: Database.Database) {
   `);
 
   // Seed default weights (idempotent)
-  // aa=0.50, swe_rebench=0.30: intelligence sources, blended into benchmark_score.
-  // nim=0.0: NIMStats measures speed/reliability (response time, throughput,
-  // uptime), NOT intelligence. nim_score is stored per-source but EXCLUDED
-  // from the intelligence composite — see recomputeBenchmarkComposite().
+  // aa=1.0: sole intelligence source (SWE-rebench and NIMStats purged).
   const insert = db.prepare(`INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES (?, ?, 1)`);
-  insert.run('aa', 0.50);
-  insert.run('swe_rebench', 0.30);
-  insert.run('nim', 0.0);
+  insert.run('aa', 1.0);
+
 }
 
 // ── Dynamic Degradation: persistent penalty state ─────────────────────────
@@ -655,7 +643,7 @@ function migrateModelsV2(db: Database.Database) {
 
 /**
  * Re-rank intelligence based on April 2026 coding + agentic tool-use benchmarks:
- * SWE-rebench, Terminal-Bench 2, TAU-Bench, Aider Polyglot.
+ * Artificial Analysis Intelligence Index, Terminal-Bench 2, TAU-Bench, Aider Polyglot.
  * Higher rank = weaker. Ties are allowed (same weights across providers).
  */
 function migrateModelsV3Ranks(db: Database.Database) {
@@ -810,7 +798,7 @@ function migrateModelsV4(db: Database.Database) {
   apply();
 
   // 5) Re-rank the live catalog by agentic tool-use capability (lower = smarter).
-  //    Grounded in April 2026 SWE-rebench + BFCL v3 + Tau-Bench numbers.
+  //    Grounded in June 2026 Artificial Analysis Intelligence Index + BFCL v3 + Tau-Bench numbers.
   const setRank = db.prepare(`UPDATE models SET intelligence_rank = ? WHERE platform = ? AND model_id = ?`);
   const ranks: Array<[number, string, string]> = [
     [1, 'openrouter', 'minimax/minimax-m2.5:free'],
@@ -2601,15 +2589,18 @@ function migrateModelsV32CommandCode(db: Database.Database) {
   tx();
 }
 
-// ── V35: Set NIM benchmark weight to 0 (speed/reliability, not intelligence) ──
-function migrateNIMWeightZero(db: Database.Database) {
+// ── V36: Purge SWE-rebench and NIMStats — AA-only benchmark pipeline ──
+// Sets AA weight to 1.0 (sole intelligence source), removes orphaned
+// swe_rebench and nim rows from benchmark_source_weights.
+function migrateModelsV36PurgeSweNim(db: Database.Database) {
   try {
-    const row = db.prepare("SELECT weight FROM benchmark_source_weights WHERE name = 'nim'").get() as { weight: number } | undefined;
-    if (row && row.weight !== 0) {
-      db.prepare("UPDATE benchmark_source_weights SET weight = 0.0, updated_at = CURRENT_TIMESTAMP WHERE name = 'nim'").run();
-      console.log('Set NIM benchmark weight to 0.0 (NIMStats is speed/reliability, not intelligence)');
-    }
-  } catch {
-    // Table may not exist yet in older DBs — safe to skip
+    // Update AA weight from 0.50 to 1.0
+    db.prepare("UPDATE benchmark_source_weights SET weight = 1.0, updated_at = CURRENT_TIMESTAMP WHERE name = 'aa' AND weight != 1.0").run();
+    // Remove orphaned SWE-rebench and NIM weight rows
+    db.prepare("DELETE FROM benchmark_source_weights WHERE name IN ('swe_rebench', 'nim')").run();
+    console.log('[V36] Purged SWE-rebench + NIMStats weights; AA is sole intelligence source');
+  } catch (err: any) {
+    // Non-fatal — the weights table might not exist in very old DBs
+    console.warn('[V36] Weight cleanup skipped:', err.message);
   }
 }
