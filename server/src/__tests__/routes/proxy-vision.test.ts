@@ -61,27 +61,24 @@ describe('Vision-aware routing (#118, #125)', () => {
   });
 
   it('rejects an image request with a clear 422 when no vision model is enabled', async () => {
-    // Disable every vision-capable model in the chain.
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_vision = 1').run();
+    // Temporarily mark all vision models as non-vision-capable to test the 422 gate.
+    getDb().prepare('UPDATE models SET supports_vision = 0').run();
 
     const { status, body } = await post(app, '/v1/chat/completions', IMAGE_MESSAGE, key);
     expect(status).toBe(422);
     expect(body.error.code).toBe('no_vision_model');
     expect(body.error.type).toBe('invalid_request_error');
 
-    // Restore so we don't leak state to other expectations.
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_vision = 1').run();
+    getDb().prepare("UPDATE models SET supports_vision = 1 WHERE model_id IN ('gemini-2.5-flash', 'gemini-2.5-pro', 'gpt-oss-120b')").run();
   });
 
   it('does not apply the vision gate to a text-only request', async () => {
-    // Disable all vision models; a plain text request must still route normally
-    // (it 429s on exhaustion here, but never the 422 vision error).
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_vision = 1').run();
+    getDb().prepare('UPDATE models SET supports_vision = 0').run();
     const { status, body } = await post(app, '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     }, key);
     expect(status).not.toBe(422);
     expect(body?.error?.code).not.toBe('no_vision_model');
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_vision = 1').run();
+    getDb().prepare("UPDATE models SET supports_vision = 1 WHERE model_id IN ('gemini-2.5-flash', 'gemini-2.5-pro', 'gpt-oss-120b')").run();
   });
 });

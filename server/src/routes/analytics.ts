@@ -28,7 +28,7 @@ function getSinceTimestamp(range: string): string {
   }
 }
 
-/** Return platforms that have ≥1 enabled key AND ≥1 enabled model. */
+/** Return platforms that have ≥1 enabled key AND ≥1 model. */
 function getActivePlatforms(db: Database.Database): string[] {
   return (db.prepare(`
     SELECT DISTINCT k.platform
@@ -36,7 +36,7 @@ function getActivePlatforms(db: Database.Database): string[] {
     WHERE k.enabled = 1
       AND EXISTS (
         SELECT 1 FROM models m
-        WHERE m.platform = k.platform AND m.enabled = 1
+        WHERE m.platform = k.platform
       )
   `).all() as { platform: string }[]).map(r => r.platform);
 }
@@ -56,16 +56,15 @@ function buildPlatformFilter(
 }
 
 /**
- * Returns the SQL fragments for the models + fallback_config enabled filter.
- * Appends LEFT JOINs to requests r and AND conditions to the WHERE clause.
+ * Returns the SQL fragments for the models + fallback_config JOINs.
+ * Appends LEFT JOINs to requests r for the per-model analytics.
  * No bind params — the JOINs link via m.id, not user input.
  */
 function buildModelEnabledFilter() {
   return {
     joinSql: `LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
       LEFT JOIN fallback_config fc ON fc.model_db_id = m.id`,
-    whereSql: `AND (m.enabled IS NULL OR m.enabled = 1)
-      AND (fc.enabled IS NULL OR fc.enabled = 1)`,
+    whereSql: '',
   };
 }
 

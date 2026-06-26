@@ -375,7 +375,6 @@ function RowContent({
   rank,
   draggable,
   dragHandle,
-  onToggle,
   onEdit,
   onBoost,
   showEligibilityChip = true,
@@ -384,7 +383,6 @@ function RowContent({
   rank: number
   draggable: boolean
   dragHandle?: ReactNode
-  onToggle: (modelDbId: number, enabled: boolean) => void
   onEdit: (row: Row) => void
   onBoost: (modelDbId: number, direction: 'up' | 'down') => void
   showEligibilityChip?: boolean
@@ -493,7 +491,6 @@ function RowContent({
           >
             <Pencil className="size-3.5" />
           </button>
-          <Switch checked={row.enabled} onCheckedChange={(c) => onToggle(row.modelDbId, c)} />
         </div>
       </td>
     </>
@@ -521,7 +518,7 @@ function ThumbsButton({ direction, active, onClick }: {
   )
 }
 
-function SortableRow({ row, rank, onToggle, onEdit, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onToggle: (id: number, e: boolean) => void; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
+function SortableRow({ row, rank, onEdit, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.modelDbId })
   const handle = (
     <button
@@ -541,9 +538,9 @@ function SortableRow({ row, rank, onToggle, onEdit, onBoost, showEligibilityChip
     <tr
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`border-b last:border-0 bg-card group ${isDragging ? 'opacity-50' : ''} ${row.enabled ? '' : 'opacity-50'}`}
+      className={`border-b last:border-0 bg-card group ${isDragging ? 'opacity-50' : ''}`}
     >
-      <RowContent row={row} rank={rank} draggable dragHandle={handle} onToggle={onToggle} onEdit={onEdit} onBoost={onBoost} showEligibilityChip={showEligibilityChip} />
+      <RowContent row={row} rank={rank} draggable dragHandle={handle} onEdit={onEdit} onBoost={onBoost} showEligibilityChip={showEligibilityChip} />
     </tr>
   )
 }
@@ -580,7 +577,7 @@ export default function FallbackPage() {
   })
 
   const saveMutation = useMutation({
-    mutationFn: (data: { modelDbId: number; priority: number; enabled: boolean }[]) =>
+    mutationFn: (data: { modelDbId: number; priority: number }[]) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
@@ -691,14 +688,6 @@ export default function FallbackPage() {
     setLocalEntries(merged)
   }
 
-  function handleToggle(modelDbId: number, enabled: boolean) {
-    setLocalEntries(allEntries.map(e => (e.modelDbId === modelDbId ? { ...e, enabled } : e)))
-  }
-
-  function handleToggleAll(enabled: boolean) {
-    setLocalEntries(allEntries.map(e => (e.keyCount > 0 ? { ...e, enabled } : e)))
-  }
-
   function handleBoost(modelDbId: number, direction: 'up' | 'down') {
     const currentBoost = scoreById.get(modelDbId)?.boost ?? 1
     let nextBoost: number
@@ -726,29 +715,10 @@ export default function FallbackPage() {
         }
         saved.push(`${pendingModelEdits.size} model edit(s)`)
       }
-      // Enabled-first rebase: before persisting the user's toggle changes,
-      // every enabled model moves to the top, preserving the relative order
-      // it had within its own group. This MUST only happen at save time —
-      // flipping a switch mid-edit keeps the row exactly where it was so the
-      // user can review the change in the floating bar before committing.
-      // Drag-reorder local edits are kept as the within-group order; the
-      // rebase just collapses the priorities so enabled rows get 1..k and
-      // disabled get k+1..N. Stable sort by current priority gives us
-      // "after all the already enabled models" semantics: a newly-enabled row
-      // keeps the priority slot it had under disabled, and lands at the end
-      // of the enabled band after re-numbering.
       if (localEntries !== null) {
-        const byId = new Map(localEntries.map(e => [e.modelDbId, e]))
         const ordered = [...localEntries].sort((a, b) => a.priority - b.priority)
-        const enabled = ordered.filter(e => e.enabled)
-        const disabled = ordered.filter(e => !e.enabled)
-        const rebased = [...enabled, ...disabled].map((e, i) => ({ ...e, priority: i + 1 }))
-        // Stage the rebased set so a partial failure stages these new
-        // priorities instead of leaving the table partitioned on-screen but
-        // the server still on old numbers.
-        for (const e of rebased) byId.set(e.modelDbId, e)
-        setLocalEntries([...byId.values()])
-        await saveMutation.mutateAsync(rebased.map(e => ({ modelDbId: e.modelDbId, priority: e.priority, enabled: e.enabled })))
+        const rebased = ordered.map((e, i) => ({ ...e, priority: i + 1 }))
+        await saveMutation.mutateAsync(rebased.map(e => ({ modelDbId: e.modelDbId, priority: e.priority })))
         saved.push('sort order')
       }
       // All API calls succeeded — clear pending state and invalidate caches.
@@ -811,15 +781,7 @@ export default function FallbackPage() {
             <span className="underline decoration-dotted underline-offset-2 cursor-help">Score</span>
           </Tooltip>
         </th>
-        <th className="py-2 pr-3 font-medium text-right">
-          <label className="flex items-center gap-1 justify-end cursor-pointer" title="Enable all / disable all">
-            <Switch
-              checked={configured.every(e => e.enabled)}
-              onCheckedChange={(c) => handleToggleAll(c)}
-            />
-            <span>On</span>
-          </label>
-        </th>
+        <th className="py-2 pr-3 font-medium text-right" />
       </tr>
     </thead>
   )
@@ -955,7 +917,7 @@ export default function FallbackPage() {
                           <SortableContext items={activeRows.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
                             <tbody>
                               {activeRows.map((row, i) => (
-                                <SortableRow key={row.modelDbId} row={row} rank={i + 1} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                                <SortableRow key={row.modelDbId} row={row} rank={i + 1} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
                               ))}
                             </tbody>
                           </SortableContext>
@@ -968,8 +930,8 @@ export default function FallbackPage() {
                         {tableHead}
                         <tbody>
                           {activeRows.map((row, i) => (
-                            <tr key={row.modelDbId} className={`border-b last:border-0 group ${row.enabled ? '' : 'opacity-50'}`}>
-                              <RowContent row={row} rank={i + 1} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                            <tr key={row.modelDbId} className="border-b last:border-0 group">
+                              <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
                             </tr>
                           ))}
                         </tbody>
@@ -995,8 +957,8 @@ export default function FallbackPage() {
                       <table className="w-full text-sm">
                         <tbody className="bg-card/50">
                           {filteredRows.map((row) => (
-                            <tr key={row.modelDbId} className={`border-b last:border-0 group opacity-[0.55] ${row.enabled ? '' : 'opacity-50'}`}>
-                              <RowContent row={row} rank={row.priority} draggable={false} onToggle={handleToggle} onEdit={setEditingModel} onBoost={handleBoost} />
+                            <tr key={row.modelDbId} className="border-b last:border-0 group opacity-[0.55]">
+                              <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onBoost={handleBoost} />
                             </tr>
                           ))}
                         </tbody>

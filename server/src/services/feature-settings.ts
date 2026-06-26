@@ -143,6 +143,34 @@ export const REGISTRY: FeatureSettingDef[] = [
     group: 'Resilience',
     parentToggle: 'heartbeat_enabled',
   },
+  {
+    key: 'heartbeat_exhausted_recheck_sec',
+    label: 'Exhausted-Key Recheck (sec)',
+    description:
+      'Seconds after a key is marked unhealthy before the heartbeat automatically re-pings it. Lower values recover faster but may waste API budget on keys with long cooldowns.',
+    type: 'number',
+    default: 90,
+    min: 15,
+    max: 600,
+    envVar: 'HEARTBEAT_EXHAUSTED_RECHECK_SEC',
+    effect: 'restart',
+    group: 'Resilience',
+    parentToggle: 'heartbeat_enabled',
+  },
+  {
+    key: 'heartbeat_exhausted_max_rechecks',
+    label: 'Max Recheck Attempts',
+    description:
+      'Maximum re-ping attempts before giving up on an exhausted key. After this, the next regular heartbeat cycle handles recovery. Limits token spend on stubbornly-unhealthy keys.',
+    type: 'number',
+    default: 3,
+    min: 1,
+    max: 10,
+    envVar: 'HEARTBEAT_EXHAUSTED_MAX_RECHECKS',
+    effect: 'restart',
+    group: 'Resilience',
+    parentToggle: 'heartbeat_enabled',
+  },
   // ── Sessions ──
   {
     key: 'sticky_session_enabled',

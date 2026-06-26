@@ -199,10 +199,10 @@ export async function runEmbeddings(model: string | undefined, inputs: string[])
   }
 
   const chain = (getDb().prepare(
-    'SELECT * FROM embedding_models WHERE family = ? AND enabled = 1 ORDER BY priority',
+    'SELECT * FROM embedding_models WHERE family = ? ORDER BY priority',
   ).all(family) as EmbeddingModelRow[]);
   if (chain.length === 0) {
-    throw new EmbeddingsError(`No enabled providers for embedding family '${family}'.`, 503);
+    throw new EmbeddingsError(`No providers for embedding family '${family}'.`, 503);
   }
 
   let lastError: EmbeddingsError | null = null;

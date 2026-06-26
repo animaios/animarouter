@@ -36,7 +36,6 @@ interface KeyRow {
 interface ChainRow {
   model_db_id: number;
   priority: number;
-  enabled: number;
   platform: string;
   model_id: string;
   display_name: string;
@@ -520,19 +519,18 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   const strategy = getRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
-  // Get the enabled fallback chain joined with the fields the scorer needs.
-  const chain = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled,
-           m.platform, m.model_id, m.display_name, m.intelligence_rank,
-           m.speed_rank, m.size_label,
-           m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.context_window, m.max_output_tokens, m.key_id,
-           m.benchmark_score,
-           m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
-    WHERE fc.enabled = 1
-  `).all() as ChainRow[];
+  // Get the fallback chain joined with the fields the scorer needs.
+    const chain = db.prepare(`
+      SELECT fc.model_db_id, fc.priority,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.speed_rank, m.size_label,
+             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+             m.supports_tools, m.context_window, m.max_output_tokens, m.key_id,
+             m.benchmark_score,
+             m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct
+      FROM fallback_config fc
+      JOIN models m ON m.id = fc.model_db_id
+    `).all() as ChainRow[];
 
   const sortedChain = orderChain(chain, strategy);
 
@@ -835,7 +833,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       platform: entry.platform,
       modelId: entry.model_id,
       displayName: entry.display_name,
-      enabled: entry.enabled === 1,
+      enabled: true,
       reliability: scored.axes.reliability,
       speed: scored.axes.speed,
       intelligence: scored.axes.intelligence,
@@ -859,7 +857,7 @@ export function hasEnabledVisionModel(): boolean {
     SELECT COUNT(*) as cnt
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
-    WHERE fc.enabled = 1 AND m.enabled = 1 AND m.supports_vision = 1
+    WHERE m.supports_vision = 1
   `).get() as { cnt: number };
   return row.cnt > 0;
 }
@@ -873,7 +871,7 @@ export function hasEnabledToolsModel(): boolean {
     SELECT COUNT(*) as cnt
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
-    WHERE fc.enabled = 1 AND m.enabled = 1 AND m.supports_tools = 1
+    WHERE m.supports_tools = 1
   `).get() as { cnt: number };
   return row.cnt > 0;
 }

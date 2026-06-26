@@ -36,7 +36,7 @@ embeddingsRouter.get('/', (_req: Request, res: Response) => {
         modelId: r.model_id,
         displayName: r.display_name,
         priority: r.priority,
-        enabled: r.enabled === 1,
+        enabled: true,
         quotaLabel: r.quota_label,
         keyCount: keyCounts.get(r.platform) ?? 0,
       })),
@@ -49,7 +49,6 @@ const updateSchema = z.object({
   providers: z.array(z.object({
     id: z.number(),
     priority: z.number(),
-    enabled: z.boolean(),
   })).optional(),
 });
 
@@ -71,9 +70,9 @@ embeddingsRouter.put('/', (req: Request, res: Response) => {
   }
 
   if (parsed.data.providers) {
-    const update = db.prepare('UPDATE embedding_models SET priority = ?, enabled = ? WHERE id = ?');
-    const apply = db.transaction((rows: { id: number; priority: number; enabled: boolean }[]) => {
-      for (const r of rows) update.run(r.priority, r.enabled ? 1 : 0, r.id);
+    const update = db.prepare('UPDATE embedding_models SET priority = ? WHERE id = ?');
+    const apply = db.transaction((rows: { id: number; priority: number }[]) => {
+      for (const r of rows) update.run(r.priority, r.id);
     });
     apply(parsed.data.providers);
   }

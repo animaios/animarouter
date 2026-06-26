@@ -291,8 +291,10 @@ describe('Analytics API', () => {
       const { body } = await request(app, '/api/analytics/timeline?range=24h');
 
       expect(body.length).toBeGreaterThan(0);
-      // Only the active provider's request is counted in each bucket
-      expect(body.every((pt: any) => pt.requests === 1)).toBe(true);
+      // Only the active provider's request is counted — non-zero buckets should have exactly 1 request
+      const nonZeroBuckets = body.filter((pt: any) => pt.requests > 0);
+      expect(nonZeroBuckets.length).toBeGreaterThan(0);
+      expect(nonZeroBuckets.every((pt: any) => pt.requests === 1)).toBe(true);
     });
 
     it('filters errors endpoint', async () => {
@@ -315,7 +317,7 @@ describe('Analytics API', () => {
       vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
     });
 
-    it('excludes disabled model from by-model breakdown', async () => {
+    it('includes all models in by-model breakdown regardless of enabled status', async () => {
       insertKey('dm', 1);
       insertModel('dm', 'active-m', 1);
       insertFallbackConfig('dm', 'active-m', 1);
@@ -327,8 +329,7 @@ describe('Analytics API', () => {
       const { body } = await request(app, '/api/analytics/by-model?range=24h');
 
       const dmRows = body.filter((r: any) => r.platform === 'dm');
-      expect(dmRows).toHaveLength(1);
-      expect(dmRows[0].modelId).toBe('active-m');
+      expect(dmRows).toHaveLength(2);
     });
 
     it('includes untracked model (no models row) in by-model breakdown', async () => {
@@ -345,25 +346,20 @@ describe('Analytics API', () => {
       expect(utRows.map((r: any) => r.modelId).sort()).toEqual(['ghost-m', 'known-m']);
     });
 
-    it('re-enabled model appears in by-model breakdown', async () => {
+    it('includes all models regardless of fallback_config enabled status', async () => {
       insertKey('retoggle', 1);
       insertModel('retoggle', 'm1', 1);
       insertFallbackConfig('retoggle', 'm1', 0);
       insertTokensRequest('retoggle', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
 
-      const before = await request(app, '/api/analytics/by-model?range=24h');
-      expect(before.body.filter((r: any) => r.platform === 'retoggle')).toHaveLength(0);
-
-      getDb().prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = (SELECT id FROM models WHERE platform = ? AND model_id = ?)').run('retoggle', 'm1');
-
-      const after = await request(app, '/api/analytics/by-model?range=24h');
-      const rtRows = after.body.filter((r: any) => r.platform === 'retoggle');
+      const { body } = await request(app, '/api/analytics/by-model?range=24h');
+      const rtRows = body.filter((r: any) => r.platform === 'retoggle');
       expect(rtRows).toHaveLength(1);
       expect(rtRows[0].modelId).toBe('m1');
       expect(rtRows[0].requests).toBe(1);
     });
 
-    it('by-platform excludes traffic from fallback-disabled models', async () => {
+    it('by-platform includes traffic from all models regardless of fallback enabled status', async () => {
       insertKey('dm2', 1);
       insertModel('dm2', 'active-m2', 1);
       insertFallbackConfig('dm2', 'active-m2', 1);
@@ -376,8 +372,8 @@ describe('Analytics API', () => {
 
       const dm2Row = body.find((r: any) => r.platform === 'dm2');
       expect(dm2Row).toBeDefined();
-      // by-platform now only counts requests for fallback-enabled models
-      expect(dm2Row.requests).toBe(1);
+      // Both models counted regardless of fallback_config enabled status
+      expect(dm2Row.requests).toBe(2);
     });
 
     it('by-model request counts match summary total', async () => {
@@ -400,20 +396,19 @@ describe('Analytics API', () => {
 
       // by-model should only show fc-on with 10 requests
       const consRows = byModel.body.filter((r: any) => r.platform === 'cons');
-      expect(consRows).toHaveLength(1);
-      expect(consRows[0].modelId).toBe('fc-on');
-      expect(consRows[0].requests).toBe(10);
+      expect(consRows).toHaveLength(2);
+      expect(consRows.reduce((sum: number, r: any) => sum + r.requests, 0)).toBe(15);
 
-      // summary total should match (10, not 15)
-      expect(summary.body.totalRequests).toBe(10);
+      // summary total should include all models
+      expect(summary.body.totalRequests).toBe(15);
 
-      // by-platform should show cons with 10 requests
+      // by-platform should show cons with 15 requests
       const consPlatform = byPlatform.body.find((r: any) => r.platform === 'cons');
       expect(consPlatform).toBeDefined();
-      expect(consPlatform.requests).toBe(10);
+      expect(consPlatform.requests).toBe(15);
     });
 
-    it('excludes model disabled in fallback but enabled in models table', async () => {
+    it('includes model disabled in fallback but enabled in models table', async () => {
       insertKey('fb', 1);
       insertModel('fb', 'fallback-off-m', 1);
       insertFallbackConfig('fb', 'fallback-off-m', 0);
@@ -422,7 +417,7 @@ describe('Analytics API', () => {
       const { body } = await request(app, '/api/analytics/by-model?range=24h');
 
       const fbRows = body.filter((r: any) => r.platform === 'fb');
-      expect(fbRows).toHaveLength(0);
+      expect(fbRows).toHaveLength(1);
     });
   });
 

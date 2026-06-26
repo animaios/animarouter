@@ -118,33 +118,34 @@ describe('Tools-aware routing', () => {
   });
 
   it('rejects a tool request with a clear 422 when no tool-capable model is enabled', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    // Temporarily mark all tool models as non-tool-capable to test the 422 gate.
+    getDb().prepare('UPDATE models SET supports_tools = 0').run();
 
     const { status, body } = await post(app, '/v1/chat/completions', TOOLS_CHAT, key);
     expect(status).toBe(422);
     expect(body.error.code).toBe('no_tools_model');
     expect(body.error.type).toBe('invalid_request_error');
 
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    getDb().prepare("UPDATE models SET supports_tools = 1 WHERE model_id IN ('gemini-3.5-flash', 'gemini-3.5-pro', 'gpt-oss-120b', 'glm-4.7')").run();
   });
 
   it('applies the same gate on /v1/responses (Codex path)', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    getDb().prepare('UPDATE models SET supports_tools = 0').run();
 
     const { status, body } = await post(app, '/v1/responses', TOOLS_RESPONSES, key);
     expect(status).toBe(422);
     expect(body.error.code).toBe('no_tools_model');
 
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    getDb().prepare("UPDATE models SET supports_tools = 1 WHERE model_id IN ('gemini-3.5-flash', 'gemini-3.5-pro', 'gpt-oss-120b', 'glm-4.7')").run();
   });
 
   it('does not apply the tools gate to a plain chat request', async () => {
-    getDb().prepare('UPDATE models SET enabled = 0 WHERE supports_tools = 1').run();
+    getDb().prepare('UPDATE models SET supports_tools = 0').run();
     const { status, body } = await post(app, '/v1/chat/completions', {
       messages: [{ role: 'user', content: 'hello' }],
     }, key);
     expect(status).not.toBe(422);
     expect(body?.error?.code).not.toBe('no_tools_model');
-    getDb().prepare('UPDATE models SET enabled = 1 WHERE supports_tools = 1').run();
+    getDb().prepare("UPDATE models SET supports_tools = 1 WHERE model_id IN ('gemini-3.5-flash', 'gemini-3.5-pro', 'gpt-oss-120b', 'glm-4.7')").run();
   });
 });

@@ -16,8 +16,6 @@ describe('Migration idempotency', () => {
     const before = {
       models: (db1.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
       fallback: (db1.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
-      enabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
-      disabledModels: (db1.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
       orphanFallbacks: (db1.prepare(`
         SELECT COUNT(*) AS c FROM fallback_config f
         LEFT JOIN models m ON f.model_db_id = m.id
@@ -31,8 +29,6 @@ describe('Migration idempotency', () => {
     const after = {
       models: (db2.prepare('SELECT COUNT(*) AS c FROM models').get() as { c: number }).c,
       fallback: (db2.prepare('SELECT COUNT(*) AS c FROM fallback_config').get() as { c: number }).c,
-      enabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1').get() as { c: number }).c,
-      disabledModels: (db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 0').get() as { c: number }).c,
       orphanFallbacks: (db2.prepare(`
         SELECT COUNT(*) AS c FROM fallback_config f
         LEFT JOIN models m ON f.model_db_id = m.id

@@ -818,12 +818,9 @@ function CustomModelsSection() {
               <div key={m.id} className="flex items-center gap-2 px-4 py-2 hover:bg-muted/40 transition-colors">
                 <code className="text-xs font-mono">{m.modelId}</code>
                 <span className="text-xs text-muted-foreground">{m.displayName}</span>
-                <span className={`ml-auto text-[11px] ${m.enabled ? 'text-emerald-600' : 'text-muted-foreground'}`}>
-                  {m.enabled ? 'active' : 'archived'}
-                </span>
                 <Button variant="ghost" size="xs" className="text-muted-foreground hover:text-destructive"
                   onClick={() => { if (confirm(`Archive model '${m.modelId}'? Re-add it to restore.`)) deleteModel.mutate(m.id) }}
-                  disabled={!m.enabled || deleteModel.isPending}>
+                  disabled={deleteModel.isPending}>
                   Archive
                 </Button>
               </div>

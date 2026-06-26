@@ -126,9 +126,10 @@ describe('embeddings service', () => {
       await expect(runEmbeddings('llama-nemotron-embed-vl-1b-v2', ['hello'])).rejects.toMatchObject({ status: 429 });
     });
 
-    it('throws 503 when the family has no enabled providers', async () => {
-      getDb().prepare("UPDATE embedding_models SET enabled = 0 WHERE family = 'bge-m3'").run();
-      await expect(runEmbeddings('bge-m3', ['hello'])).rejects.toMatchObject({ status: 503 });
+    it('throws 502 when the family has no usable providers', async () => {
+      // Remove keys for bge-m3 platforms so no provider has a usable key
+      getDb().prepare("DELETE FROM api_keys WHERE platform IN (SELECT DISTINCT platform FROM embedding_models WHERE family = 'bge-m3')").run();
+      await expect(runEmbeddings('bge-m3', ['hello'])).rejects.toMatchObject({ status: 502 });
     });
 
     it('splits cloudflare account_id:token keys', async () => {

@@ -49,7 +49,7 @@ export default function PlaygroundPage() {
     queryFn: () => apiFetch('/api/fallback'),
   })
 
-  const availableModels = fallbackEntries.filter(e => e.keyCount > 0 && e.enabled)
+  const availableModels = fallbackEntries.filter(e => e.keyCount > 0)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })

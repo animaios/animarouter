@@ -21,6 +21,7 @@ export type LiveEvent =
   | { type: 'routing.key_affinity_selected'; id: string; sessionKey: string; keyId: number; model: string; at: number }
   | { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; at: number }
   | { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; at: number }
+  | { type: 'heartbeat.recheck'; keyId: number; provider: string; model: string; success: boolean; latencyMs: number; attempt: number; error?: string; at: number }
   | { type: 'degradation.boost'; modelDbId: number; oldBoost: number; newBoost: number; at: number }
   | { type: 'stream.chunk'; id: string; text: string; at: number };
 

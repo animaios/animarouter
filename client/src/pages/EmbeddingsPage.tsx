@@ -3,7 +3,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
 import { FloatingBar } from '@/components/floating-bar'
 import { ModelsTabs } from '@/components/models-tabs'
@@ -62,7 +61,7 @@ export default function EmbeddingsPage() {
   const usageByFamily = new Map((usage?.families ?? []).map(u => [u.family, u]))
 
   const saveMutation = useMutation({
-    mutationFn: (body: { defaultFamily?: string; providers?: { id: number; priority: number; enabled: boolean }[] }) =>
+    mutationFn: (body: { defaultFamily?: string; providers?: { id: number; priority: number }[] }) =>
       apiFetch('/api/embeddings', { method: 'PUT', body: JSON.stringify(body) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['embeddings'] })
@@ -98,15 +97,6 @@ export default function EmbeddingsPage() {
   const families_ = filteredFamilies
   const hasChanges = localFamilies !== null || localDefault !== null
   const defaultFamily = localDefault ?? data?.defaultFamily ?? ''
-  function updateProvider(familyName: string, id: number, patch: Partial<ProviderEntry>) {
-    if (isLoading) return
-    setLocalFamilies(families.map(f =>
-      f.family === familyName
-        ? { ...f, providers: f.providers.map(p => (p.id === id ? { ...p, ...patch } : p)) }
-        : f,
-    ))
-  }
-
   function moveProvider(familyName: string, index: number, dir: -1 | 1) {
     if (isLoading) return
     setLocalFamilies(families.map(f => {
@@ -124,7 +114,7 @@ export default function EmbeddingsPage() {
     saveMutation.mutate({
       ...(localDefault !== null ? { defaultFamily: localDefault } : {}),
       ...(localFamilies !== null
-        ? { providers: families.flatMap(f => f.providers.map(p => ({ id: p.id, priority: p.priority, enabled: p.enabled }))) }
+        ? { providers: families.flatMap(f => f.providers.map(p => ({ id: p.id, priority: p.priority }))) }
         : {}),
     })
   }
@@ -219,7 +209,7 @@ export default function EmbeddingsPage() {
                     ) : f.providers.map((p, i) => {
                       const reorderDisabled = query !== ''
                       return (
-                        <div key={p.id} className={`flex items-center gap-3 py-2 ${p.enabled ? '' : 'opacity-50'}`}>
+                        <div key={p.id} className="flex items-center gap-3 py-2">
                           <span className="w-5 text-center font-mono text-xs text-muted-foreground tabular-nums">{i + 1}</span>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
@@ -253,10 +243,6 @@ export default function EmbeddingsPage() {
                               </button>
                             </div>
                           )}
-                          <Switch
-                            checked={p.enabled}
-                            onCheckedChange={(c) => updateProvider(f.family, p.id, { enabled: c })}
-                          />
                         </div>
                       )
                     })}

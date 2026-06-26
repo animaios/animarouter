@@ -28,13 +28,12 @@ fallbackRouter.get('/performance', (_req: Request, res: Response) => {
              m.intelligence_rank, m.speed_rank, m.size_label,
              m.rpm_limit, m.rpd_limit,
              m.tpm_limit, m.tpd_limit, m.context_window, m.max_output_tokens,
-             m.supports_vision, m.supports_tools, m.enabled,
-             fc.priority, fc.enabled as chain_enabled,
+             m.supports_vision, m.supports_tools,
+              fc.priority,
              s.successes, s.failures, s.tokPerSec, s.avgTtfbMs
       FROM models m
       LEFT JOIN fallback_config fc ON m.id = fc.model_db_id
       LEFT JOIN model_stats_cache s ON m.platform = s.platform AND m.model_id = s.model_id
-      WHERE m.enabled = 1
       ORDER BY s.tokPerSec DESC NULLS LAST, m.intelligence_rank ASC
     `).all() as Array<{
       id: number; platform: string; model_id: string; display_name: string;
@@ -42,7 +41,7 @@ fallbackRouter.get('/performance', (_req: Request, res: Response) => {
       rpm_limit: number | null; rpd_limit: number | null;
       tpm_limit: number | null; tpd_limit: number | null; context_window: number | null;
       max_output_tokens: number | null; supports_vision: boolean; supports_tools: boolean;
-      enabled: boolean; priority: number; chain_enabled: boolean;
+      priority: number;
       successes: number; failures: number; tokPerSec: number; avgTtfbMs: number | null;
     }>;
 
@@ -62,9 +61,9 @@ fallbackRouter.get('/performance', (_req: Request, res: Response) => {
       maxOutputTokens: row.max_output_tokens,
       supportsVision: row.supports_vision,
       supportsTools: row.supports_tools,
-      enabled: row.enabled,
+      enabled: true,
       priority: row.priority,
-      chainEnabled: row.chain_enabled,
+      chainEnabled: true,
       // Real performance metrics
       actualTokPerSec: row.tokPerSec || 0,
       actualAvgTtfbMs: row.avgTtfbMs,
@@ -118,15 +117,13 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
 fallbackRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT fc.model_db_id, fc.priority, fc.enabled as fc_enabled,
+    SELECT fc.model_db_id, fc.priority,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit,
-           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
-           m.enabled as model_enabled
+           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
-    WHERE m.enabled = 1
     ORDER BY fc.priority ASC
   `).all() as any[];
 
@@ -150,7 +147,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       effectivePriority: r.priority + (penalty?.penalty ?? 0),
       penalty: penalty?.penalty ?? 0,
       rateLimitHits: penalty?.count ?? 0,
-      enabled: r.model_enabled === 1 && r.fc_enabled === 1,
+      enabled: true,
       platform: r.platform,
       modelId: r.model_id,
       displayName: r.display_name,
@@ -173,7 +170,6 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
 const updateSchema = z.array(z.object({
   modelDbId: z.number(),
   priority: z.number(),
-  enabled: z.boolean(),
 }));
 
 // Update fallback chain (full replace)
@@ -186,17 +182,12 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
 
   const db = getDb();
   const update = db.prepare(`
-    UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
-  `);
-
-  const updateModelEnabled = db.prepare(`
-    UPDATE models SET enabled = ? WHERE id = ?
+    UPDATE fallback_config SET priority = ? WHERE model_db_id = ?
   `);
 
   const updateAll = db.transaction(() => {
     for (const entry of parsed.data) {
-      update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
-      updateModelEnabled.run(entry.enabled ? 1 : 0, entry.modelDbId);
+      update.run(entry.priority, entry.modelDbId);
     }
   });
   updateAll();
@@ -241,7 +232,6 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
       SELECT m.id
       FROM models m
       LEFT JOIN model_stats_cache s ON m.platform = s.platform AND m.model_id = s.model_id
-      WHERE m.enabled = 1
       ORDER BY ${orderBy}
     `;
   } else {
