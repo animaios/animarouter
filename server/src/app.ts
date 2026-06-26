@@ -12,6 +12,7 @@ import { embeddingsRouter } from './routes/embeddings.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { healthRouter } from './routes/health.js';
 import { settingsRouter } from './routes/settings.js';
+import { transportsRouter } from './routes/transports.js';
 import { authRouter } from './routes/auth.js';
 import { eventsRouter } from './routes/events.js';
 import { customRouter } from './routes/custom.js';
@@ -79,6 +80,7 @@ export function createApp() {
   app.use('/api/analytics', requireAuth, analyticsRouter);
   app.use('/api/health', requireAuth, healthRouter);
   app.use('/api/settings', requireAuth, settingsRouter);
+  app.use('/api/transports', requireAuth, transportsRouter);
   app.use('/api/benchmarks', requireAuth, benchmarksRouter);
   // Custom providers + their models. The router declares its own
   // `/api/custom-providers` paths. We mount the router at root, but

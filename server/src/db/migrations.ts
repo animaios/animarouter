@@ -198,6 +198,23 @@ function createTables(db: Database.Database) {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS outbound_transports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transport_id TEXT NOT NULL DEFAULT 'cloudflare-worker',
+      name TEXT NOT NULL,
+      endpoint_url TEXT NOT NULL,
+      encrypted_auth_key TEXT NOT NULL,
+      iv TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
+      allowed_hosts TEXT NOT NULL DEFAULT '*',
+      placement_region TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_deployed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(transport_id, endpoint_url)
+    );
+
     -- Dashboard accounts (email + password) gating the /api/* admin surface (#35).
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,6 +236,7 @@ function createTables(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_rate_limit_usage_lookup ON rate_limit_usage(platform, model_id, key_id, kind, created_at_ms);
     CREATE INDEX IF NOT EXISTS idx_rate_limit_cooldowns_expires ON rate_limit_cooldowns(expires_at_ms);
     CREATE INDEX IF NOT EXISTS idx_api_keys_platform ON api_keys(platform);
+    CREATE INDEX IF NOT EXISTS idx_outbound_transports_enabled ON outbound_transports(transport_id, enabled);
 
         CREATE TABLE IF NOT EXISTS model_groups (
           id INTEGER PRIMARY KEY AUTOINCREMENT,

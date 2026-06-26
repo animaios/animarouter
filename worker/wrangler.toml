@@ -1,0 +1,8 @@
+name = "animarouter-anon-transport"
+main = "src/index.ts"
+compatibility_date = "2026-06-26"
+
+[vars]
+# "*" keeps custom providers working. Set a comma-separated allowlist later if
+# this relay is ever exposed outside trusted AnimaRouter deployments.
+ALLOWED_HOSTS = "*"

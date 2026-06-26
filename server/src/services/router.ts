@@ -20,6 +20,7 @@ import {
 } from './degradation.js';
 import type { BaseProvider } from '../providers/base.js';
 import type { Database } from 'better-sqlite3';
+import { transportIdFromUseProxy, type TransportId } from './proxy-transport.js';
 
 interface KeyRow {
   id: number;
@@ -115,6 +116,8 @@ export interface RouteResult {
   displayName: string;
   /** Whether this route should use the FreeLLMProxy transport instead of direct provider connection. */
   useProxy: boolean;
+  /** Selected outbound transport. `useProxy` is kept as API/backward-compatible sugar. */
+  transportId: TransportId;
   // Daily limits for this model, so a 429 handler can tell a genuine daily
   // exhaustion (escalate the cooldown) from a transient per-minute spike.
   rpdLimit: number | null;
@@ -820,7 +823,8 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
             tpdLimit: provider.tpd_limit,
             maxOutputTokens: provider.max_output_tokens,
             release,
-            useProxy: false,
+            useProxy: key.use_proxy === 1,
+            transportId: transportIdFromUseProxy(key.use_proxy === 1),
             groupId: group.group_id,
           };
         }
@@ -1072,6 +1076,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
               maxOutputTokens: entry.max_output_tokens,
               release,
               useProxy: key.use_proxy === 1,
+              transportId: transportIdFromUseProxy(key.use_proxy === 1),
             };
     }
 

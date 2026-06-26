@@ -6,7 +6,7 @@ import type { ChatMessage, ModelListRow } from '@animarouter/shared/types.js';
 import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
 import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
 import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
-import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs } from '../services/ratelimit.js';
+import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs, isDailyLimitExhausted } from '../services/ratelimit.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
 import { getDb, getUnifiedApiKey } from '../db/index.js';
 import { contentToString, messageHasImage, normalizeOutboundContent } from '../lib/content.js';
@@ -17,7 +17,7 @@ import { getContextHandoffMode, recordIncomingMessages, maybeInjectContextHandof
 import { publish } from '../services/events.js';
 import { getFeatureSetting } from '../services/feature-settings.js';
 import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
-import { isProxyTransportConfigured, proxyChatCompletion, proxyStreamChatCompletion, computeWorkerIndex } from '../services/proxy-transport.js';
+import { getRelayTransport, isRelayTransportConfigured, computeWorkerIndex } from '../services/proxy-transport.js';
 import type { BaseProvider } from '../providers/base.js';
 
 
@@ -864,7 +864,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // of connecting directly. All post-processing (degradation, sticky model,
         // token accounting, tool rescue) applies identically.
         const proxyTransportEnabled = getFeatureSetting('proxy_transport_enabled') as boolean;
-        const useProxyTransport = route.useProxy && proxyTransportEnabled && isProxyTransportConfigured();
+        const relayTransport = getRelayTransport(route.transportId);
+        const useProxyTransport = !!relayTransport && proxyTransportEnabled && isRelayTransportConfigured(route.transportId);
         if (useProxyTransport && sessionKey) {
           const DEFAULT_PROXY_WORKER_COUNT = 3;
           const workerIndex = computeWorkerIndex(sessionKey, DEFAULT_PROXY_WORKER_COUNT);
@@ -873,6 +874,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             id: requestId,
             sessionKey: sessionKey.slice(0, 8),
             keyId: route.keyId,
+            transportId: route.transportId,
             workerIndex,
             model: route.modelId,
             at: Date.now(),
@@ -940,12 +942,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
                       reasoning_effort, thinking,
                     };
                     const gen = useProxyTransport
-                      ? proxyStreamChatCompletion(
-                                                resolveProviderBaseUrl(route.provider),
-                          route.apiKey,
-                          { model: route.modelId, messages: outboundMessages, ...streamOptions },
-                          sessionKey || undefined,
-                        )
+                      ? relayTransport!.streamChatCompletion({
+                          providerBaseUrl: resolveProviderBaseUrl(route.provider),
+                          apiKey: route.apiKey,
+                          body: { model: route.modelId, messages: outboundMessages, ...streamOptions },
+                          sessionId: sessionKey || undefined,
+                        })
                       : route.provider.streamChatCompletion(
                           route.apiKey, outboundMessages, route.modelId,
                           streamOptions,
@@ -1128,12 +1130,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
                 reasoning_effort, thinking,
               };
               const result = useProxyTransport
-                ? await proxyChatCompletion(
-                                    resolveProviderBaseUrl(route.provider),
-                    route.apiKey,
-                    { model: route.modelId, messages: outboundMessages, ...chatOptions },
-                    sessionKey || undefined,
-                  )
+                ? await relayTransport!.chatCompletion({
+                    providerBaseUrl: resolveProviderBaseUrl(route.provider),
+                    apiKey: route.apiKey,
+                    body: { model: route.modelId, messages: outboundMessages, ...chatOptions },
+                    sessionId: sessionKey || undefined,
+                  })
                 : await route.provider.chatCompletion(
                     route.apiKey, outboundMessages, route.modelId,
                     chatOptions,
@@ -1249,8 +1251,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Determine if this is a transient (per-minute) 429 — transient 429s
         // self-resolve within ~one window and should NOT evict the key from
         // the healthy pool or increment penalty. Payment-required 402s are
-        // NOT transient even though classifyError returns 'minor'.
-        const isTransient = classifyError(err) === 'minor' && !isPaymentRequiredError(err);
+        // NOT transient even though classifyError returns 'minor'. Daily-
+        // exhausted keys (RPD/TPD exhausted) are also NOT transient — they
+        // won't recover until the provider's daily reset.
+        const isDailyExhausted = isDailyLimitExhausted(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit });
+        const isPaymentRequired = isPaymentRequiredError(err);
+        const isTransient = classifyError(err) === 'minor' && !isPaymentRequired && !isDailyExhausted;
 
         // Dead-turn errors (in-band error, empty completion, stream stall,
         // unparseable dialect): the key WORKS but this specific model
@@ -1271,15 +1277,17 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           }
         }
 
-        // ── Key eviction ──────────────────────────────────────────
+        // ─── Key eviction ──────────────────────────
         // Transient/retryable error from a key: skip the key. If
         // heartbeat is enabled, mark it unhealthy so the router
         // excludes it from the healthy pool. Only a successful ping
         // can restore it.
         if (isHeartbeatEnabled()) {
-          const isPaymentRequired = isPaymentRequiredError(err);
-          const reason = isPaymentRequired ? 'payment_required' : 'rate_limited';
-          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'error', isTransient);
+          const reason = isPaymentRequired ? 'payment_required' : isDailyExhausted ? 'daily_exhausted' : 'rate_limited';
+          const recheckDelayMs = isDailyExhausted || isPaymentRequired
+            ? computeRetryCooldownMs(isPaymentRequired, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, lastError?.retryAfterMs)
+            : undefined; // transient uses default recheckSec
+          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'error', isTransient, recheckDelayMs);
           publish({
             type: isTransient ? 'routing.key_transient' : 'routing.key_evicted',
             id: requestId,
@@ -1295,7 +1303,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Non-retryable error (auth, 4xx, etc.): also evict from
         // healthy pool when heartbeat is enabled, then skip key.
         if (isHeartbeatEnabled()) {
-          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'auth error');
+          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'auth error', false, undefined);
           publish({
             type: 'routing.key_evicted',
             id: requestId,

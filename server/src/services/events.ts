@@ -19,10 +19,10 @@ export type LiveEventBase =
   | { type: 'routing.key_exhausted'; id: string; provider: string; keyId: number; model: string; reason: string; at: number }
   | { type: 'routing.model_switch'; id: string; from: string; to: string; reason: string; at: number }
   | { type: 'routing.provider_fastfail'; id: string; provider: string; failedModelCount: number; at: number }
-  | { type: 'routing.key_evicted'; id: string; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required' | 'auth_error'; at: number }
+  | { type: 'routing.key_evicted'; id: string; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required' | 'auth_error' | 'daily_exhausted'; at: number }
   | { type: 'routing.key_transient'; id: string; provider: string; keyId: number; model: string; reason: string; at: number }
   | { type: 'routing.key_affinity_selected'; id: string; sessionKey: string; keyId: number; model: string; at: number }
-  | { type: 'routing.worker_affinity_selected'; id: string; sessionKey: string; keyId: number; workerIndex: number; model: string; at: number }
+  | { type: 'routing.worker_affinity_selected'; id: string; sessionKey: string; keyId: number; transportId?: string; workerIndex: number; model: string; at: number }
   | { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; at: number }
   | { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; at: number }
   | { type: 'heartbeat.recheck'; keyId: number; provider: string; model: string; success: boolean; latencyMs: number; attempt: number; error?: string; at: number }

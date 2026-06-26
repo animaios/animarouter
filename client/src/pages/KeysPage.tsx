@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
-import type { ApiKey, Platform, CustomProvider, Model } from '../../../shared/types'
+import type { ApiKey, Platform, CustomProvider, Model, OutboundTransport } from '../../../shared/types'
 import { Pencil, ExternalLink, Plus, X } from 'lucide-react'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
 
@@ -164,6 +164,55 @@ function UnifiedKeySection() {
         <span className="text-muted-foreground">Embeddings</span>
         <code className="font-mono">/v1/embeddings <span className="text-muted-foreground">(model: "auto" or a family from the Embeddings tab)</span></code>
       </div>
+    </section>
+  )
+}
+
+function RelayTransportsSection() {
+  const { data: transports = [] } = useQuery<OutboundTransport[]>({
+    queryKey: ['transports'],
+    queryFn: () => apiFetch('/api/transports'),
+  })
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-medium">Relay transports</h2>
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {transports.length} configured
+        </span>
+      </div>
+      {transports.length === 0 ? (
+        <div className="rounded-2xl border border-dashed p-4">
+          <p className="text-sm text-muted-foreground">
+            No anonymizing relay has been deployed yet.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-2xl border divide-y bg-card overflow-hidden">
+          {transports.map(t => (
+            <div key={t.id} className="flex items-center gap-3 px-4 py-3">
+              <span className={`size-1.5 rounded-full ${t.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium truncate">{t.name}</p>
+                  <span className="text-[11px] text-muted-foreground">{t.transportId}</span>
+                </div>
+                <p className="text-xs text-muted-foreground font-mono truncate">{t.endpointUrl}</p>
+              </div>
+              <span className="text-xs text-muted-foreground">hosts {t.allowedHosts}</span>
+              {t.placementRegion && (
+                <span className="text-xs text-muted-foreground">{t.placementRegion}</span>
+              )}
+              {t.lastDeployedAt && (
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {formatSqliteUtcToLocalTime(t.lastDeployedAt, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -843,6 +892,7 @@ export default function KeysPage() {
   const [apiKey, setApiKey] = useState('')
   const [accountId, setAccountId] = useState('')
   const [label, setLabel] = useState('')
+  const [useProxy, setUseProxy] = useState(false)
   const [editingKeyId, setEditingKeyId] = useState<number | null>(null)
   const [editingLabel, setEditingLabel] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
@@ -862,7 +912,7 @@ export default function KeysPage() {
     queryFn: () => apiFetch('/api/custom-providers'),
   })
   const addKey = useMutation({
-    mutationFn: (body: { platform: string; key: string; label?: string }) =>
+    mutationFn: (body: { platform: string; key: string; label?: string; useProxy?: boolean }) =>
       apiFetch('/api/keys', { method: 'POST', body: JSON.stringify(body) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['keys'] })
@@ -872,6 +922,7 @@ export default function KeysPage() {
       setApiKey('')
       setAccountId('')
       setLabel('')
+      setUseProxy(false)
     },
   })
   const deleteKey = useMutation({
@@ -930,15 +981,20 @@ export default function KeysPage() {
     },
   })
   const updateKey = useMutation({
-    mutationFn: ({ id, label }: { id: number; label: string }) =>
+    mutationFn: ({ id, label, useProxy }: { id: number; label?: string; useProxy?: boolean }) =>
       apiFetch(`/api/keys/${id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ label }),
+        body: JSON.stringify({
+          ...(label !== undefined ? { label } : {}),
+          ...(useProxy !== undefined ? { useProxy } : {}),
+        }),
       }),
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: ['keys'] })
-      setEditingKeyId(null)
-      setEditingLabel('')
+      if (vars.label !== undefined) {
+        setEditingKeyId(null)
+        setEditingLabel('')
+      }
     },
   })
   function startEditing(key: ApiKey) {
@@ -978,7 +1034,7 @@ export default function KeysPage() {
     if (!isKeyless && !apiKey) return
     if (needsAccountId && !accountId) return
     const key = isKeyless ? '' : (needsAccountId ? `${accountId}:${apiKey}` : apiKey)
-    addKey.mutate({ platform, key, label: label || undefined })
+    addKey.mutate({ platform, key, label: label || undefined, useProxy })
   }
   const healthKeyMap = new Map<number, { status: string; lastCheckedAt: string | null }>()
   for (const k of healthData?.keys ?? []) healthKeyMap.set(k.id, k)
@@ -1006,6 +1062,7 @@ export default function KeysPage() {
       />
       <div className="space-y-8">
         <UnifiedKeySection />
+        <RelayTransportsSection />
         <section>
           <h2 className="text-sm font-medium mb-3">Add a provider key</h2>
           <form onSubmit={handleSubmit} className="flex flex-wrap gap-3 rounded-3xl border p-4 bg-card">
@@ -1079,6 +1136,14 @@ export default function KeysPage() {
                   {isKeyless ? 'Enable' : addKey.isPending ? 'Adding…' : 'Add key'}
                 </Button>
               </div>
+            </div>
+            <div className="flex items-center gap-2 pt-6">
+              <Switch
+                size="sm"
+                checked={useProxy}
+                onCheckedChange={setUseProxy}
+              />
+              <Label className="text-xs">Anonymizing relay</Label>
             </div>
           </form>
           {addKey.isError && (
@@ -1158,6 +1223,15 @@ export default function KeysPage() {
                             <>{k.label && <span className="text-xs text-muted-foreground">{k.label}</span>}</>
                           )}
                           <span className="text-xs text-muted-foreground">{statusLabel[status] ?? status}</span>
+                          <div className="flex items-center gap-2">
+                            <Switch
+                              size="sm"
+                              checked={k.useProxy}
+                              onCheckedChange={(checked) => updateKey.mutate({ id: k.id, useProxy: checked })}
+                              disabled={updateKey.isPending}
+                            />
+                            <span className="text-xs text-muted-foreground">Relay</span>
+                          </div>
                           <div className="flex-1" />
                           {lastChecked && (
                             <span className="text-[11px] text-muted-foreground tabular-nums">

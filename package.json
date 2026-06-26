@@ -7,14 +7,17 @@
   "workspaces": [
     "shared",
     "server",
-    "client"
+    "client",
+    "worker"
   ],
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client\"",
     "dev:lan": "concurrently --kill-others-on-fail --names server,client \"npm run dev -w server\" \"npm run dev -w client -- --host\"",
-    "test": "npm run test -w server && npm run typecheck -w client",
-    "build": "npm run build -w server && npm run build -w client",
+    "test": "npm run test -w server && npm run typecheck -w client && npm run test -w worker",
+    "build": "npm run build -w server && npm run build -w client && npm run typecheck -w worker",
     "build:server": "npm run build -w server",
+    "build:worker": "npm run typecheck -w worker",
+    "deploy:worker": "node scripts/deploy-worker-wizard.mjs",
     "postinstall": "node scripts/proxy-up.mjs"
   },
   "devDependencies": {

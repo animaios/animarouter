@@ -151,6 +151,7 @@ export interface ApiKey {
   maskedKey: string;
   status: KeyStatus;
   enabled: boolean;
+  useProxy: boolean;
   createdAt: string;
   lastCheckedAt: string | null;
 }
@@ -159,6 +160,21 @@ export interface ApiKeyCreate {
   platform: Platform;
   key: string;
   label?: string;
+  useProxy?: boolean;
+}
+
+export interface OutboundTransport {
+  id: number;
+  transportId: string;
+  name: string;
+  endpointUrl: string;
+  maskedAuthKey: string;
+  allowedHosts: string;
+  placementRegion: string | null;
+  enabled: boolean;
+  lastDeployedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Fallback Config ----

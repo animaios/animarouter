@@ -63,6 +63,7 @@ function addGroup(opts: {
   providers: Array<{
     platform: string; modelId: string; name: string; speedRank: number;
     intelligenceRank?: number; sizeLabel?: string;
+    useProxy?: boolean;
   }>;
 }): number {
   const db = getDb();
@@ -103,12 +104,14 @@ function addGroup(opts: {
 
     // Ensure key for the platform
     const hasKey = db.prepare('SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 LIMIT 1')
-      .get(p.platform);
+      .get(p.platform) as { id: number } | undefined;
     if (!hasKey) {
       db.prepare(`
-        INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
-        VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1)
-      `).run(p.platform);
+        INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, use_proxy)
+        VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1, ?)
+      `).run(p.platform, p.useProxy ? 1 : 0);
+    } else if (p.useProxy !== undefined) {
+      db.prepare('UPDATE api_keys SET use_proxy = ? WHERE id = ?').run(p.useProxy ? 1 : 0, hasKey.id);
     }
 
     // Ensure custom_providers entry for this platform slug
@@ -222,6 +225,24 @@ describe('group-aware routing', () => {
     refreshStatsCache(getDb(), true);
     const r = routeRequest(100);
     expect(r.modelId).toMatch(/dsv4f/);
+  });
+
+  it('propagates per-key proxy transport from grouped routing', () => {
+    addGroup({
+      groupKey: 'proxied-group', displayName: 'Proxied Group',
+      intelligenceRank: 2, sizeLabel: 'Large',
+      priority: 1,
+      providers: [
+        { platform: 'proxied-provider', modelId: 'proxied/model', name: 'Proxied', speedRank: 1, useProxy: true },
+      ],
+    });
+    setSetting('model_grouping_enabled', 'true');
+    setRoutingStrategy('priority');
+    refreshStatsCache(getDb(), true);
+
+    const r = routeRequest(100);
+    expect(r.useProxy).toBe(true);
+    expect(r.transportId).toBe('cloudflare-worker');
   });
 
   // ── Multi-group fallback ────────────────────────────────────────────────

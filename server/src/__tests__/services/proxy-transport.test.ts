@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { initDb } from '../../db/index.js';
+import { upsertOutboundTransport } from '../../services/outbound-transports.js';
 
 // ---------------------------------------------------------------------------
 // Mock env vars before importing — the module reads them at call time, not
@@ -22,11 +24,43 @@ function clearProxyEnv() {
 // reads env vars at call time (not at import), a single import is fine.
 import {
   isProxyTransportConfigured,
+  isRelayTransportConfigured,
+  getRelayTransport,
+  transportIdFromUseProxy,
   buildProxyUrl,
   proxyChatCompletion,
   proxyStreamChatCompletion,
   computeWorkerIndex,
 } from '../../services/proxy-transport.js';
+
+// ── transport registry ───────────────────────────────────────────────────
+
+describe('transport registry', () => {
+  afterEach(clearProxyEnv);
+
+  it('maps legacy useProxy flags to transport ids', () => {
+    expect(transportIdFromUseProxy(false)).toBe('direct');
+    expect(transportIdFromUseProxy(true)).toBe('cloudflare-worker');
+  });
+
+  it('treats direct as configured and unknown relay ids as unavailable', () => {
+    expect(isRelayTransportConfigured('direct')).toBe(true);
+    expect(getRelayTransport('direct')).toBeUndefined();
+    expect(isRelayTransportConfigured('netlify-function')).toBe(false);
+  });
+
+  it('registers the Cloudflare Worker relay transport', () => {
+    const transport = getRelayTransport('cloudflare-worker');
+    expect(transport?.id).toBe('cloudflare-worker');
+    expect(transport?.supportsStreaming).toBe(true);
+  });
+
+  it('checks Cloudflare Worker relay configuration through the registry', () => {
+    expect(isRelayTransportConfigured('cloudflare-worker')).toBe(false);
+    setProxyEnv();
+    expect(isRelayTransportConfigured('cloudflare-worker')).toBe(true);
+  });
+});
 
 // ── isProxyTransportConfigured ─────────────────────────────────────────────
 
@@ -105,6 +139,24 @@ describe('buildProxyUrl', () => {
     const url = buildProxyUrl('https://api.openai.com/v1');
     const encoded = url.split('/1/')[1];
     expect(encoded).not.toMatch(/[+=/]/);
+  });
+
+  it('falls back to an enabled DB transport when env vars are absent', () => {
+    clearProxyEnv();
+    process.env.NODE_ENV = 'test';
+    initDb(':memory:');
+    upsertOutboundTransport({
+      name: 'test-worker',
+      endpointUrl: 'https://db-worker.example.workers.dev',
+      authKey: 'db-auth-key',
+      allowedHosts: '*',
+      placementRegion: 'azure:swedencentral',
+    });
+
+    expect(isProxyTransportConfigured()).toBe(true);
+    const url = buildProxyUrl('https://api.openai.com/v1');
+    expect(url).toContain('https://db-worker.example.workers.dev');
+    expect(url).toContain('/db-auth-key/1/');
   });
 });
 
