@@ -4,7 +4,7 @@
 
 ### Integration with Existing Systems
 
-This spec modifies a single function (`runCycle()` in `heartbeat.ts`) by replacing its sequential ping loop with batched concurrent pings. Everything else — `keyHealthMap`, `pingKey()`, `isKeyHealthy()`, `evaluateAutoDisable()`, the event system, the routing path — remains unchanged.
+This spec modifies a single function (`runCycle()` in `heartbeat.ts`) by replacing its sequential ping loop with batched concurrent pings. Everything else — `keyHealthMap`, `pingKey()`, `isKeyHealthy()`, the event system, the routing path — remains unchanged.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -18,8 +18,7 @@ This spec modifies a single function (`runCycle()` in `heartbeat.ts`) by replaci
 │    │   Before: for-await with stagger                 │    │
 │    │   After:  Promise.allSettled per batch of N      │    │
 │    └────────────────────────────────────────────────┘    │
-│  5. Auto-disable evaluation (unchanged)                    │
-│  6. Clear cycleInProgress (unchanged)                      │
+│  5. Clear cycleInProgress (unchanged)                      │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -29,7 +28,6 @@ This spec modifies a single function (`runCycle()` in `heartbeat.ts`) by replaci
 |---|---|
 | `provider-health-heartbeat` | Direct modification — replaces the ping loop in `runCycle()` |
 | `429-key-exclusion` | Accelerates recovery — evicted keys get restored on the NEXT cycle, which now completes 10-50x faster |
-| `heartbeat-auto-disable` | Accelerates disable — dead models are detected and disabled within seconds instead of minutes |
 | `dynamic-degradation` | Independent — no change to degradation scoring |
 | All others | No interaction |
 
@@ -183,7 +181,7 @@ This means: if you go concurrent, stagger is meaningless (we're firing in parall
 
 ### 4.2 Changes to `feature-settings.ts`
 
-Add new registry entry in the `Resilience` group, after `heartbeat_auto_disable_pct`:
+Add new registry entry in the `Resilience` group, after `heartbeat_stagger_ms`:
 
 ```typescript
   {
@@ -320,6 +318,5 @@ The existing pattern of `resetHeartbeatConfig()` (called in tests after changing
 
 ### 7.4 Regression Tests
 
-- Full cycle with auto-disable (spec 2) still works — auto-disable evaluation runs after concurrent pings
 - Keys evicted by 429 are restored on the next concurrent cycle
 - Startup prewarm cycle completes faster (indirect test, measure cycle time)

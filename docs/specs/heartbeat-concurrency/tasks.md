@@ -23,7 +23,7 @@ Add a new feature setting registry entry for the concurrency level. This makes t
 
 **File**: `server/src/services/feature-settings.ts`
 
-Find the `REGISTRY` array and add a new entry in the `Resilience` group, after `heartbeat_auto_disable_pct` (~L140). Insert before the `Sessions` group comment:
+Find the `REGISTRY` array and add a new entry in the `Resilience` group, after `heartbeat_stagger_ms` (~L131). Insert before the `Sessions` group comment:
 
 ```typescript
   {
