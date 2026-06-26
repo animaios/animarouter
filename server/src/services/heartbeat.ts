@@ -90,6 +90,7 @@ let _intervalMs: number | null = null;
 let _activityWindowMs: number | null = null;
 let _pingTimeoutMs: number | null = null;
 let _staggerMs: number | null = null;
+let _concurrency: number | null = null;
 
 function readConfig() {
   if (_enabled === null) {
@@ -98,8 +99,9 @@ function readConfig() {
     _activityWindowMs = (getFeatureSetting('heartbeat_activity_window_min') as number) * 60 * 1000;
     _pingTimeoutMs = getFeatureSetting('heartbeat_timeout_ms') as number;
     _staggerMs = getFeatureSetting('heartbeat_stagger_ms') as number;
+    _concurrency = getFeatureSetting('heartbeat_concurrency') as number;
   }
-  return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs! };
+  return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs!, concurrency: _concurrency! };
 }
 
 
@@ -110,6 +112,7 @@ export function resetHeartbeatConfig(): void {
   _activityWindowMs = null;
   _pingTimeoutMs = null;
   _staggerMs = null;
+  _concurrency = null;
   keyHealthMap.clear();
 }
 
@@ -212,7 +215,7 @@ async function runCycle(skipGate = false): Promise<number> {
 
   try {
     const now = Date.now();
-    const { activityWindowMs, staggerMs, pingTimeoutMs } = readConfig();
+    const { activityWindowMs, pingTimeoutMs, concurrency, staggerMs } = readConfig();
 
     // ── Activity gate ──
     // The gate is bypassed for the startup prewarm cycle (skipGate=true)
@@ -272,42 +275,19 @@ async function runCycle(skipGate = false): Promise<number> {
       }
     }
 
-    // ── Group by provider and ping concurrently across providers ──
-    // Different providers are pinged in parallel, but within each provider,
-    // keys are pinged sequentially (with optional stagger) to avoid overwhelming
-    // the same provider with a burst of concurrent requests (DDoS).
-    const groupedByPlatform = new Map<string, typeof pingTasks>();
-    for (const task of pingTasks) {
-      const group = groupedByPlatform.get(task.platform) ?? [];
-      group.push(task);
-      groupedByPlatform.set(task.platform, group);
-    }
-
-    // Sort each group by modelDbId so same-model keys are pinged consecutively
-    for (const [, tasks] of groupedByPlatform) {
-      tasks.sort((a, b) => a.modelDbId - b.modelDbId);
-    }
-
-    // Run all provider groups concurrently, but within each group ping sequentially.
-    // Each group's promise is individually caught to prevent an unexpected error
-    // in one group from aborting all other in-flight groups (Promise.all fail-fast).
-    await Promise.all(Array.from(groupedByPlatform.entries()).map(async ([platform, tasks]) => {
-      try {
-        for (let i = 0; i < tasks.length; i++) {
-          const task = tasks[i];
-          try {
-            await pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs);
-          } catch (e) {
-            console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, e);
-          }
-          if (staggerMs > 0 && i < tasks.length - 1) {
-            await sleep(staggerMs);
-          }
-        }
-      } catch (e) {
-        console.error(`[Heartbeat] Unexpected error in provider group ${platform}:`, e);
+    // ── Ping each key (concurrent batches) ──
+    for (let i = 0; i < pingTasks.length; i += concurrency) {
+      const batch = pingTasks.slice(i, i + concurrency);
+      await Promise.allSettled(batch.map(task =>
+        pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs)
+          .catch(err => {
+            console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, err);
+          })
+      ));
+      if (concurrency === 1 && staggerMs > 0 && i + concurrency < pingTasks.length) {
+        await sleep(staggerMs);
       }
-    }));
+    }
 
     return pingTasks.length;
   } finally {

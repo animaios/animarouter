@@ -129,6 +129,20 @@ export const REGISTRY: FeatureSettingDef[] = [
     group: 'Resilience',
     parentToggle: 'heartbeat_enabled',
   },
+  {
+    key: 'heartbeat_concurrency',
+    label: 'Heartbeat Concurrency',
+    description:
+      'Maximum number of concurrent heartbeat ping requests. Higher values complete cycles faster but may cause burst-rate-limit issues with less forgiving providers. Default is 4 — a safe middle ground. Set to 1 to restore sequential behavior.',
+    type: 'number',
+    default: 4,
+    min: 1,
+    max: 16,
+    envVar: 'HEARTBEAT_CONCURRENCY',
+    effect: 'restart',
+    group: 'Resilience',
+    parentToggle: 'heartbeat_enabled',
+  },
   // ── Sessions ──
   {
     key: 'sticky_session_enabled',
