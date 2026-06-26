@@ -111,6 +111,8 @@ interface ModelGroup {
   enabled: boolean
 }
 
+const UNGROUPED_GROUP_KEY = '__ungrouped__'
+
 // A merged row: fallback-chain metadata + live bandit scores.
 type Row = FallbackEntry & Partial<RoutingScore>
 
@@ -290,9 +292,10 @@ function EditModelModal({
   const [rpdLimit, setRpdLimit] = useState(model.rpdLimit ?? null)
   const [tpmLimit, setTpmLimit] = useState(model.tpmLimit ?? null)
   const [tpdLimit, setTpdLimit] = useState(model.tpdLimit ?? null)
-  const [selectedGroupKey, setSelectedGroupKey] = useState(model.groupKey ?? '')
+  const [selectedGroupKey, setSelectedGroupKey] = useState(model.groupKey ?? UNGROUPED_GROUP_KEY)
 
-  const groupChanged = selectedGroupKey !== '' && selectedGroupKey !== (model.groupKey ?? '')
+  const currentGroupKey = model.groupKey ?? UNGROUPED_GROUP_KEY
+  const groupChanged = selectedGroupKey !== currentGroupKey
   const availableGroups = groups.filter(group => group.enabled || group.groupKey === model.groupKey)
 
   const submit = (e: React.FormEvent) => {
@@ -351,6 +354,7 @@ function EditModelModal({
                   <SelectValue placeholder="Select group" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value={UNGROUPED_GROUP_KEY}>Ungrouped</SelectItem>
                   {availableGroups.map(group => (
                     <SelectItem key={group.id} value={group.groupKey}>
                       <span className="flex min-w-0 items-center gap-2">
@@ -733,10 +737,12 @@ export default function FallbackPage() {
 
   const assignGroupMutation = useMutation({
     mutationFn: ({ alias, groupKey }: { alias: string; groupKey: string }) =>
-      apiFetch('/api/models/groups/aliases', {
-        method: 'POST',
-        body: JSON.stringify({ alias, groupKey }),
-      }),
+      groupKey === UNGROUPED_GROUP_KEY
+        ? apiFetch(`/api/models/groups/aliases/${encodeURIComponent(alias)}`, { method: 'DELETE' })
+        : apiFetch('/api/models/groups/aliases', {
+            method: 'POST',
+            body: JSON.stringify({ alias, groupKey }),
+          }),
     onSuccess: () => {
       setEditingModel(null)
       queryClient.invalidateQueries({ queryKey: ['fallback'] })

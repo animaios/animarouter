@@ -39,6 +39,16 @@ describe('Model group alias routes', () => {
     getDb().exec('DELETE FROM fallback_config; DELETE FROM models; DELETE FROM model_groups; DELETE FROM model_group_aliases;');
   });
 
+  it('rejects non-string alias payloads without throwing', async () => {
+    const rejected = await request(app, 'POST', '/api/models/groups/aliases', {
+      alias: 42,
+      groupKey: 'target-group',
+    });
+
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toBe('alias and groupKey are required');
+  });
+
   it('reconciles model group assignments when aliases are added and removed', async () => {
     const db = getDb();
     db.prepare(`
@@ -133,5 +143,42 @@ describe('Model group alias routes', () => {
     `).get('alias-model') as { model_group_id: number; fallback_group_id: number };
     expect(row.model_group_id).toBe(nextGroup.id);
     expect(row.fallback_group_id).toBe(nextGroup.id);
+  });
+
+  it('reconciles stale rows even when an alias upsert is a no-op', async () => {
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+      VALUES ('old-group', 'Old Group', 5, 'Medium')
+    `).run();
+    db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+      VALUES ('target-group', 'Target Group', 1, 'Large')
+    `).run();
+
+    const oldGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('old-group') as { id: number };
+    const targetGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('target-group') as { id: number };
+    db.prepare('INSERT INTO model_group_aliases (alias, group_key) VALUES (?, ?)').run('alias-model', 'target-group');
+    const modelInfo = db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, group_id, enabled)
+      VALUES ('route-test', 'alias-model', 'Alias Model', 75, 2, 1, 'Large', ?, 1)
+    `).run(oldGroup.id);
+    db.prepare('INSERT INTO fallback_config (model_db_id, priority, group_id, enabled) VALUES (?, 1, ?, 1)')
+      .run(modelInfo.lastInsertRowid, oldGroup.id);
+
+    const noChange = await request(app, 'POST', '/api/models/groups/aliases', {
+      alias: 'alias-model',
+      groupKey: 'target-group',
+    });
+    expect(noChange.status).toBe(200);
+
+    const row = db.prepare(`
+      SELECT m.group_id AS model_group_id, fc.group_id AS fallback_group_id
+      FROM models m
+      JOIN fallback_config fc ON fc.model_db_id = m.id
+      WHERE m.model_id = ?
+    `).get('alias-model') as { model_group_id: number; fallback_group_id: number };
+    expect(row.model_group_id).toBe(targetGroup.id);
+    expect(row.fallback_group_id).toBe(targetGroup.id);
   });
 });

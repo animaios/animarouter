@@ -151,7 +151,7 @@ modelsRouter.get('/groups', (_req: Request, res: Response) => {
 // POST /api/models/groups/aliases — create an alias
 modelsRouter.post('/groups/aliases', (req: Request, res: Response) => {
   const { alias, groupKey } = req.body as { alias?: string; groupKey?: string };
-  if (!alias?.trim() || !groupKey?.trim()) {
+  if (typeof alias !== 'string' || typeof groupKey !== 'string' || !alias.trim() || !groupKey.trim()) {
     res.status(400).json({ error: 'alias and groupKey are required' });
     return;
   }
@@ -175,8 +175,8 @@ modelsRouter.post('/groups/aliases', (req: Request, res: Response) => {
   `).run(normalizedAlias, normalizedGroupKey);
 
   invalidateAliasCache();
-  const result = write.changes > 0 ? reconcileGroups(db) : { groupsCreated: 0, modelsReassigned: 0 };
-  if (write.changes > 0) syncFallbackConfigGroupIds(db);
+  const result = reconcileGroups(db);
+  syncFallbackConfigGroupIds(db);
   res.status(write.changes > 0 ? 201 : 200).json({ alias: normalizedAlias, groupKey: normalizedGroupKey, ...result });
 });
 
