@@ -306,6 +306,33 @@ describe('proxyStreamChatCompletion', () => {
     expect(results[1].id).toBe('1');
   });
 
+  it('cancels the upstream stream when the consumer stops early', async () => {
+    const chunk = JSON.stringify({ id: '1', choices: [{ delta: { content: 'hi' } }] });
+    const encoder = new TextEncoder();
+    let cancelCalled = false;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+      },
+      cancel() {
+        cancelCalled = true;
+      },
+    });
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      body,
+      headers: new Headers(),
+    });
+
+    for await (const parsed of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+      expect(parsed.id).toBe('1');
+      break;
+    }
+
+    expect(cancelCalled).toBe(true);
+  });
+
   it('stops on data: [DONE]', async () => {
     const chunk1 = JSON.stringify({ id: '1', choices: [{ delta: { content: 'hi' } }] });
 

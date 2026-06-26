@@ -181,6 +181,8 @@ describe('Migration idempotency', () => {
     db.prepare('DELETE FROM model_groups').run();
 
     db.exec(`
+      ALTER TABLE models DROP COLUMN supports_tools;
+      ALTER TABLE models DROP COLUMN max_output_tokens;
       ALTER TABLE models DROP COLUMN group_id;
       ALTER TABLE fallback_config DROP COLUMN group_id;
       PRAGMA user_version = 4;
@@ -194,6 +196,8 @@ describe('Migration idempotency', () => {
       .map(col => col.name);
 
     expect(upgradedModelColumns).toContain('group_id');
+    expect(upgradedModelColumns).toContain('supports_tools');
+    expect(upgradedModelColumns).toContain('max_output_tokens');
     expect(upgradedFallbackColumns).toContain('group_id');
     expect((db2.prepare('SELECT COUNT(*) AS c FROM model_groups').get() as { c: number }).c).toBeGreaterThan(0);
     expect((db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1 AND group_id IS NULL').get() as { c: number }).c).toBe(0);

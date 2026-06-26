@@ -140,11 +140,15 @@ class CloudflareWorkerRelayTransport implements OutboundRelayTransport {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let completed = false;
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          completed = true;
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -153,7 +157,10 @@ class CloudflareWorkerRelayTransport implements OutboundRelayTransport {
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed || trimmed.startsWith(':')) continue; // skip empty/comment lines
-          if (trimmed === 'data: [DONE]') return;
+          if (trimmed === 'data: [DONE]') {
+            completed = true;
+            return;
+          }
           if (trimmed.startsWith('data: ')) {
             try {
               const parsed = JSON.parse(trimmed.slice(6));
@@ -165,6 +172,9 @@ class CloudflareWorkerRelayTransport implements OutboundRelayTransport {
         }
       }
     } finally {
+      if (!completed) {
+        await reader.cancel().catch(() => undefined);
+      }
       reader.releaseLock();
     }
   }

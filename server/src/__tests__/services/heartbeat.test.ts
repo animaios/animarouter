@@ -935,6 +935,36 @@ describe('Provider Health Heartbeat', () => {
       expect(recheckEvents[0].success).toBe(false);
     });
 
+    it('replaces an existing pending default recheck when a later custom delay is supplied', async () => {
+      const { keyId } = setupProvider();
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'hi' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      await pokeKey(keyId);
+      publishedEvents.length = 0;
+
+      markKeyUnhealthy(keyId, 'test-model', '429 rate limited', true);
+      expect(getPendingRechecks().has(healthKey(keyId, 'test-model'))).toBe(true);
+
+      const customDelayMs = 10 * 60 * 1000;
+      markKeyUnhealthy(keyId, 'test-model', 'daily quota exhausted', false, customDelayMs);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+      expect(publishedEvents.filter(e => e.type === 'heartbeat.recheck')).toHaveLength(0);
+
+      chatCompletion.mockResolvedValueOnce({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      await vi.advanceTimersByTimeAsync(customDelayMs - 90_000 + 100);
+
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents).toHaveLength(1);
+      expect(recheckEvents[0].success).toBe(true);
+    });
+
     it('uses default recheckSec for transient 429', async () => {
       const { keyId } = setupProvider();
       // First make the key healthy

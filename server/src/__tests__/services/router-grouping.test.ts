@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   routeRequest, refreshStatsCache, getRoutingStrategy, setRoutingStrategy, getRoutingScores,
 } from '../../services/router.js';
+import { initDegradation, recordFailure } from '../../services/degradation.js';
 import { getDb, initDb, setSetting } from '../../db/index.js';
 import * as crypto from '../../lib/crypto.js';
 
@@ -159,6 +160,7 @@ describe('group-aware routing', () => {
     );
     vi.clearAllMocks();
     (crypto.decrypt as any).mockReturnValue('mocked-api-key');
+    initDegradation();
     // Feature flag OFF by default — grouping tests explicitly enable it
     setSetting('model_grouping_enabled', 'false');
   });
@@ -342,6 +344,64 @@ describe('group-aware routing', () => {
       pinMode: true,
       preferredGroupId: groupId,
     })).toThrow(/Pinned model exhausted|exhausted/i);
+  });
+
+  it('preferredGroupId + pinMode does not fall through when the pinned group fails request filters', () => {
+    const groupId = addGroup({
+      groupKey: 'pinned-no-tools', displayName: 'Pinned No Tools',
+      intelligenceRank: 1, sizeLabel: 'Frontier',
+      priority: 1,
+      supportsTools: false,
+      providers: [
+        { platform: 'pinned-no-tools-provider', modelId: 'pinned/no-tools', name: 'No Tools', speedRank: 1 },
+      ],
+    });
+
+    addGroup({
+      groupKey: 'backup-tools', displayName: 'Backup Tools',
+      intelligenceRank: 5, sizeLabel: 'Medium',
+      priority: 2,
+      supportsTools: true,
+      providers: [
+        { platform: 'backup-tools-provider', modelId: 'backup/tools', name: 'Tools', speedRank: 1 },
+      ],
+    });
+
+    setSetting('model_grouping_enabled', 'true');
+    setRoutingStrategy('priority');
+    refreshStatsCache(getDb(), true);
+
+    expect(() => routeRequest(100, undefined, undefined, false, true, undefined, {
+      pinMode: true,
+      preferredGroupId: groupId,
+    })).toThrow(/Pinned model exhausted|exhausted/i);
+  });
+
+  it('applies degradation when ranking providers within a group', () => {
+    const db = getDb();
+    addGroup({
+      groupKey: 'degraded-provider-group', displayName: 'Degraded Provider Group',
+      intelligenceRank: 1, sizeLabel: 'Large',
+      priority: 1,
+      providers: [
+        { platform: 'degraded-fast-provider', modelId: 'provider/fast', name: 'Fast Degraded', speedRank: 1 },
+        { platform: 'healthy-slow-provider', modelId: 'provider/slow', name: 'Slow Healthy', speedRank: 100 },
+      ],
+    });
+
+    const degradedModel = db.prepare(`
+      SELECT id FROM models WHERE platform = ? AND model_id = ?
+    `).get('degraded-fast-provider', 'provider/fast') as { id: number };
+
+    setSetting('model_grouping_enabled', 'true');
+    setRoutingStrategy('fastest');
+    getRoutingStrategy(); // Ensure the router-owned degradation engine is initialized before recording failures.
+    for (let i = 0; i < 5; i++) recordFailure(degradedModel.id, 'major');
+    refreshStatsCache(getDb(), true);
+
+    const r = routeRequest(100);
+    expect(r.platform).toBe('healthy-slow-provider');
+    expect(r.modelId).toBe('provider/slow');
   });
 
   // ── Vision / tools / context filters respect group-level properties ─────

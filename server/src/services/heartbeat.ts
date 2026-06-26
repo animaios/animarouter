@@ -157,6 +157,17 @@ function scheduleRecheck(keyId: number, modelId: string, customDelayMs?: number)
       existing.inFlight = false;
       return;
     }
+    if (customDelayMs !== undefined) {
+      existing.generation = ++recheckGeneration;
+      existing.attempt = 1;
+      if (existing.timerRef) clearTimeout(existing.timerRef);
+      existing.timerRef = setTimeout(() => {
+        fireRecheck(keyId, modelId, 1).catch(err => {
+          console.error(`[Heartbeat] Recheck error for key#${keyId} model ${modelId}:`, err);
+        });
+      }, customDelayMs);
+      return;
+    }
     return; // Already has a pending timer (not in-flight) — skip
   }
 

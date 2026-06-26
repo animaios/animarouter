@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { getDb, getSetting } from '../db/index.js';
 import { hasProvider, getAllProviders } from '../providers/index.js';
 import { syncModelsFromProvider } from './custom.js';
-import { invalidateAliasCache, propagateGroupProperties } from '../db/model-groups.js';
+import { invalidateAliasCache, propagateGroupProperties, reconcileGroups } from '../db/model-groups.js';
 
 export const modelsRouter = Router();
 
@@ -163,6 +163,7 @@ modelsRouter.post('/groups/aliases', (req: Request, res: Response) => {
   }
 
   invalidateAliasCache();
+  reconcileGroups(db);
   res.status(201).json({ alias, groupKey });
 });
 
@@ -175,6 +176,7 @@ modelsRouter.delete('/groups/aliases/:alias', (req: Request, res: Response) => {
     return;
   }
   invalidateAliasCache();
+  reconcileGroups(db);
   res.json({ success: true });
 });
 

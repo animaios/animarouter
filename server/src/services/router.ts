@@ -87,6 +87,7 @@ interface GroupChainRow {
 // A provider (model row) within a group.
 interface ProviderRow {
   model_db_id: number;
+  group_id: number;
   platform: string;
   model_id: string;
   display_name: string;
@@ -476,8 +477,8 @@ function scoreChainEntry(
   const degradationFactor = getDegradationFactor(entry.model_db_id);
   const boost = getBoost(entry.model_db_id);
 
-  const baseScore = combineScore({ reliability, speed, intelligence, latency, degradationFactor }, weights);
-  const score = baseScore * boost;
+  const baseScore = combineScore({ reliability, speed, intelligence, latency }, weights);
+  const score = baseScore * degradationFactor * boost;
   return { axes: { reliability, speed, intelligence, latency }, degradationFactor, boost, score };
 }
 
@@ -580,10 +581,11 @@ function providerSubScore(
   const degradationFactor = getDegradationFactor(provider.model_db_id);
   const boost = getBoost(provider.model_db_id);
 
-  const subScore = combineScore(
-    { reliability, speed: speedVal, intelligence: 0, latency, degradationFactor },
+  const baseSubScore = combineScore(
+    { reliability, speed: speedVal, intelligence: 0, latency },
     subWeights,
-  ) * boost;
+  );
+  const subScore = baseSubScore * degradationFactor * boost;
 
   return { subScore, axes: { reliability, speed: speedVal, latency } };
 }
@@ -663,21 +665,35 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         throw pinnedModelExhaustedError();
       }
     }
+    const routeGroupChain = pinMode && preferredGroupId != null
+      ? sortedGroupChain.filter(g => g.group_id === preferredGroupId)
+      : sortedGroupChain;
+    if (pinMode && preferredGroupId != null && routeGroupChain.length === 0) {
+      throw pinnedModelExhaustedError();
+    }
 
     // Pre-compute normalization ranges for provider sub-scoring
-    // We need to collect ALL providers from ALL enabled groups first
-    const allProviders: ProviderRow[] = [];
-    for (const group of sortedGroupChain) {
-      const providers = db.prepare(`
-        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+    // Load providers once and group them in memory to avoid N+1 queries on the
+    // API hot path.
+    const routeGroupIds = routeGroupChain.map(g => g.group_id);
+    let allProviders: ProviderRow[] = [];
+    if (routeGroupIds.length > 0) {
+      const placeholders = routeGroupIds.map(() => '?').join(', ');
+      allProviders = db.prepare(`
+        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
                m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
                m.key_id, m.enabled, m.supports_vision, m.supports_tools,
                m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
                m.max_output_tokens
         FROM models m
-        WHERE m.group_id = ? AND m.enabled = 1
-      `).all(group.group_id) as ProviderRow[];
-      allProviders.push(...providers);
+        WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
+      `).all(...routeGroupIds) as ProviderRow[];
+    }
+    const providersByGroup = new Map<number, ProviderRow[]>();
+    for (const provider of allProviders) {
+      const providers = providersByGroup.get(provider.group_id);
+      if (providers) providers.push(provider);
+      else providersByGroup.set(provider.group_id, [provider]);
     }
 
     // Compute min/max for speed/latency normalization across all providers
@@ -691,7 +707,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
     const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
 
-    for (const group of sortedGroupChain) {
+    for (const group of routeGroupChain) {
       const isPreferredGroup = preferredGroupId != null && group.group_id === preferredGroupId;
       // Filter by vision/tools/context at the GROUP level
       if (requireVision && !group.supports_vision) {
@@ -707,16 +723,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         continue;
       }
 
-      // Load providers for this group
-      const providers = db.prepare(`
-        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
-               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
-               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
-               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
-               m.max_output_tokens
-        FROM models m
-        WHERE m.group_id = ? AND m.enabled = 1
-      `).all(group.group_id) as ProviderRow[];
+      const providers = providersByGroup.get(group.group_id) ?? [];
 
       if (providers.length === 0) {
         if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
@@ -1225,7 +1232,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     const allProviders: ProviderRow[] = [];
     for (const group of sortedGroups) {
       const providers = db.prepare(`
-        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
                m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
                m.key_id, m.enabled, m.supports_vision, m.supports_tools,
                m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
@@ -1258,7 +1265,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     for (const group of sortedGroups) {
       // Load enabled providers for this group
       const providers = db.prepare(`
-        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
                m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
                m.key_id, m.enabled, m.supports_vision, m.supports_tools,
                m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,

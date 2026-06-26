@@ -268,20 +268,18 @@ export interface ScoreInputs {
   speed: number;         // [0,1]
   intelligence: number;  // [0,1]
   latency: number;       // [0,1]
-  degradationFactor: number; // [0,1] multiplier from degradation engine
 }
 
 /**
- * Convex base (∈[0,1]) × degradation factor guardrail. The weights are assumed
- * to sum to 1; if a caller passes a non-normalized vector we renormalize so
- * the base never escapes [0,1].
+ * Convex base (∈[0,1]). The weights are assumed to sum to 1; if a caller passes
+ * a non-normalized vector we renormalize so the base never escapes [0,1].
  */
 export function combineScore(inputs: ScoreInputs, weights: RoutingWeights): number {
   const wSum = weights.reliability + weights.speed + weights.intelligence + weights.latency || 1;
-  const base =
-    (weights.reliability * inputs.reliability +
-      weights.speed * inputs.speed +
-      weights.intelligence * inputs.intelligence +
-      weights.latency * inputs.latency) / wSum;
-  return base * inputs.degradationFactor;
+  return (
+    weights.reliability * inputs.reliability +
+    weights.speed * inputs.speed +
+    weights.intelligence * inputs.intelligence +
+    weights.latency * inputs.latency
+  ) / wSum;
 }

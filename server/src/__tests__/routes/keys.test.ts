@@ -87,6 +87,37 @@ describe('Keys API', () => {
     expect(status).toBe(400);
   });
 
+  it('POST /api/keys persists label when re-enabling an existing keyless provider row', async () => {
+    const db = getDb();
+    const slug = 'keyless-label-test';
+    db.prepare(`
+      INSERT OR REPLACE INTO custom_providers (slug, display_name, base_url, keyless, api_format)
+      VALUES (?, ?, ?, 1, 'openai')
+    `).run(slug, 'Keyless Label Test', 'https://keyless-label.example.com/v1');
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, use_proxy)
+      VALUES (?, 'Old Label', 'enc', 'iv', 'tag', 'error', 0, 0)
+    `).run(slug);
+    const existing = db.prepare('SELECT id FROM api_keys WHERE platform = ?').get(slug) as { id: number };
+
+    const { status, body } = await request(app, 'POST', '/api/keys', {
+      platform: slug,
+      label: 'Fresh Label',
+      useProxy: true,
+    });
+
+    expect(status).toBe(200);
+    expect(body.id).toBe(existing.id);
+    expect(body.label).toBe('Fresh Label');
+
+    const row = db.prepare('SELECT label, status, enabled, use_proxy FROM api_keys WHERE id = ?')
+      .get(existing.id) as { label: string; status: string; enabled: number; use_proxy: number };
+    expect(row.label).toBe('Fresh Label');
+    expect(row.status).toBe('unknown');
+    expect(row.enabled).toBe(1);
+    expect(row.use_proxy).toBe(1);
+  });
+
   it('DELETE /api/keys/:id removes a key', async () => {
     const { body: created } = await request(app, 'POST', '/api/keys', {
       platform: 'groq',

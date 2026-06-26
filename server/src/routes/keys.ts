@@ -115,7 +115,8 @@ keysRouter.post('/', (req: Request, res: Response) => {
     if (isKeyless) {
       const existing = db.prepare('SELECT id FROM api_keys WHERE platform = ? LIMIT 1').get(platform) as { id: number } | undefined;
       if (existing) {
-        db.prepare("UPDATE api_keys SET enabled = 1, status = 'unknown', use_proxy = ? WHERE id = ?").run(useProxyValue, existing.id);
+        db.prepare("UPDATE api_keys SET label = ?, enabled = 1, status = 'unknown', use_proxy = ? WHERE id = ?")
+          .run(label ?? '', useProxyValue, existing.id);
         res.status(200).json({
           id: existing.id,
           platform,

@@ -106,8 +106,10 @@ function createTables(db: Database.Database) {
           tpd_limit INTEGER,
           monthly_token_budget TEXT NOT NULL DEFAULT '',
           context_window INTEGER,
+          max_output_tokens INTEGER,
           enabled INTEGER NOT NULL DEFAULT 1,
           supports_vision INTEGER NOT NULL DEFAULT 0,
+          supports_tools INTEGER NOT NULL DEFAULT 0,
           group_id INTEGER REFERENCES model_groups(id),
           UNIQUE(platform, model_id)
         );
@@ -301,6 +303,7 @@ function createTables(db: Database.Database) {
   ensureCustomProvidersMaxParallelColumn(db);
   ensureSessionsLastUsedColumn(db);
   ensureCustomProvidersStickySessionsColumn(db);
+  ensureModelCapabilityColumns(db);
   ensureModelsBenchmarkColumns(db);
   ensureBenchmarkUnificationColumns(db);
   ensureBenchmarkSourceWeightsTable(db);
@@ -460,6 +463,19 @@ function ensureApiKeysUseProxyColumn(db: Database.Database) {
   if (!columns.some(col => col.name === 'use_proxy')) {
     db.prepare('ALTER TABLE api_keys ADD COLUMN use_proxy INTEGER NOT NULL DEFAULT 0').run();
     console.log('✅ Added use_proxy column to api_keys');
+  }
+}
+
+// Model capability columns are schema-level fields used by routing, grouping,
+// custom provider sync, and max_tokens fallback. Keep them unconditional rather
+// than relying only on historical data migrations.
+function ensureModelCapabilityColumns(db: Database.Database) {
+  const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
+  if (!columns.some(col => col.name === 'supports_tools')) {
+    db.prepare('ALTER TABLE models ADD COLUMN supports_tools INTEGER NOT NULL DEFAULT 0').run();
+  }
+  if (!columns.some(col => col.name === 'max_output_tokens')) {
+    db.prepare('ALTER TABLE models ADD COLUMN max_output_tokens INTEGER').run();
   }
 }
 

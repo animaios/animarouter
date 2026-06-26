@@ -79,35 +79,29 @@ describe('scoring: intelligence axis', () => {
 // Degradation factor tests are in degradation.test.ts
 
 describe('scoring: combineScore', () => {
-  const perfect = { reliability: 1, speed: 1, intelligence: 1, latency: 1, degradationFactor: 1 };
+  const perfect = { reliability: 1, speed: 1, intelligence: 1, latency: 1 };
 
   it('stays within [0,1] for in-range inputs', () => {
     expect(combineScore(perfect, BANDIT_PRESETS.balanced)).toBeLessThanOrEqual(1);
-    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, latency: 0, degradationFactor: 1 }, BANDIT_PRESETS.balanced)).toBe(0);
+    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, latency: 0 }, BANDIT_PRESETS.balanced)).toBe(0);
   });
 
   it('a 100%-reliable slow model beats a 0%-reliable fast one under balanced — no hand-cap needed', () => {
-    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
-    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.balanced);
+    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, latency: 0.5 }, BANDIT_PRESETS.balanced);
+    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, latency: 0.5 }, BANDIT_PRESETS.balanced);
     expect(reliable).toBeGreaterThan(flaky);
   });
 
   it('the smartest preset ranks a high-intelligence model above a fast one', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.smartest);
+    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5 }, BANDIT_PRESETS.smartest);
+    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5 }, BANDIT_PRESETS.smartest);
     expect(smart).toBeGreaterThan(fast);
   });
 
   it('the fastest preset flips that ordering', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5, degradationFactor: 1 }, BANDIT_PRESETS.fastest);
+    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5 }, BANDIT_PRESETS.fastest);
+    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5 }, BANDIT_PRESETS.fastest);
     expect(fast).toBeGreaterThan(smart);
-  });
-
-  it('degradation factor multiplies base down', () => {
-    const base = combineScore(perfect, BANDIT_PRESETS.balanced);
-    const throttled = combineScore({ ...perfect, degradationFactor: 0.4 }, BANDIT_PRESETS.balanced);
-    expect(throttled).toBeCloseTo(base * 0.4, 5);
   });
 
   it('every preset weight vector sums to 1', () => {
