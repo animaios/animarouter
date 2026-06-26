@@ -678,12 +678,6 @@ customRouter.patch('/api/custom-models/:id', (req: Request, res: Response) => {
   if (d.enabled !== undefined) {
     updates.push('enabled = ?');
     values.push(d.enabled ? 1 : 0);
-    // Only clear auto_disabled_at when re-enabling; preserve it when disabling
-    // so the auto-disable badge remains visible for previously-auto-disabled models.
-    if (d.enabled) {
-      updates.push('auto_disabled_at = ?');
-      values.push(null);
-    }
   }
 
   if (updates.length === 0) {
