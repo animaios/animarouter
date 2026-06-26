@@ -1069,7 +1069,8 @@ export default function FallbackPage() {
                         size="xs"
                         className="gap-1 text-muted-foreground hover:text-foreground"
                         onClick={() => handleUnarchive(model)}
-                        disabled={unarchiveModelMutation.isPending}
+                        disabled={unarchiveModelMutation.isPending || localEntries !== null}
+                        title={localEntries !== null ? 'Save or discard reorder changes before unarchiving' : 'Unarchive model'}
                       >
                         <RotateCcw className="size-3" />
                         Unarchive
