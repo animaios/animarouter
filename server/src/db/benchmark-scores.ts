@@ -108,7 +108,7 @@ export function recomputeBenchmarkComposite(
   let recomputed = 0;
 
   const select = db.prepare(`
-    SELECT id, aa_score, aa_score_updated, aa_confidence
+    SELECT id, aa_score, aa_score_updated, aa_confidence, bg_score, bg_score_updated, bg_confidence, aiiq_score, aiiq_score_updated, aiiq_confidence
     FROM models WHERE id = ?
   `);
 
@@ -158,7 +158,21 @@ export function recomputeBenchmarkComposite(
         totalWeight += w;
       }
 
-      // (SWE-rebench and NIMStats purged — only AA is used as intelligence source)
+      // BenchGecko source
+      const bgW = weights.get('bg');
+      if (bgW?.enabled && row.bg_score != null) {
+        const w = effectiveWeight(bgW.weight, row.bg_score_updated, row.bg_confidence, 'bg');
+        totalWeightedScore += row.bg_score * w;
+        totalWeight += w;
+      }
+
+      // AI IQ source
+      const aiiqW = weights.get('aiiq');
+      if (aiiqW?.enabled && row.aiiq_score != null) {
+        const w = effectiveWeight(aiiqW.weight, row.aiiq_score_updated, row.aiiq_confidence, 'aiiq');
+        totalWeightedScore += row.aiiq_score * w;
+        totalWeight += w;
+      }
 
       if (totalWeight <= 0) continue; // no valid sources (R4.4)
 
@@ -170,7 +184,7 @@ export function recomputeBenchmarkComposite(
         continue;
       }
 
-      const lastUpdate = row.aa_score_updated;
+      const lastUpdate = [row.aa_score_updated, row.bg_score_updated, row.aiiq_score_updated].filter(t => t != null).sort().pop() ?? null;
 
       update.run(
         composite,
@@ -543,3 +557,9 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
   lastFetchTime = Date.now();
   return { ...lastFetchResult, source: 'live', affectedIds };
 }
+
+// ─── RE-EXPORTS from benchmark source adapters ────────────────────────────
+// These are re-exported here so benchmarks.ts can import them from the
+// same module as fetchAAScores, keeping the import surface simple.
+export { fetchBenchGeckoScores } from '../services/benchmark-sources/benchgecko.js';
+export { fetchAIIQScores } from '../services/benchmark-sources/aiiq.js';

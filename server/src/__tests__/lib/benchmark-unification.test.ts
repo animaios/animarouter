@@ -237,24 +237,27 @@ describe('recomputeBenchmarkComposite', () => {
     expect(row.benchmark_composite_version).toBe(1);
   });
 
-  it('R4.1: single intelligence source (AA) → pass-through', () => {
+  it('R4.1: 3 intelligence sources → weighted average (AA=0.50, BG=0.30, AIIQ=0.20)', () => {
     const now = new Date().toISOString();
     const id = insertModel({
       model_id: 'all-sources-model',
       canonical_model_key: 'all-sources-model',
       aa_score: 58, aa_score_updated: now, aa_confidence: 1.0,
+      bg_score: 54, bg_score_updated: now, bg_confidence: 1.0,
+      aiiq_score: 52, aiiq_score_updated: now, aiiq_confidence: 1.0,
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    // AA is the sole intelligence source → pass-through
-    expect(row.benchmark_score).toBeCloseTo(58, 1);
+    // (58×0.50 + 54×0.30 + 52×0.20) / 1.0 = 55.6
+    const expected = 58 * 0.50 + 54 * 0.30 + 52 * 0.20;
+    expect(row.benchmark_score).toBeCloseTo(expected, 1);
     expect(row.benchmark_composite_version).toBe(1);
   });
 
-  it('R4.2: single source → weight is 1.0 (pass-through)', () => {
+  it('R4.2: single source → effective weight 1.0 (pass-through)', () => {
     const now = new Date().toISOString();
     const id = insertModel({
       model_id: 'two-sources-model',
@@ -266,7 +269,26 @@ describe('recomputeBenchmarkComposite', () => {
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
+    // Only AA has data → effective weight 0.50 / 0.50 = 1.0 for AA
     expect(row.benchmark_score).toBeCloseTo(58, 1);
+  });
+
+  it('3 intelligence sources → weighted average', () => {
+    const now = new Date().toISOString();
+    const id = insertModel({
+      model_id: 'three-sources-model',
+      canonical_model_key: 'three-sources-model',
+      aa_score: 58, aa_score_updated: now, aa_confidence: 1.0,
+      bg_score: 54, bg_score_updated: now, bg_confidence: 1.0,
+      aiiq_score: 52, aiiq_score_updated: now, aiiq_confidence: 1.0,
+    });
+
+    const weights = getWeights();
+    recomputeBenchmarkComposite(db, new Set([id]), weights);
+
+    const row = getModel(id);
+    // Expected: (58×0.50 + 54×0.30 + 52×0.20) / 1.0 = 29 + 16.2 + 10.4 = 55.6
+    expect(row.benchmark_score).toBeCloseTo(55.6, 1);
   });
 
   it('R4.4: no sources → benchmark_score stays NULL (skipped)', () => {
@@ -284,12 +306,6 @@ describe('recomputeBenchmarkComposite', () => {
   });
 
   it('R8.1b: canary skips row when composite would be invalid', () => {
-    // validateComposite(NaN)=false, Infinity=false, <0=false, >100=false
-    // Since weighted average of valid [0,100] scores can't produce invalid values,
-    // we verify the canary integration by checking validateComposite is called
-    // and the function correctly skips when it returns false.
-    // Direct validateComposite tests above cover all invalid inputs.
-    // Here we verify that a valid model IS written (canary passes):
     const now = new Date().toISOString();
     const id = insertModel({
       model_id: 'canary-valid-model',
@@ -323,21 +339,32 @@ describe('recomputeBenchmarkComposite', () => {
   });
 
   it('staleness decay reduces composite for stale source (R4.5)', () => {
+    const fresh = new Date().toISOString();
     const stale = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(); // 10 days ago
 
     const id = insertModel({
       model_id: 'stale-source-model',
       canonical_model_key: 'stale-source-model',
       aa_score: 58, aa_score_updated: stale, aa_confidence: 1.0,
+      bg_score: 54, bg_score_updated: fresh, bg_confidence: 1.0,
+      aiiq_score: 52, aiiq_score_updated: fresh, aiiq_confidence: 1.0,
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    // AA is sole source with decay: effective weight = 1.0 * decay, score still 58
-    // Single source → pass-through regardless of staleness decay
-    expect(row.benchmark_score).toBeCloseTo(58, 1);
+    // AA decay at 10 days = 0.5, so effective AA weight = 0.50 * 0.5 = 0.25
+    // BG fresh: weight = 0.30 * 1.0 = 0.30
+    // AIIQ fresh: weight = 0.20 * 1.0 = 0.20
+    // Total weight = 0.25 + 0.30 + 0.20 = 0.75
+    const aaDecay = Math.pow(0.5, 10 / 10); // 0.5
+    const aaW = 0.50 * aaDecay;
+    const bgW = 0.30;
+    const aiiqW = 0.20;
+    const totalW = aaW + bgW + aiiqW;
+    const expected = (58 * aaW + 54 * bgW + 52 * aiiqW) / totalW;
+    expect(row.benchmark_score).toBeCloseTo(expected, 0);
   });
 
   it('confidence reduces effective weight (R4.6)', () => {
@@ -368,19 +395,23 @@ describe('recomputeBenchmarkComposite', () => {
     expect(count).toBe(0);
   });
 
-  it('last_benchmark_update = AA source timestamp', () => {
-    const ts = new Date().toISOString();
+  it('last_benchmark_update = latest of all source timestamps', () => {
+    const tsAa = new Date(Date.now() - 2000).toISOString();
+    const tsBg = new Date(Date.now() - 1000).toISOString(); // latest
+    const tsAiiq = new Date(Date.now() - 3000).toISOString();
     const id = insertModel({
       model_id: 'timestamp-model',
       canonical_model_key: 'timestamp-model',
-      aa_score: 50, aa_score_updated: ts, aa_confidence: 1.0,
+      aa_score: 50, aa_score_updated: tsAa, aa_confidence: 1.0,
+      bg_score: 48, bg_score_updated: tsBg, bg_confidence: 1.0,
+      aiiq_score: 46, aiiq_score_updated: tsAiiq, aiiq_confidence: 1.0,
     });
 
     const weights = getWeights();
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    expect(row.last_benchmark_update).toBe(ts);
+    expect(row.last_benchmark_update).toBe(tsBg);
   });
 });
 
@@ -391,24 +422,30 @@ describe('loadSourceWeights', () => {
     initDb(':memory:');
   });
 
-  it('loads 1 source weight from DB (AA only)', () => {
+  it('loads 3 source weights from DB (AA, BenchGecko, AIIQ)', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
-    expect(weights.size).toBe(1);
+    expect(weights.size).toBe(3);
     expect(weights.has('aa')).toBe(true);
+    expect(weights.has('bg')).toBe(true);
+    expect(weights.has('aiiq')).toBe(true);
   });
 
-  it('seed weights: aa=1.0 (sole intelligence source)', () => {
+  it('seed weights: aa=0.50, bg=0.30, aiiq=0.20', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
-    expect(weights.size).toBe(1);
-    expect(weights.get('aa')?.weight).toBeCloseTo(1.0, 2);
+    expect(weights.size).toBe(3);
+    expect(weights.get('aa')?.weight).toBeCloseTo(0.50, 2);
+    expect(weights.get('bg')?.weight).toBeCloseTo(0.30, 2);
+    expect(weights.get('aiiq')?.weight).toBeCloseTo(0.20, 2);
   });
 
-  it('AA source enabled by default', () => {
+  it('all 3 sources enabled by default', () => {
     invalidateSourceWeightsCache();
     const weights = loadSourceWeights();
     expect(weights.get('aa')?.enabled).toBe(true);
+    expect(weights.get('bg')?.enabled).toBe(true);
+    expect(weights.get('aiiq')?.enabled).toBe(true);
   });
 
   it('caches weights (second call returns same Map)', () => {

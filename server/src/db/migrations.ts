@@ -74,6 +74,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateModelsV32CommandCode(db);
   migrateModelsV33BenchmarkScore(db);
   migrateModelsV36PurgeSweNim(db);
+  migrateModelsV37MultiSourceBenchmarks(db);
 
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
@@ -258,7 +259,12 @@ function ensureBenchmarkUnificationColumns(db: Database.Database) {
     ['aa_score', 'REAL'],
     ['aa_score_updated', 'TEXT'],
     ['aa_confidence', 'REAL'],
-
+    ['bg_score', 'REAL'],
+    ['bg_score_updated', 'TEXT'],
+    ['bg_confidence', 'REAL'],
+    ['aiiq_score', 'REAL'],
+    ['aiiq_score_updated', 'TEXT'],
+    ['aiiq_confidence', 'REAL'],
     ['benchmark_composite_version', 'INTEGER'],
   ];
 
@@ -288,10 +294,11 @@ function ensureBenchmarkSourceWeightsTable(db: Database.Database) {
   `);
 
   // Seed default weights (idempotent)
-  // aa=1.0: sole intelligence source (SWE-rebench and NIMStats purged).
+  // aa=0.50, bg=0.30, aiiq=0.20 (sums to 1.0 for proper weighted average)
   const insert = db.prepare(`INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES (?, ?, 1)`);
-  insert.run('aa', 1.0);
-
+  insert.run('aa', 0.50);
+  insert.run('bg', 0.30);
+  insert.run('aiiq', 0.20);
 }
 
 // ── Dynamic Degradation: persistent penalty state ─────────────────────────
@@ -2602,5 +2609,21 @@ function migrateModelsV36PurgeSweNim(db: Database.Database) {
   } catch (err: any) {
     // Non-fatal — the weights table might not exist in very old DBs
     console.warn('[V36] Weight cleanup skipped:', err.message);
+  }
+}
+
+// ── V37: Multi-source benchmarks — add BenchGecko and AI IQ weights ──
+// Reweights: aa=0.50, bg=0.30, aiiq=0.20 (sums to 1.0 for proper weighted average).
+function migrateModelsV37MultiSourceBenchmarks(db: Database.Database) {
+  try {
+    // Update AA weight from 1.0 to 0.50
+    db.prepare("UPDATE benchmark_source_weights SET weight = 0.50, updated_at = CURRENT_TIMESTAMP WHERE name = 'aa' AND weight != 0.50").run();
+    // Insert BenchGecko weight
+    db.prepare("INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES ('bg', 0.30, 1)").run();
+    // Insert AI IQ weight
+    db.prepare("INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES ('aiiq', 0.20, 1)").run();
+    console.log('[V37] Added BenchGecko (0.30) and AIIQ (0.20) weights; AA reweighted to 0.50');
+  } catch (err: any) {
+    console.warn('[V37] Multi-source weight setup skipped:', err.message);
   }
 }
