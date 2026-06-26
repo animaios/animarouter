@@ -75,7 +75,7 @@ const SETTING_ORDER: Record<string, readonly string[]> = {
   ],
 }
 
-const GROUP_RANK = new Map(GROUP_ORDER.map((group, index) => [group, index]))
+const GROUP_RANK: ReadonlyMap<string, number> = new Map(GROUP_ORDER.map((group, index) => [group, index]))
 
 function rankSetting(group: string, key: string): number {
   const order = SETTING_ORDER[group]
@@ -131,7 +131,7 @@ export default function SettingsPage() {
         (acc[s.group] ??= []).push(s)
         return acc
       },
-      {} as Record<(typeof GROUP_ORDER)[number], FeatureSetting[]>,
+      {} as Record<string, FeatureSetting[]>,
     )
 
     return Object.entries(grouped)
