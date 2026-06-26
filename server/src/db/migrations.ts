@@ -6,7 +6,7 @@ import { BenchmarkService } from '../services/benchmarks.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
 // additions, indexes, FKs) that use "IF NOT EXISTS" should stay unconditional.
-const CURRENT_DATA_VERSION = 3;
+const CURRENT_DATA_VERSION = 4;
 
 export function migrateDbSchema(db: Database.Database) {
   // Schema-level changes run every boot — they're idempotent (IF NOT EXISTS).
@@ -75,6 +75,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateModelsV33BenchmarkScore(db);
   migrateModelsV36PurgeSweNim(db);
   migrateModelsV37MultiSourceBenchmarks(db);
+  migrateModelsV38ModelGroups(db);
 
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
@@ -92,23 +93,24 @@ export function migrateDbSchema(db: Database.Database) {
 function createTables(db: Database.Database) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS models (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      platform TEXT NOT NULL,
-      model_id TEXT NOT NULL,
-      display_name TEXT NOT NULL,
-      intelligence_rank INTEGER NOT NULL,
-      speed_rank INTEGER NOT NULL,
-      size_label TEXT NOT NULL DEFAULT '',
-      rpm_limit INTEGER,
-      rpd_limit INTEGER,
-      tpm_limit INTEGER,
-      tpd_limit INTEGER,
-      monthly_token_budget TEXT NOT NULL DEFAULT '',
-      context_window INTEGER,
-      enabled INTEGER NOT NULL DEFAULT 1,
-      supports_vision INTEGER NOT NULL DEFAULT 0,
-      UNIQUE(platform, model_id)
-    );
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          platform TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          intelligence_rank INTEGER NOT NULL,
+          speed_rank INTEGER NOT NULL,
+          size_label TEXT NOT NULL DEFAULT '',
+          rpm_limit INTEGER,
+          rpd_limit INTEGER,
+          tpm_limit INTEGER,
+          tpd_limit INTEGER,
+          monthly_token_budget TEXT NOT NULL DEFAULT '',
+          context_window INTEGER,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          supports_vision INTEGER NOT NULL DEFAULT 0,
+          group_id INTEGER REFERENCES model_groups(id),
+          UNIQUE(platform, model_id)
+        );
 
     -- Performance statistics cache for real token/sec calculations
     CREATE VIEW IF NOT EXISTS model_stats_cache AS
@@ -183,12 +185,13 @@ function createTables(db: Database.Database) {
     );
 
     CREATE TABLE IF NOT EXISTS fallback_config (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      model_db_id INTEGER NOT NULL REFERENCES models(id),
-      priority INTEGER NOT NULL,
-      enabled INTEGER NOT NULL DEFAULT 1,
-      UNIQUE(model_db_id)
-    );
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          model_db_id INTEGER NOT NULL REFERENCES models(id),
+          group_id INTEGER REFERENCES model_groups(id),
+          priority INTEGER NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(model_db_id)
+        );
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -217,19 +220,59 @@ function createTables(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_rate_limit_cooldowns_expires ON rate_limit_cooldowns(expires_at_ms);
     CREATE INDEX IF NOT EXISTS idx_api_keys_platform ON api_keys(platform);
 
-    CREATE TABLE IF NOT EXISTS custom_providers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      slug TEXT NOT NULL UNIQUE,
-      display_name TEXT NOT NULL,
-      base_url TEXT NOT NULL,
-      rpm_limit INTEGER,
-      rpd_limit INTEGER,
-      tpm_limit INTEGER,
-      tpd_limit INTEGER,
-      max_parallel_requests INTEGER,
-      sticky_sessions_enabled INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
+        CREATE TABLE IF NOT EXISTS model_groups (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          group_key TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          benchmark_score REAL,
+          aa_score REAL,
+          aa_score_updated TEXT,
+          aa_confidence REAL DEFAULT 1.0,
+          bg_score REAL,
+          bg_score_updated TEXT,
+          bg_confidence REAL DEFAULT 1.0,
+          aiiq_score REAL,
+          aiiq_score_updated TEXT,
+          aiiq_confidence REAL DEFAULT 1.0,
+          nim_score REAL,
+          nim_score_updated TEXT,
+          nim_confidence REAL DEFAULT 1.0,
+          nim_quantized_score REAL,
+          nim_quantized_score_updated TEXT,
+          nim_quantized_confidence REAL DEFAULT 1.0,
+          benchmark_composite_version INTEGER DEFAULT 1,
+          size_label TEXT DEFAULT 'Custom',
+          intelligence_rank INTEGER,
+          context_window INTEGER,
+          max_output_tokens INTEGER,
+          supports_vision INTEGER DEFAULT 0,
+          supports_tools INTEGER DEFAULT 1,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_model_groups_key ON model_groups(group_key);
+
+        CREATE TABLE IF NOT EXISTS model_group_aliases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          alias TEXT NOT NULL UNIQUE,
+          group_key TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS custom_providers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          slug TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          base_url TEXT NOT NULL,
+          rpm_limit INTEGER,
+          rpd_limit INTEGER,
+          tpm_limit INTEGER,
+          tpd_limit INTEGER,
+          max_parallel_requests INTEGER,
+          sticky_sessions_enabled INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
   `);
 
   ensureRequestKeyIdColumn(db);
@@ -245,6 +288,8 @@ function createTables(db: Database.Database) {
   ensureBenchmarkSourceWeightsTable(db);
   ensureDegradationTable(db);
   ensureDegradationBoostColumn(db);
+  ensureApiKeysUseProxyColumn(db);
+
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
@@ -386,6 +431,31 @@ function ensureApiKeysBaseUrlColumn(db: Database.Database) {
   const columns = db.prepare('PRAGMA table_info(api_keys)').all() as { name: string }[];
   if (!columns.some(col => col.name === 'base_url')) {
     db.prepare('ALTER TABLE api_keys ADD COLUMN base_url TEXT').run();
+  }
+}
+
+// `use_proxy` flags an API key to route through the FreeLLMProxy Cloudflare
+// Worker transport for IP rotation and header stripping. Defaults to 0 (off).
+function ensureApiKeysUseProxyColumn(db: Database.Database) {
+  const columns = db.prepare('PRAGMA table_info(api_keys)').all() as { name: string }[];
+  if (!columns.some(col => col.name === 'use_proxy')) {
+    db.prepare('ALTER TABLE api_keys ADD COLUMN use_proxy INTEGER NOT NULL DEFAULT 0').run();
+    console.log('✅ Added use_proxy column to api_keys');
+  }
+}
+
+// Add group_id column to models and fallback_config tables for model grouping.
+// Idempotent — safe to call on every boot.
+function ensureModelGroupsColumns(db: Database.Database) {
+  const modelsCols = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
+  if (!modelsCols.some(c => c.name === 'group_id')) {
+    db.prepare('ALTER TABLE models ADD COLUMN group_id INTEGER REFERENCES model_groups(id)').run();
+    console.log('✅ Added group_id column to models');
+  }
+  const fbCols = db.prepare('PRAGMA table_info(fallback_config)').all() as { name: string }[];
+  if (!fbCols.some(c => c.name === 'group_id')) {
+    db.prepare('ALTER TABLE fallback_config ADD COLUMN group_id INTEGER REFERENCES model_groups(id)').run();
+    console.log('✅ Added group_id column to fallback_config');
   }
 }
 
@@ -2623,7 +2693,102 @@ function migrateModelsV37MultiSourceBenchmarks(db: Database.Database) {
     // Insert AI IQ weight
     db.prepare("INSERT OR IGNORE INTO benchmark_source_weights (name, weight, enabled) VALUES ('aiiq', 0.20, 1)").run();
     console.log('[V37] Added BenchGecko (0.30) and AIIQ (0.20) weights; AA reweighted to 0.50');
-  } catch (err: any) {
-    console.warn('[V37] Multi-source weight setup skipped:', err.message);
-  }
-}
+      } catch (err: any) {
+        console.warn('[V37] Multi-source weight setup skipped:', err.message);
+      }
+    }
+
+    // ───── V38: Model Groups — populate model_groups and model_group_aliases from existing models ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+    function migrateModelsV38ModelGroups(db: Database.Database) {
+      try {
+        // Check if model_groups already has data (idempotent)
+        const existing = db.prepare('SELECT COUNT(*) as cnt FROM model_groups').get() as { cnt: number };
+        if (existing.cnt > 0) {
+          console.log('[V38] Model groups already populated, skipping');
+          return;
+        }
+
+        // Get all models with their canonical_model_key
+        const models = db.prepare(
+          'SELECT id, model_id, display_name, benchmark_score, intelligence_rank, size_label, context_window, max_output_tokens, supports_vision, supports_tools, canonical_model_key FROM models WHERE enabled = 1'
+        ).all() as Array<{
+          id: number;
+          model_id: string;
+          display_name: string;
+          benchmark_score: number | null;
+          intelligence_rank: number | null;
+          size_label: string;
+          context_window: number | null;
+          max_output_tokens: number | null;
+          supports_vision: number;
+          supports_tools: number;
+          canonical_model_key: string | null;
+        }>;
+
+        // Group by canonical_model_key (or model_id as fallback)
+        const groups = new Map<string, Array<typeof models[0]>>();
+        for (const model of models) {
+          const key = model.canonical_model_key ?? model.model_id;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key)!.push(model);
+        }
+
+        const insertGroup = db.prepare(`
+          INSERT INTO model_groups
+            (group_key, display_name, benchmark_score, intelligence_rank, size_label, context_window,
+             max_output_tokens, supports_vision, supports_tools)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        const setModelGroup = db.prepare('UPDATE models SET group_id = ? WHERE id = ?');
+        const insertAlias = db.prepare('INSERT OR IGNORE INTO model_group_aliases (alias, group_key) VALUES (?, ?)');
+
+        const tx = db.transaction(() => {
+          for (const [groupKey, members] of groups) {
+            // Sort by benchmark_score DESC, then by id ASC (first created)
+            members.sort((a, b) => {
+              const aScore = a.benchmark_score ?? -1;
+              const bScore = b.benchmark_score ?? -1;
+              if (bScore !== aScore) return bScore - aScore;
+              return a.id - b.id;
+            });
+
+            const best = members[0];
+            const info = insertGroup.run(
+              groupKey,
+              best.display_name,
+              best.benchmark_score,
+              best.intelligence_rank,
+              best.size_label || 'Custom',
+              best.context_window,
+              best.max_output_tokens,
+              best.supports_vision,
+              best.supports_tools,
+            );
+            const groupId = info.lastInsertRowid as number;
+
+            // Assign all members to this group
+            for (const member of members) {
+              setModelGroup.run(groupId, member.id);
+            }
+
+            // Add aliases from other members' canonical_model_key or model_id
+            for (const member of members) {
+              const memberKey = member.canonical_model_key ?? member.model_id;
+              if (memberKey !== groupKey) {
+                insertAlias.run(memberKey, groupKey);
+              }
+            }
+          }
+        });
+        tx();
+
+        // Populate fallback_config.group_id from models.group_id
+        db.prepare(
+          'UPDATE fallback_config SET group_id = (SELECT group_id FROM models WHERE id = fallback_config.model_db_id) WHERE group_id IS NULL'
+        ).run();
+
+        console.log(`[V38] Created ${groups.size} model groups from ${models.length} models`);
+      } catch (err: any) {
+        console.warn('[V38] Model groups population skipped:', err.message);
+      }
+    }

@@ -15,6 +15,8 @@ vi.mock('../../lib/crypto.js', async () => {
 
 vi.mock('../../services/events.js', () => ({
   publish: vi.fn(),
+  publishDeduped: vi.fn(),
+  resetEventThrottle: vi.fn(),
 }));
 
 const ORIGINAL_DEV_MODE = process.env.DEV_MODE;

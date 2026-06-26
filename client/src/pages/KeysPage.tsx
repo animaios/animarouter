@@ -56,6 +56,7 @@ const PLATFORMS: { value: Platform; label: string; url: string; keyless?: boolea
 
 const statusDot: Record<string, string> = {
   healthy: 'bg-emerald-500',
+  sick: 'bg-yellow-500',
   rate_limited: 'bg-amber-500',
   invalid: 'bg-rose-500',
   error: 'bg-rose-500',
@@ -64,6 +65,7 @@ const statusDot: Record<string, string> = {
 
 const statusLabel: Record<string, string> = {
   healthy: 'healthy',
+  sick: 'sick',
   rate_limited: 'rate-limited',
   invalid: 'invalid',
   error: 'error',
@@ -74,6 +76,7 @@ interface HealthPlatform {
   platform: string
   totalKeys: number
   healthyKeys: number
+  sickKeys: number
   rateLimitedKeys: number
   invalidKeys: number
   errorKeys: number

@@ -27,6 +27,7 @@ Key server modules: `server/src/providers/` (per-provider adapters extending `Ba
 - **Never modify source code directly.** Delegate all code changes via `spawn_agent`.
 - **Never commit secrets** — API keys, tokens, encryption keys go through the import script pattern (see `RULES.md §12`).
 - **Never touch git branches** — do not switch, reset, push, pull, merge, rebase, stash, or create branches unless the user explicitly instructs you to.
+- **Never use `git stash`** — other agents are working on this repo; stashing can lose or conflict with their in-flight changes.
 - **Run a subagent code review after every spec implementation.** Once all code changes land and pass tests, spawn a subagent with a full review prompt covering correctness, edge cases, consistency, and test gaps. Block finalization on any critical/major findings.
 - Use `npm` (not yarn/pnpm) — this is an npm workspaces monorepo.
 - After `spawn_agent` returns code, verify with jcodemunch (blast radius, references) before moving on.

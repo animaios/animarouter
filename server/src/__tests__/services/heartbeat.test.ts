@@ -48,6 +48,8 @@ describe('Provider Health Heartbeat', () => {
     publishedEvents = [];
     vi.doMock('../../services/events.js', () => ({
       publish: vi.fn((evt: any) => publishedEvents.push(evt)),
+      publishDeduped: vi.fn((evt: any) => publishedEvents.push(evt)),
+      resetEventThrottle: vi.fn(),
     }));
 
     vi.doMock('../../lib/crypto.js', async (importOriginal) => {

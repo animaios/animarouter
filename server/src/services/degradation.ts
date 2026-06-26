@@ -8,7 +8,7 @@
  *
  * Pure logic module — no database access, no HTTP concerns.
  */
-import { publish } from './events.js';
+import { publishDeduped as publish } from './events.js';
 import { getFeatureSetting } from './feature-settings.js';
 
 // ── Configuration types ────────────────────────────────────────────────────────
@@ -276,7 +276,7 @@ export function recordFailure(modelDbId: number, tier: 'minor' | 'major'): void 
     consecutive: state.consecutiveHits,
     consecutiveMajor: state.consecutiveMajorHits,
     at: now,
-  } as any);
+  });
 }
 
 // ── Success recording ──────────────────────────────────────────────────────────
@@ -325,7 +325,7 @@ export function recordSuccess(modelDbId: number): void {
     modelDbId,
     penalty: state.penalty,
     at: now,
-  } as any);
+  });
 }
 
 // ── Read-only queries ──────────────────────────────────────────────────────────
@@ -417,7 +417,7 @@ export function setBoost(modelDbId: number, value: number): void {
     oldBoost,
     newBoost: clamped,
     at: Date.now(),
-  } as any);
+  });
 }
 
 /**
@@ -438,7 +438,7 @@ export function resetBoost(modelDbId: number): void {
     oldBoost,
     newBoost: 1.0,
     at: Date.now(),
-  } as any);
+  });
 
   // If penalty is also 0, clean up the state to prevent Map bloat
   if (state.penalty <= 0) {

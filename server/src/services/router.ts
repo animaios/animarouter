@@ -74,6 +74,8 @@ export interface RouteResult {
   keyId: number;
   platform: string;
   displayName: string;
+  /** Whether this route should use the FreeLLMProxy transport instead of direct provider connection. */
+  useProxy: boolean;
   // Daily limits for this model, so a 429 handler can tell a genuine daily
   // exhaustion (escalate the cooldown) from a transient per-minute spike.
   rpdLimit: number | null;
@@ -715,18 +717,19 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       }
 
       return {
-        provider: provider,
-        modelId: entry.model_id,
-        modelDbId: entry.model_db_id,
-        apiKey: decryptedKey,
-        keyId: key.id,
-        platform: entry.platform,
-        displayName: entry.display_name,
-        rpdLimit: limits.rpd,
-        tpdLimit: limits.tpd,
-        maxOutputTokens: entry.max_output_tokens,
-        release,
-      };
+              provider: provider,
+              modelId: entry.model_id,
+              modelDbId: entry.model_db_id,
+              apiKey: decryptedKey,
+              keyId: key.id,
+              platform: entry.platform,
+              displayName: entry.display_name,
+              rpdLimit: limits.rpd,
+              tpdLimit: limits.tpd,
+              maxOutputTokens: entry.max_output_tokens,
+              release,
+              useProxy: false,
+            };
     }
 
     // If we reach here, this specific model has NO available keys.

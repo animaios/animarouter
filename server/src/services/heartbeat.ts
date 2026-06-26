@@ -14,7 +14,7 @@ import { getDb } from '../db/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { buildProviderFor } from '../providers/index.js';
 import { classifyError, recordFailure, recordSuccess } from './degradation.js';
-import { publish } from './events.js';
+import { publishDeduped as publish } from './events.js';
 import { getFeatureSetting } from './feature-settings.js';
 
 // ── Per-key health state ─────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ interface KeyHealth {
   lastError?: string;
 }
 
-const keyHealthMap = new Map<number, KeyHealth>();
+export const keyHealthMap = new Map<number, KeyHealth>();
 
 /** Get current health state for a key (read-only). */
 export function getKeyHealth(keyId: number): KeyHealth | undefined {
@@ -67,6 +67,8 @@ export function markKeyUnhealthy(keyId: number, error?: string): void {
     healthy: false,
     lastError: error ?? 'evicted by traffic 429',
   });
+  const db = getDb();
+  db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyId);
   scheduleRecheck(keyId);
 }
 
@@ -472,7 +474,7 @@ async function runCycle(skipGate = false): Promise<number> {
     const seenKeys = new Set<number>();
     for (const model of models) {
       const keys = db.prepare(
-        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
+        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error', 'sick')"
       ).all(model.platform) as any[];
 
       for (const key of keys) {
@@ -526,6 +528,8 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
       healthy: false,
       lastError: 'decrypt failed',
     });
+    const db = getDb();
+    db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyRow.id);
     return;
   }
 
@@ -547,6 +551,8 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
       lastPingAt: Date.now(),
       healthy: true,
     });
+    const db = getDb();
+    db.prepare("UPDATE api_keys SET status = 'healthy' WHERE id = ? AND status = 'sick'").run(keyRow.id);
     recordSuccess(modelDbId);
     publish({
       type: 'heartbeat.ping',
@@ -580,6 +586,8 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
         healthy: false,
         lastError: (err?.message ?? 'unknown').slice(0, 120),
       });
+      const db = getDb();
+      db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyRow.id);
     }
 
     // Only record model-level degradation for retryable errors (5xx, 429)

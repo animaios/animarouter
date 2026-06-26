@@ -25,14 +25,19 @@ interface KeyEvictedEvent extends RequestEventBase { type: 'routing.key_evicted'
 interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; }
 interface HeartbeatRecheckEvent extends TimestampOnly { type: 'heartbeat.recheck'; keyId: number; provider: string; model: string; success: boolean; latencyMs: number; attempt: number; error?: string; }
 interface HeartbeatCycleSkippedEvent extends TimestampOnly { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; }
+interface DegradationHitEvent extends TimestampOnly { type: 'degradation.hit'; modelDbId: number; tier: string; penalty: number; consecutive: number; consecutiveMajor: number; }
+interface DegradationRecoveryEvent extends TimestampOnly { type: 'degradation.recovery'; modelDbId: number; penalty: number; }
 interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text: string; }
 
-type LiveEvent =
+type LiveEventBase =
   | RequestStartEvent | RequestDoneEvent | RequestErrorEvent | RequestAbortedEvent
   | KeyExhaustedEvent | ModelSwitchEvent | ProviderFastFailEvent
   | KeyEvictedEvent
   | HeartbeatPingEvent | HeartbeatRecheckEvent | HeartbeatCycleSkippedEvent
+  | DegradationHitEvent | DegradationRecoveryEvent
   | StreamChunkEvent;
+
+type LiveEvent = LiveEventBase & { _suppressed?: number };
 
 /** Exhaustive-check helper: assigning a LiveEvent to this type in a switch
  *  default branch will cause a compile error if any variant is unhandled. */
@@ -84,10 +89,11 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         text: `🚫 [${rId}] Key #${evt.keyId} evicted (${evt.reason === 'rate_limited' ? '429 rate limit' : evt.reason === 'payment_required' ? '402 out of credits' : 'auth error'}) on ${evt.provider}/${evt.model}` };
     }
     case 'heartbeat.ping': {
+      const sup = evt._suppressed ? ` (×${evt._suppressed + 1} suppressed)` : '';
       if (evt.success) {
-        return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} healthy (${evt.latencyMs}ms)` };
+        return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} healthy (${evt.latencyMs}ms)${sup}` };
       }
-      return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
+      return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}${sup}` };
     }
     case 'heartbeat.recheck':
       if (evt.success) {
@@ -98,6 +104,14 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         text: `⚡ [recheck] key#${evt.keyId} on ${evt.provider}/${evt.model} still unhealthy: ${evt.error?.slice(0, 60) ?? 'unknown'} (attempt ${evt.attempt})` };
     case 'heartbeat.cycle_skipped': {
       return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] Cycle skipped: ${evt.reason} (idle ${Math.round(evt.lastActivityAgeMs / 1000)}s)` };
+    }
+    case 'degradation.hit': {
+      const sup = evt._suppressed ? ` (×${evt._suppressed + 1} suppressed)` : '';
+      return { id: 'deg', ts, kind: 'warn', text: `📉 [degradation] model#${evt.modelDbId} ${evt.tier} hit (penalty ${evt.penalty.toFixed(1)}, ${evt.consecutive} consecutive)${sup}` };
+    }
+    case 'degradation.recovery': {
+      const sup = evt._suppressed ? ` (×${evt._suppressed + 1} suppressed)` : '';
+      return { id: 'deg', ts, kind: 'info', text: `📈 [degradation] model#${evt.modelDbId} recovering (penalty ${evt.penalty.toFixed(1)})${sup}` };
     }
     case 'stream.chunk': {
       return null; // Stream chunks are not rendered in the log feed

@@ -552,6 +552,18 @@ export const REGISTRY: FeatureSettingDef[] = [
     effect: 'live',
     group: 'Scoring',
   },
+  // ── Proxy Transport ──
+  {
+    key: 'proxy_transport_enabled',
+    label: 'FreeLLMProxy Transport',
+    description:
+      'Route requests through FreeLLMProxy instead of connecting directly to providers. Requires FREELLM_PROXY_URL and FREELLM_PROXY_API_KEY environment variables. When enabled, keys flagged with use_proxy will route through the proxy.',
+    type: 'boolean',
+    default: false,
+    envVar: 'PROXY_TRANSPORT_ENABLED',
+    effect: 'live',
+    group: 'Proxy Transport',
+  },
 ];
 
 // ── Resolution ─────────────────────────────────────────────────────────────

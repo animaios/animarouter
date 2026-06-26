@@ -30,13 +30,15 @@ const addKeySchema = z.object({
   platform: z.string().min(1, 'platform is required'),
   key: z.string().optional(),
   label: z.string().optional(),
+  useProxy: z.boolean().optional(),
 });
 
 const updateKeySchema = z.object({
   enabled: z.boolean().optional(),
   label: z.string().optional(),
-}).refine(data => data.enabled !== undefined || data.label !== undefined, {
-  message: 'At least one of enabled or label must be provided',
+  useProxy: z.boolean().optional(),
+}).refine(data => data.enabled !== undefined || data.label !== undefined || data.useProxy !== undefined, {
+  message: 'At least one of enabled, label, or useProxy must be provided',
 });
 
 // List all keys (masked)
@@ -45,25 +47,26 @@ keysRouter.get('/', (_req: Request, res: Response) => {
   const rows = db.prepare('SELECT * FROM api_keys ORDER BY created_at DESC').all() as any[];
 
   const keys = rows.map(row => {
-    let maskedKey = '****';
-    try {
-      const realKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
-      maskedKey = maskKey(realKey);
-    } catch {
-      maskedKey = '[decrypt failed]';
-    }
-    return {
-      id: row.id,
-      platform: row.platform,
-      label: row.label,
-      maskedKey,
-      baseUrl: row.base_url ?? null,
-      status: row.status,
-      enabled: row.enabled === 1,
-      createdAt: row.created_at,
-      lastCheckedAt: row.last_checked_at,
-    };
-  });
+      let maskedKey = '****';
+      try {
+        const realKey = decrypt(row.encrypted_key, row.iv, row.auth_tag);
+        maskedKey = maskKey(realKey);
+      } catch {
+        maskedKey = '[decrypt failed]';
+      }
+      return {
+        id: row.id,
+        platform: row.platform,
+        label: row.label,
+        maskedKey,
+        baseUrl: row.base_url ?? null,
+        status: row.status,
+        enabled: row.enabled === 1,
+        useProxy: row.use_proxy === 1,
+        createdAt: row.created_at,
+        lastCheckedAt: row.last_checked_at,
+      };
+    });
 
   res.json(keys);
 });
@@ -76,67 +79,71 @@ keysRouter.post('/', (req: Request, res: Response) => {
     return;
   }
 
-  const { platform, label } = parsed.data;
+  const { platform, label, useProxy } = parsed.data;
 
-  // Resolve platform → provider. Built-ins come from the registry; custom
-  // slugs come from custom_providers (and their base URL gets stamped on the
-  // key row so the denormalized schema stays consistent with the new
-  // canonical source of truth).
-  const db = getDb();
-  const provider = getProvider(platform as any) ?? buildProviderFor(platform);
-  if (!provider) {
-    res.status(400).json({ error: { message: `Unknown platform '${platform}'` } });
-    return;
-  }
-  const isKeyless = provider.keyless === true;
-  const rawKey = parsed.data.key?.trim() ?? '';
-
-  if (!isKeyless && !rawKey) {
-    res.status(400).json({ error: { message: 'key is required' } });
-    return;
-  }
-
-  // Keyless providers (Kilo anon) store a sentinel so routing sees the platform
-  // as configured; the provider omits the auth header on outgoing calls.
-  const keyToStore = isKeyless ? (rawKey || 'no-key') : rawKey;
-
-  // For custom slugs, look up the base URL so the key row carries it
-  // (denormalized — custom_providers is the source of truth, but having
-  // base_url on api_keys keeps older queries from breaking).
-  const baseUrl = (provider as { baseUrl?: string }).baseUrl ?? null;
-
-  // A keyless provider needs only one sentinel row — re-enable an existing one
-  // instead of piling up duplicates each time the user clicks "Add".
-  if (isKeyless) {
-    const existing = db.prepare('SELECT id FROM api_keys WHERE platform = ? LIMIT 1').get(platform) as { id: number } | undefined;
-    if (existing) {
-      db.prepare("UPDATE api_keys SET enabled = 1, status = 'unknown' WHERE id = ?").run(existing.id);
-      res.status(200).json({
-        id: existing.id,
-        platform,
-        label: label ?? '',
-        maskedKey: maskKey(keyToStore),
-        status: 'unknown',
-        enabled: true,
-      });
+    // Resolve platform → provider. Built-ins come from the registry; custom
+    // slugs come from custom_providers (and their base URL gets stamped on the
+    // key row so the denormalized schema stays consistent with the new
+    // canonical source of truth).
+    const db = getDb();
+    const provider = getProvider(platform as any) ?? buildProviderFor(platform);
+    if (!provider) {
+      res.status(400).json({ error: { message: `Unknown platform '${platform}'` } });
       return;
     }
-  }
+    const isKeyless = provider.keyless === true;
+    const rawKey = parsed.data.key?.trim() ?? '';
+
+    if (!isKeyless && !rawKey) {
+      res.status(400).json({ error: { message: 'key is required' } });
+      return;
+    }
+
+    // Keyless providers (Kilo anon) store a sentinel so routing sees the platform
+    // as configured; the provider omits the auth header on outgoing calls.
+    const keyToStore = isKeyless ? (rawKey || 'no-key') : rawKey;
+
+    // For custom slugs, look up the base URL so the key row carries it
+    // (denormalized — custom_providers is the source of truth, but having
+    // base_url on api_keys keeps older queries from breaking).
+    const baseUrl = (provider as { baseUrl?: string }).baseUrl ?? null;
+
+    const useProxyValue = useProxy ? 1 : 0;
+
+    // A keyless provider needs only one sentinel row — re-enable an existing one
+    // instead of piling up duplicates each time the user clicks "Add".
+    if (isKeyless) {
+      const existing = db.prepare('SELECT id FROM api_keys WHERE platform = ? LIMIT 1').get(platform) as { id: number } | undefined;
+      if (existing) {
+        db.prepare("UPDATE api_keys SET enabled = 1, status = 'unknown', use_proxy = ? WHERE id = ?").run(useProxyValue, existing.id);
+        res.status(200).json({
+          id: existing.id,
+          platform,
+          label: label ?? '',
+          maskedKey: maskKey(keyToStore),
+          status: 'unknown',
+          enabled: true,
+          useProxy: useProxy ?? false,
+        });
+        return;
+      }
+    }
 
   const { encrypted, iv, authTag } = encrypt(keyToStore);
-  const result = db.prepare(`
-    INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url)
-    VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?)
-  `).run(platform, label ?? '', encrypted, iv, authTag, baseUrl);
+    const result = db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled, base_url, use_proxy)
+      VALUES (?, ?, ?, ?, ?, 'unknown', 1, ?, ?)
+    `).run(platform, label ?? '', encrypted, iv, authTag, baseUrl, useProxyValue);
 
-  res.status(201).json({
-    id: result.lastInsertRowid,
-    platform,
-    label: label ?? '',
-    maskedKey: maskKey(keyToStore),
-    status: 'unknown',
-    enabled: true,
-  });
+    res.status(201).json({
+      id: result.lastInsertRowid,
+      platform,
+      label: label ?? '',
+      maskedKey: maskKey(keyToStore),
+      status: 'unknown',
+      enabled: true,
+      useProxy: useProxy ?? false,
+    });
   // Fire-and-forget: warm up the key immediately via heartbeat
   pokeKey(Number(result.lastInsertRowid)).catch(e => console.warn('[Keys] pokeKey failed:', e));
 });
@@ -221,31 +228,36 @@ keysRouter.patch('/:id', (req: Request, res: Response) => {
     return;
   }
 
-  const { enabled, label } = parsed.data;
-  const updates: string[] = [];
-  const values: (string | number)[] = [];
+  const { enabled, label, useProxy } = parsed.data;
+    const updates: string[] = [];
+    const values: (string | number)[] = [];
 
-  if (enabled !== undefined) {
-    updates.push('enabled = ?');
-    values.push(enabled ? 1 : 0);
-  }
-  if (label !== undefined) {
-    updates.push('label = ?');
-    values.push(label);
-  }
+    if (enabled !== undefined) {
+      updates.push('enabled = ?');
+      values.push(enabled ? 1 : 0);
+    }
+    if (label !== undefined) {
+      updates.push('label = ?');
+      values.push(label);
+    }
+    if (useProxy !== undefined) {
+      updates.push('use_proxy = ?');
+      values.push(useProxy ? 1 : 0);
+    }
 
-  values.push(id);
+    values.push(id);
 
-  const db = getDb();
-  const result = db.prepare(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    const db = getDb();
+    const result = db.prepare(`UPDATE api_keys SET ${updates.join(', ')} WHERE id = ?`).run(...values);
 
-  if (result.changes === 0) {
-    res.status(404).json({ error: { message: 'Key not found' } });
-    return;
-  }
+    if (result.changes === 0) {
+      res.status(404).json({ error: { message: 'Key not found' } });
+      return;
+    }
 
-  const response: Record<string, unknown> = { success: true };
-  if (enabled !== undefined) response.enabled = enabled;
-  if (label !== undefined) response.label = label;
-  res.json(response);
+    const response: Record<string, unknown> = { success: true };
+    if (enabled !== undefined) response.enabled = enabled;
+    if (label !== undefined) response.label = label;
+    if (useProxy !== undefined) response.useProxy = useProxy;
+    res.json(response);
 });

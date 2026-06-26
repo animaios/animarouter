@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { getDb } from '../db/index.js';
+import { getDb, getSetting } from '../db/index.js';
 import { hasProvider, getAllProviders } from '../providers/index.js';
 import { syncModelsFromProvider } from './custom.js';
+import { invalidateAliasCache, propagateGroupProperties } from '../db/model-groups.js';
 
 export const modelsRouter = Router();
 
@@ -102,5 +103,123 @@ modelsRouter.post('/sync-all', async (_req: Request, res: Response) => {
     providers: targets.length,
     errors,
     added_by_provider,
+  });
+});
+
+// ── Model Groups ──────────────────────────────────────────────────────────
+// CRUD for model groups, aliases, and group-level property updates.
+
+// GET /api/models/groups — list all groups
+modelsRouter.get('/groups', (_req: Request, res: Response) => {
+  const db = getDb();
+  const groups = db.prepare(`
+    SELECT mg.*, COUNT(m.id) AS model_count
+    FROM model_groups mg
+    LEFT JOIN models m ON m.group_id = mg.id
+    GROUP BY mg.id
+    ORDER BY mg.intelligence_rank ASC
+  `).all() as any[];
+
+  res.json(groups.map(g => ({
+    id: g.id,
+    groupKey: g.group_key,
+    displayName: g.display_name,
+    benchmarkScore: g.benchmark_score,
+    intelligenceRank: g.intelligence_rank,
+    sizeLabel: g.size_label,
+    contextWindow: g.context_window,
+    maxOutputTokens: g.max_output_tokens,
+    supportsVision: g.supports_vision === 1,
+    supportsTools: g.supports_tools === 1,
+    enabled: g.enabled === 1,
+    modelCount: g.model_count,
+  })));
+});
+
+// POST /api/models/groups/aliases — create an alias
+modelsRouter.post('/groups/aliases', (req: Request, res: Response) => {
+  const { alias, groupKey } = req.body as { alias?: string; groupKey?: string };
+  if (!alias || !groupKey) {
+    res.status(400).json({ error: 'alias and groupKey are required' });
+    return;
+  }
+
+  const db = getDb();
+  // Verify the target group exists
+  const group = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get(groupKey) as { id: number } | undefined;
+  if (!group) {
+    res.status(404).json({ error: `Group "${groupKey}" not found` });
+    return;
+  }
+
+  try {
+    db.prepare('INSERT INTO model_group_aliases (alias, group_key) VALUES (?, ?)').run(alias, groupKey);
+  } catch (err: any) {
+    if (err.message?.includes('UNIQUE')) {
+      res.status(409).json({ error: `Alias "${alias}" already exists` });
+      return;
+    }
+    throw err;
+  }
+
+  invalidateAliasCache();
+  res.status(201).json({ alias, groupKey });
+});
+
+// DELETE /api/models/groups/aliases/:alias — delete an alias
+modelsRouter.delete('/groups/aliases/:alias', (req: Request, res: Response) => {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM model_group_aliases WHERE alias = ?').run(req.params.alias);
+  if (result.changes === 0) {
+    res.status(404).json({ error: 'Alias not found' });
+    return;
+  }
+  invalidateAliasCache();
+  res.json({ success: true });
+});
+
+// PATCH /api/models/groups/:groupKey — update group properties
+modelsRouter.patch('/groups/:groupKey', (req: Request, res: Response) => {
+  const db = getDb();
+  const group = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get(req.params.groupKey) as { id: number } | undefined;
+  if (!group) {
+    res.status(404).json({ error: 'Group not found' });
+    return;
+  }
+
+  const allowed = ['display_name', 'benchmark_score', 'intelligence_rank', 'size_label', 'context_window', 'max_output_tokens', 'supports_vision', 'supports_tools', 'enabled'];
+  const updates: string[] = [];
+  const values: any[] = [];
+
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) {
+      updates.push(`${key} = ?`);
+      values.push(req.body[key]);
+    }
+  }
+
+  if (updates.length === 0) {
+    res.status(400).json({ error: 'No valid fields to update' });
+    return;
+  }
+
+  values.push(group.id);
+  db.prepare(`UPDATE model_groups SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+  // Propagate updated properties to member models
+  propagateGroupProperties(db, group.id);
+
+  const updated = db.prepare('SELECT * FROM model_groups WHERE id = ?').get(group.id) as any;
+  res.json({
+    success: true,
+    groupKey: updated.group_key,
+    displayName: updated.display_name,
+    benchmarkScore: updated.benchmark_score,
+    intelligenceRank: updated.intelligence_rank,
+    sizeLabel: updated.size_label,
+    contextWindow: updated.context_window,
+    maxOutputTokens: updated.max_output_tokens,
+    supportsVision: updated.supports_vision === 1,
+    supportsTools: updated.supports_tools === 1,
   });
 });

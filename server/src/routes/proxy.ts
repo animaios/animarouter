@@ -17,6 +17,7 @@ import { getContextHandoffMode, recordIncomingMessages, maybeInjectContextHandof
 import { publish } from '../services/events.js';
 import { getFeatureSetting } from '../services/feature-settings.js';
 import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
+import { isProxyTransportConfigured, proxyChatCompletion, proxyStreamChatCompletion, computeWorkerIndex } from '../services/proxy-transport.js';
 
 export const proxyRouter = Router();
 
@@ -847,7 +848,28 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // real bound lets the model actually generate.
     const effectiveMaxTokens = max_tokens ?? route.maxOutputTokens ?? undefined;
 
-    try {
+        // ── Proxy transport decision ─────────────────────────────────
+        // When the key is flagged use_proxy AND the feature flag is enabled AND
+        // the required env vars are set, route through the FreeLLMProxy instead
+        // of connecting directly. All post-processing (degradation, sticky model,
+        // token accounting, tool rescue) applies identically.
+        const proxyTransportEnabled = getFeatureSetting('proxy_transport_enabled') as boolean;
+        const useProxyTransport = route.useProxy && proxyTransportEnabled && isProxyTransportConfigured();
+        if (useProxyTransport && sessionKey) {
+          const DEFAULT_PROXY_WORKER_COUNT = 3;
+          const workerIndex = computeWorkerIndex(sessionKey, DEFAULT_PROXY_WORKER_COUNT);
+          publish({
+            type: 'routing.worker_affinity_selected',
+            id: requestId,
+            sessionKey: sessionKey.slice(0, 8),
+            keyId: route.keyId,
+            workerIndex,
+            model: route.modelId,
+            at: Date.now(),
+          });
+        }
+
+        try {
       if (stream) {
         // — Stream turn-integrity (#231 audit) —
         // The old loop forwarded upstream chunks verbatim and called any
@@ -903,13 +925,21 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         const writeChunk = (c: unknown) => res.write(`data: ${JSON.stringify(c)}\n\n`);
 
         try {
-          const gen = route.provider.streamChatCompletion(
-            route.apiKey, outboundMessages, route.modelId,
-            {
-              temperature, max_tokens: effectiveMaxTokens, top_p, tools, tool_choice, parallel_tool_calls,
-              reasoning_effort, thinking,
-            },
-          );
+          const streamOptions = {
+                      temperature, max_tokens: effectiveMaxTokens, top_p, tools, tool_choice, parallel_tool_calls,
+                      reasoning_effort, thinking,
+                    };
+                    const gen = useProxyTransport
+                      ? proxyStreamChatCompletion(
+                          (route.provider as { baseUrl?: string }).baseUrl ?? `https://api.openai.com/v1`,
+                          route.apiKey,
+                          { model: route.modelId, messages: outboundMessages, ...streamOptions },
+                          sessionKey || undefined,
+                        )
+                      : route.provider.streamChatCompletion(
+                          route.apiKey, outboundMessages, route.modelId,
+                          streamOptions,
+                        );
 
           for await (const chunk of gen) {
             const anyChunk = chunk as Record<string, any>;
@@ -1083,13 +1113,21 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           throw streamErr;
         }
       } else {
-        const result = await route.provider.chatCompletion(
-          route.apiKey, outboundMessages, route.modelId,
-          {
-            temperature, max_tokens: effectiveMaxTokens, top_p, tools, tool_choice, parallel_tool_calls,
-            reasoning_effort, thinking,
-          },
-        );
+              const chatOptions = {
+                temperature, max_tokens: effectiveMaxTokens, top_p, tools, tool_choice, parallel_tool_calls,
+                reasoning_effort, thinking,
+              };
+              const result = useProxyTransport
+                ? await proxyChatCompletion(
+                    (route.provider as { baseUrl?: string }).baseUrl ?? `https://api.openai.com/v1`,
+                    route.apiKey,
+                    { model: route.modelId, messages: outboundMessages, ...chatOptions },
+                    sessionKey || undefined,
+                  )
+                : await route.provider.chatCompletion(
+                    route.apiKey, outboundMessages, route.modelId,
+                    chatOptions,
+                  );
         // Empty completion (no text, no tool calls) → fail over rather than
         // return a transport-level "success" the caller can't act on. Mirrors
         // the zero-chunk streaming case above.

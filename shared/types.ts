@@ -142,7 +142,7 @@ export interface ModelListRow {
   context_window: number | null;
 }
 
-export type KeyStatus = 'healthy' | 'rate_limited' | 'invalid' | 'error' | 'unknown';
+export type KeyStatus = 'healthy' | 'sick' | 'rate_limited' | 'invalid' | 'error' | 'unknown';
 
 export interface ApiKey {
   id: number;

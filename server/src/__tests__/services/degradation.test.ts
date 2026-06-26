@@ -20,9 +20,12 @@ import * as events from '../../services/events.js';
 
 vi.mock('../../services/events.js', () => ({
   publish: vi.fn(),
+  publishDeduped: vi.fn(),
+  resetEventThrottle: vi.fn(),
 }));
 
-const publishMock = vi.mocked(events.publish);
+const publishDedupedMock = vi.mocked(events.publishDeduped);
+const publishMock = publishDedupedMock;
 
 beforeEach(() => {
   vi.useFakeTimers();

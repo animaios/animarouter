@@ -33,6 +33,12 @@ export type SearchableModel = { displayName: string; modelId: string; platform: 
 /**
  * Pure filter helper. All callers go through this so the match rules stay
  * consistent across pages.
+ *
+ * When model_grouping_enabled is true, callers may pass group-level fields
+ * (groupKey, displayName from the group) or provider-level fields — the
+ * same normalisation + multi-token AND logic applies either way.
+ * TODO: Add group-aware search mode that matches against groupKey and
+ *       group display_name, expanding matched groups to show all providers.
  */
 export function matchesModelQuery(query: string, fields: SearchableModel): boolean {
   const q = normalizeForSearch(query)

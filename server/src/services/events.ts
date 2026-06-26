@@ -8,8 +8,10 @@
  * Capacity is capped so a stalled SSE client never balloons memory.
  */
 import type { Response } from 'express';
+import { LogThrottle } from '../lib/log-throttle.js';
 
-export type LiveEvent =
+/** Base event shape without dedup metadata — what publishers construct. */
+export type LiveEventBase =
   | { type: 'request.start'; id: string; model?: string; stream: boolean; at: number }
   | { type: 'request.done'; id: string; model: string; provider: string; keyId: number; latencyMs: number; tokens?: { in: number; out: number }; at: number }
   | { type: 'request.error'; id: string; error: string; at: number }
@@ -18,12 +20,19 @@ export type LiveEvent =
   | { type: 'routing.model_switch'; id: string; from: string; to: string; reason: string; at: number }
   | { type: 'routing.provider_fastfail'; id: string; provider: string; failedModelCount: number; at: number }
   | { type: 'routing.key_evicted'; id: string; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required' | 'auth_error'; at: number }
+  | { type: 'routing.key_transient'; id: string; provider: string; keyId: number; model: string; reason: string; at: number }
   | { type: 'routing.key_affinity_selected'; id: string; sessionKey: string; keyId: number; model: string; at: number }
+  | { type: 'routing.worker_affinity_selected'; id: string; sessionKey: string; keyId: number; workerIndex: number; model: string; at: number }
   | { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; at: number }
   | { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; at: number }
   | { type: 'heartbeat.recheck'; keyId: number; provider: string; model: string; success: boolean; latencyMs: number; attempt: number; error?: string; at: number }
   | { type: 'degradation.boost'; modelDbId: number; oldBoost: number; newBoost: number; at: number }
+  | { type: 'degradation.hit'; modelDbId: number; tier: string; penalty: number; consecutive: number; consecutiveMajor: number; at: number }
+  | { type: 'degradation.recovery'; modelDbId: number; penalty: number; at: number }
   | { type: 'stream.chunk'; id: string; text: string; at: number };
+
+/** Live event as delivered to SSE subscribers (may carry dedup metadata). */
+export type LiveEvent = LiveEventBase & { _suppressed?: number };
 
 /** Exhaustive-check helper: assign a `LiveEvent` to this and the compiler
  *  will error if any variant is unhandled. Use in switch-default branches. */
@@ -35,10 +44,25 @@ const MAX_SUBSCRIBERS = 8;
 const subscribers = new Set<(evt: LiveEvent) => void>();
 const heartbeats = new Map<(evt: LiveEvent) => void, NodeJS.Timeout>();
 
+const throttle = new LogThrottle();
+
 export function publish(evt: LiveEvent): void {
   for (const fn of subscribers) {
     try { fn(evt); } catch { /* subscriber error — drop */ }
   }
+}
+
+/** Publish with deduplication — suppresses identical events within a time window. */
+export function publishDeduped(evt: LiveEventBase): void {
+  const { emit, suppressed } = throttle.shouldEmit(evt as Record<string, unknown>);
+  if (!emit) return;
+  const out: LiveEvent = suppressed > 0 ? { ...evt, _suppressed: suppressed } : evt;
+  publish(out);
+}
+
+/** Clear dedup throttle state (for tests / shutdown). */
+export function resetEventThrottle(): void {
+  throttle.flush();
 }
 
 /** Register an SSE response as a subscriber. Returns an unsubscribe function. */

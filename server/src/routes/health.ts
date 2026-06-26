@@ -16,6 +16,7 @@ healthRouter.get('/', (_req: Request, res: Response) => {
       platform,
       COUNT(*) as total_keys,
       SUM(CASE WHEN status = 'healthy' THEN 1 ELSE 0 END) as healthy_keys,
+      SUM(CASE WHEN status = 'sick' THEN 1 ELSE 0 END) as sick_keys,
       SUM(CASE WHEN status = 'rate_limited' THEN 1 ELSE 0 END) as rate_limited_keys,
       SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) as invalid_keys,
       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_keys,
@@ -37,21 +38,27 @@ healthRouter.get('/', (_req: Request, res: Response) => {
       hasProvider: hasProvider(p.platform),
       totalKeys: p.total_keys,
       healthyKeys: p.healthy_keys,
+      sickKeys: (p.sick_keys ?? 0) + (p.rate_limited_keys ?? 0),
       rateLimitedKeys: p.rate_limited_keys,
       invalidKeys: p.invalid_keys,
       errorKeys: p.error_keys,
       unknownKeys: p.unknown_keys,
       enabledKeys: p.enabled_keys,
     })),
-    keys: keys.map(k => ({
-      id: k.id,
-      platform: k.platform,
-      label: k.label,
-      status: k.status,
-      enabled: k.enabled === 1,
-      createdAt: k.created_at,
-      lastCheckedAt: k.last_checked_at,
-    })),
+    keys: keys.map(k => {
+      let status = k.status;
+      // Map rate_limited to sick for clearer UI semantics
+      if (status === 'rate_limited') status = 'sick';
+      return {
+        id: k.id,
+        platform: k.platform,
+        label: k.label,
+        status,
+        enabled: k.enabled === 1,
+        createdAt: k.created_at,
+        lastCheckedAt: k.last_checked_at,
+      };
+    }),
   });
 });
 
