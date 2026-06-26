@@ -686,7 +686,22 @@ customRouter.patch('/api/custom-models/:id', (req: Request, res: Response) => {
   }
 
   values.push(id);
-  db.prepare(`UPDATE models SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE models SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+    if (d.enabled === true) {
+      const inChain = db.prepare('SELECT 1 FROM fallback_config WHERE model_db_id = ?').get(id);
+      if (inChain) {
+        db.prepare('UPDATE fallback_config SET enabled = 1 WHERE model_db_id = ?').run(id);
+      } else {
+        const max = db.prepare('SELECT COALESCE(MAX(priority), 0) AS m FROM fallback_config').get() as { m: number };
+        db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)').run(id, max.m + 1);
+      }
+    } else if (d.enabled === false) {
+      db.prepare('DELETE FROM fallback_config WHERE model_db_id = ?').run(id);
+    }
+  });
+  tx();
   res.json({ success: true, id });
 });
 
