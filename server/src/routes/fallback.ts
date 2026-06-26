@@ -147,6 +147,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       effectivePriority: r.priority + (penalty?.penalty ?? 0),
       penalty: penalty?.penalty ?? 0,
       rateLimitHits: penalty?.count ?? 0,
+      boost: getBoost(r.model_db_id),
       enabled: true,
       platform: r.platform,
       modelId: r.model_id,

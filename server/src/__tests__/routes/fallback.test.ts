@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { initDb } from '../../db/index.js';
+import { initDegradation } from '../../services/degradation.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
@@ -31,6 +32,7 @@ describe('Fallback API', () => {
   beforeAll(() => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     initDb(':memory:');
+    initDegradation();
     app = createApp();
     dashToken = mintDashboardToken();
   });
@@ -55,6 +57,27 @@ describe('Fallback API', () => {
     expect(first).toHaveProperty('platform');
     expect(first).toHaveProperty('displayName');
     expect(first).toHaveProperty('intelligenceRank');
+    expect(first).toHaveProperty('boost');
+  });
+
+  it('persists model boost and returns it in fallback entries', async () => {
+    const { body: original } = await request(app, 'GET', '/api/fallback');
+    const modelDbId = original[0].modelDbId;
+
+    const boosted = await request(app, 'PUT', `/api/fallback/boost/${modelDbId}`, { boost: 2 });
+    expect(boosted.status).toBe(200);
+    expect(boosted.body.boost).toBe(2);
+
+    const { body: afterBoost } = await request(app, 'GET', '/api/fallback');
+    const boostedEntry = afterBoost.find((entry: any) => entry.modelDbId === modelDbId);
+    expect(boostedEntry.boost).toBe(2);
+
+    const reset = await request(app, 'DELETE', `/api/fallback/boost/${modelDbId}`);
+    expect(reset.status).toBe(200);
+
+    const { body: afterReset } = await request(app, 'GET', '/api/fallback');
+    const resetEntry = afterReset.find((entry: any) => entry.modelDbId === modelDbId);
+    expect(resetEntry.boost).toBe(1);
   });
 
   it('PUT /api/fallback updates order', async () => {
