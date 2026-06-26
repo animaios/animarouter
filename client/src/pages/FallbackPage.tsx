@@ -998,13 +998,13 @@ export default function FallbackPage() {
                     <div className="rounded-2xl border overflow-x-auto">
                       <table className="w-full text-sm">
                         {tableHead}
-                        <tbody>
-                          {activeRows.map((row, i) => (
-                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group">
+                        {activeRows.map((row, i) => (
+                          <motion.tbody key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }}>
+                            <tr className="border-b last:border-0 group">
                               <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
-                            </motion.tr>
-                          ))}
-                        </tbody>
+                            </tr>
+                          </motion.tbody>
+                        ))}
                       </table>
                     </div>
                   )
@@ -1025,13 +1025,13 @@ export default function FallbackPage() {
                     </summary>
                     <div className="border-t overflow-x-auto">
                       <table className="w-full text-sm">
-                        <tbody className="bg-card/50">
-                          {filteredRows.map((row) => (
-                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group opacity-[0.55]">
+                        {filteredRows.map((row) => (
+                          <motion.tbody key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="bg-card/50">
+                            <tr className="border-b last:border-0 group opacity-[0.55]">
                               <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} />
-                            </motion.tr>
-                          ))}
-                        </tbody>
+                            </tr>
+                          </motion.tbody>
+                        ))}
                       </table>
                     </div>
                   </details>
