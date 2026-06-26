@@ -249,14 +249,13 @@ export const REGISTRY: FeatureSettingDef[] = [
     key: 'transient_cooldown_sec',
     label: 'Transient 429 Cooldown (sec)',
     description:
-      'How long a model+key is benched after a per-minute 429 (rate limit). Short values recover faster; long values avoid re-hitting a tight RPM quota. Disabled when Heartbeat is active — heartbeat evicts unhealthy keys from the routing pool instead.',
+      'How long a model+key is benched after a per-minute 429 (rate limit). Short values recover faster; long values avoid re-hitting a tight RPM quota.',
     type: 'number',
     default: 90,
     min: 5,
     max: 300,
     effect: 'live',
     group: 'Retry & Failover',
-    disableWhen: 'heartbeat_enabled',
   },
   {
     key: 'payment_cooldown_hours',
@@ -557,7 +556,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     key: 'proxy_transport_enabled',
     label: 'FreeLLMProxy Transport',
     description:
-      'Route requests through FreeLLMProxy instead of connecting directly to providers. Requires FREELLM_PROXY_URL and FREELLM_PROXY_API_KEY environment variables. When enabled, keys flagged with use_proxy will route through the proxy.',
+      'Route requests through FreeLLMProxy instead of connecting directly to providers. Requires PROXY_ROUTER_URL and PROXY_AUTH_KEY environment variables. When enabled, keys flagged with use_proxy will route through the proxy.',
     type: 'boolean',
     default: false,
     envVar: 'PROXY_TRANSPORT_ENABLED',

@@ -302,10 +302,7 @@ export function getNextCooldownDuration(platform: string, modelId: string, keyId
 
 // Short cooldown for a transient (per-minute) 429 — recovers within ~one window.
 // Now backed by the `transient_cooldown_sec` feature setting (seconds → ms).
-function getTransientCooldownMs(): number {
-  // When heartbeat is active, it evicts keys from the healthy pool on 429,
-  // making timer-based cooldown redundant and interfering.
-  if (getFeatureSetting('heartbeat_enabled') as boolean) return 0;
+export function getTransientCooldownMs(): number {
   return (getFeatureSetting('transient_cooldown_sec') as number) * 1000;
 }
 
@@ -404,6 +401,16 @@ function clearPersistedCooldown(platform: string, modelId: string, keyId: number
   });
 }
 
+/**
+ * Clear cooldown escalation hits for a platform:model:keyId combo.
+ * Called when a cooldown expires to prevent stale transient hits from
+ * escalating future daily cooldowns.
+ */
+export function clearCooldownHits(platform: string, modelId: string, keyId: number): void {
+  const key = `${platform}:${modelId}:${keyId}`;
+  cooldownHits.delete(key);
+}
+
 export function setCooldown(platform: string, modelId: string, keyId: number, durationMs = 60_000) {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const expiresAtMs = Date.now() + durationMs;
@@ -418,6 +425,7 @@ export function isOnCooldown(platform: string, modelId: string, keyId: number): 
   if (persistedExpiry !== undefined && persistedExpiry !== null) {
     if (now > persistedExpiry) {
       cooldowns.delete(key);
+      clearCooldownHits(platform, modelId, keyId);
       clearPersistedCooldown(platform, modelId, keyId);
       return false;
     }
@@ -429,6 +437,7 @@ export function isOnCooldown(platform: string, modelId: string, keyId: number): 
   if (!expiry) return false;
   if (now > expiry) {
     cooldowns.delete(key);
+    clearCooldownHits(platform, modelId, keyId);
     return false;
   }
   return true;

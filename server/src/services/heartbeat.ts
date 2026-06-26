@@ -1,9 +1,10 @@
 /**
- * Provider Health Heartbeat — Per-Key Edition
+ * Provider Health Heartbeat — Per-Key-Per-Model Edition
  *
  * Sends periodic minimal pings to each API key to proactively detect
  * unhealthy keys. Results feed the degradation engine at the model level
- * AND maintain a per-key health map so the router can prefer healthy keys.
+ * AND maintain a per-key-per-model health map so the router can prefer
+ * healthy keys on a per-model basis.
  *
  * Activity-gated: only pings when a user request was made recently.
  * Pings every key for every enabled model in the fallback chain.
@@ -17,7 +18,9 @@ import { classifyError, recordFailure, recordSuccess } from './degradation.js';
 import { publishDeduped as publish } from './events.js';
 import { getFeatureSetting } from './feature-settings.js';
 
-// ── Per-key health state ─────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// Per-key-per-model health state
+// ──────────────────────────────────────────────────────────────────────
 
 interface KeyHealth {
   /** 0 = healthy, higher = worse. Incremented on failure, reset on success. */
@@ -30,46 +33,83 @@ interface KeyHealth {
   lastError?: string;
 }
 
-export const keyHealthMap = new Map<number, KeyHealth>();
+/** Composite key for per-key-per-model health map: `${keyId}:${modelId}` */
+export function healthKey(keyId: number, modelId: string): string {
+  return `${keyId}:${modelId}`;
+}
 
-/** Get current health state for a key (read-only). */
-export function getKeyHealth(keyId: number): KeyHealth | undefined {
-  return keyHealthMap.get(keyId);
+export const keyHealthMap = new Map<string, KeyHealth>();
+
+/** Get current health state for a key+model combo (read-only). */
+export function getKeyHealth(keyId: number, modelId?: string): KeyHealth | undefined {
+  if (modelId) {
+    return keyHealthMap.get(healthKey(keyId, modelId));
+  }
+  // No model specified: return first entry for this keyId
+  for (const [key, health] of keyHealthMap) {
+    if (key.startsWith(`${keyId}:`)) return health;
+  }
+  return undefined;
 }
 
 /** Check whether a key is currently healthy according to heartbeat pings.
- *  When heartbeat is enabled, cold keys (never pinged) return false — they
- *  must be prewarmed first. Only keys that have been successfully pinged
- *  at least once report true.
- *  When heartbeat is disabled, cold keys are assumed healthy (backward-compat).
+ *  - If modelId is provided: check health for that specific key+model combo.
+ *  - If no modelId: return true if key is healthy on ANY model (backward compat).
+ *  - When heartbeat is enabled, cold keys (never pinged) return false — they
+ *    must be prewarmed first. Only keys that have been successfully pinged
+ *    at least once report true.
+ *  - When heartbeat is disabled, cold keys are assumed healthy (backward-compat).
  */
-export function isKeyHealthy(keyId: number): boolean {
-  const h = keyHealthMap.get(keyId);
-  // No data = cold key. If heartbeat is active it must be prewarmed first;
-  // if heartbeat is disabled, assume healthy for backward compatibility.
-  if (!h) return !isHeartbeatEnabled();
-  return h.healthy;
+export function isKeyHealthy(keyId: number, modelId?: string): boolean {
+  if (modelId) {
+    const h = keyHealthMap.get(healthKey(keyId, modelId));
+    if (!h) return !isHeartbeatEnabled(); // cold entry
+    return h.healthy;
+  }
+  // No model specified: healthy if ANY model is healthy
+  return isKeyHealthyOnAnyModel(keyId);
 }
 
-/** Mark a key as unhealthy in the per-key health map. The key will be excluded
- *  from routing by `isKeyHealthy()` until a successful heartbeat ping restores it.
- *  No-op when heartbeat is disabled — the cooldown system handles recovery instead.
- *
- *  Called from `proxy.ts` when a request returns 429 (rate limit) or 402 (payment
- *  required). The key is evicted immediately — no retries wasted on a key that
- *  told us it's at capacity. */
-export function markKeyUnhealthy(keyId: number, error?: string): void {
+/** Internal helper: check if a key is healthy on ANY model. */
+function isKeyHealthyOnAnyModel(keyId: number): boolean {
+  for (const [key, health] of keyHealthMap) {
+    if (key.startsWith(`${keyId}:`) && health.healthy) return true;
+  }
+  return !isHeartbeatEnabled();
+}
+
+/** Mark a key as unhealthy for a specific model.
+ *  - Marks the specific key+model combo as unhealthy in the health map.
+ *  - DB status: Only set api_keys.status = 'sick' if the key is unhealthy on
+ *    ALL models for its platform. If any model for this key is still healthy,
+ *    keep DB status as 'healthy'.
+ *  - Schedules a recheck for the specific model.
+ */
+export function markKeyUnhealthy(keyId: number, modelId: string, error?: string, transient = false): void {
   if (!isHeartbeatEnabled()) return;
-  const prev = keyHealthMap.get(keyId);
-  keyHealthMap.set(keyId, {
+  // Transient 429s (per-minute/quota-window) should NOT evict the key from
+  // the healthy pool or increment its penalty — they are expected and
+  // self-resolving. We still schedule a recheck so the key gets verified
+  // after the transient cooldown expires.
+  if (transient) {
+    scheduleRecheck(keyId, modelId);
+    return;
+  }
+  const key = healthKey(keyId, modelId);
+  const prev = keyHealthMap.get(key);
+  keyHealthMap.set(key, {
     penalty: (prev?.penalty ?? 0) + 1,
     lastPingAt: Date.now(),
     healthy: false,
     lastError: error ?? 'evicted by traffic 429',
   });
+
+  // DB status: only mark 'sick' if key is unhealthy on ALL models for its platform
   const db = getDb();
-  db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyId);
-  scheduleRecheck(keyId);
+  if (!isKeyHealthyOnAnyModel(keyId)) {
+    db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyId);
+  }
+  scheduleRecheck(keyId, modelId);
 }
 
 /**
@@ -81,22 +121,23 @@ export function isHeartbeatEnabled(): boolean {
   return readConfig().enabled;
 }
 
-/** Get all key health states (for dashboard/debugging). */
-export function getAllKeyHealth(): Map<number, KeyHealth> {
+/** Get all key health states (for dashboard/debugging). Key is composite `${keyId}:${modelId}`. */
+export function getAllKeyHealth(): Map<string, KeyHealth> {
   return new Map(keyHealthMap);
 }
 
-/** Schedule a proactive re-ping of an exhausted key after a configured delay.
- *  No-op if a recheck timer is already pending or in-flight for this key (FR-3).
+/** Schedule a proactive re-ping of an exhausted key+model after a configured delay.
+ *  No-op if a recheck timer is already pending or in-flight for this key+model.
  *  If a prior cycle's in-flight check is stale (key marked unhealthy again),
  *  the new schedule supersedes it — the stale fireRecheck will detect this
  *  via the generation counter and exit without scheduling a next attempt. */
-function scheduleRecheck(keyId: number): void {
+function scheduleRecheck(keyId: number, modelId: string): void {
+  const key = healthKey(keyId, modelId);
   // FR-3: No duplicate timers — also blocks while a fireRecheck is in-flight
-  const existing = recheckTimers.get(keyId);
+  const existing = recheckTimers.get(key);
   if (existing) {
     if (existing.inFlight) {
-      // A fireRecheck is running for this key. Bump the generation so the
+      // A fireRecheck is running for this key+model. Bump the generation so the
       // in-flight fireRecheck knows its cycle is stale and won't schedule
       // a next attempt. We start a fresh cycle from attempt 1.
       existing.generation = ++recheckGeneration;
@@ -105,8 +146,8 @@ function scheduleRecheck(keyId: number): void {
       if (existing.timerRef) clearTimeout(existing.timerRef);
       const { recheckSec } = readConfig();
       existing.timerRef = setTimeout(() => {
-        fireRecheck(keyId, 1).catch(err => {
-          console.error(`[Heartbeat] Recheck error for key#${keyId}:`, err);
+        fireRecheck(keyId, modelId, 1).catch(err => {
+          console.error(`[Heartbeat] Recheck error for key#${keyId} model ${modelId}:`, err);
         });
       }, recheckSec * 1000);
       existing.inFlight = false;
@@ -119,15 +160,15 @@ function scheduleRecheck(keyId: number): void {
   const generation = ++recheckGeneration;
 
   const timerRef = setTimeout(() => {
-    fireRecheck(keyId, 1).catch(err => {
-      console.error(`[Heartbeat] Recheck error for key#${keyId}:`, err);
+    fireRecheck(keyId, modelId, 1).catch(err => {
+      console.error(`[Heartbeat] Recheck error for key#${keyId} model ${modelId}:`, err);
     });
   }, recheckSec * 1000);
 
-  recheckTimers.set(keyId, { keyId, attempt: 1, generation, timerRef, inFlight: false });
+  recheckTimers.set(key, { keyId, modelId, attempt: 1, generation, timerRef, inFlight: false });
 }
 
-/** Fire a recheck ping for an exhausted key. Called when a recheck timer fires.
+/** Fire a recheck ping for an exhausted key+model. Called when a recheck timer fires.
  *  Checks preconditions (key still unhealthy, not recently pinged, still enabled)
  *  before calling the existing pingKey() logic.
  *
@@ -136,8 +177,9 @@ function scheduleRecheck(keyId: number): void {
  *  during the async gap (because the key was marked unhealthy again), the
  *  generation will have changed — we exit without scheduling a next attempt
  *  to avoid creating a duplicate recheck loop. */
-async function fireRecheck(keyId: number, attempt: number): Promise<void> {
-  const entry = recheckTimers.get(keyId);
+async function fireRecheck(keyId: number, modelId: string, attempt: number): Promise<void> {
+  const key = healthKey(keyId, modelId);
+  const entry = recheckTimers.get(key);
   if (!entry) return; // Slot was cleared (stopHeartbeat / resetConfig)
 
   // Mark in-flight so scheduleRecheck sees the entry (FR-3 dedup)
@@ -145,24 +187,24 @@ async function fireRecheck(keyId: number, attempt: number): Promise<void> {
   entry.inFlight = true;
   entry.timerRef = null; // Timer already fired
 
-  const health = keyHealthMap.get(keyId);
+  const health = keyHealthMap.get(key);
   // Key already recovered — clean up and done
   if (!health || health.healthy) {
-    recheckTimers.delete(keyId);
+    recheckTimers.delete(key);
     return;
   }
 
   const { recheckSec, maxRechecks, pingTimeoutMs } = readConfig();
   const minRecencyMs = recheckSec * 1000 / 2;
 
-  // FR-4: Skip if this key was pinged very recently
+  // FR-4: Skip if this key+model was pinged very recently
   if (Date.now() - health.lastPingAt < minRecencyMs) {
     // Only schedule next if we still own the slot
-    const currentEntry = recheckTimers.get(keyId);
+    const currentEntry = recheckTimers.get(key);
     if (currentEntry && currentEntry.generation === myGeneration) {
-      recheckTimers.delete(keyId);
+      recheckTimers.delete(key);
       if (attempt < maxRechecks) {
-        scheduleNextRecheck(keyId, attempt + 1);
+        scheduleNextRecheck(keyId, modelId, attempt + 1);
       }
     }
     return;
@@ -174,21 +216,18 @@ async function fireRecheck(keyId: number, attempt: number): Promise<void> {
     "SELECT * FROM api_keys WHERE id = ? AND enabled = 1"
   ).get(keyId) as any | undefined;
   if (!keyRow) {
-    recheckTimers.delete(keyId);
+    recheckTimers.delete(key);
     return;
   }
 
-  // FR-2: Pick highest-priority model for the key's platform
+  // Use the specific modelId for recheck (not highest-priority fallback)
   const model = db.prepare(`
     SELECT m.id AS model_db_id, m.model_id
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
-    WHERE fc.enabled = 1 AND m.platform = ?
-    ORDER BY fc.priority ASC
-    LIMIT 1
-  `).get(keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
+    FROM models m
+    WHERE m.id = ? AND m.enabled = 1 AND m.platform = ?
+  `).get(modelId, keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
   if (!model) {
-    recheckTimers.delete(keyId);
+    recheckTimers.delete(key);
     return;
   }
 
@@ -196,21 +235,21 @@ async function fireRecheck(keyId: number, attempt: number): Promise<void> {
   await pingKey(keyRow.platform, model.model_db_id, model.model_id, keyRow, pingTimeoutMs);
   const latencyMs = Date.now() - start;
 
-  // ── Post-await: check if our generation is still current ──
+  // Post-await: check if our generation is still current
   // If scheduleRecheck() was called during the async gap (key got 429'd
   // again), it bumped the generation and started a fresh timer. We must
   // NOT schedule a next attempt — that would leak a duplicate timer.
-  const currentEntry = recheckTimers.get(keyId);
+  const currentEntry = recheckTimers.get(key);
   if (!currentEntry || currentEntry.generation !== myGeneration) {
     // Our cycle is stale — a newer recheck cycle owns the slot. Exit.
     return;
   }
   if (currentEntry.inFlight) {
     // Still marked in-flight (by us) — clean up
-    recheckTimers.delete(keyId);
+    recheckTimers.delete(key);
   }
 
-  const newHealth = keyHealthMap.get(keyId);
+  const newHealth = keyHealthMap.get(key);
   const success = !!newHealth?.healthy;
 
   if (success) {
@@ -238,31 +277,34 @@ async function fireRecheck(keyId: number, attempt: number): Promise<void> {
     });
 
     if (attempt < maxRechecks) {
-      scheduleNextRecheck(keyId, attempt + 1);
+      scheduleNextRecheck(keyId, modelId, attempt + 1);
     }
   }
 }
 
-/** Schedule the next recheck attempt for a key that hasn't recovered yet. */
-function scheduleNextRecheck(keyId: number, nextAttempt: number): void {
+/** Schedule the next recheck attempt for a key+model that hasn't recovered yet. */
+function scheduleNextRecheck(keyId: number, modelId: string, nextAttempt: number): void {
+  const key = healthKey(keyId, modelId);
   const { recheckSec } = readConfig();
   const generation = ++recheckGeneration;
 
   const timerRef = setTimeout(() => {
-    fireRecheck(keyId, nextAttempt).catch(err => {
-      console.error(`[Heartbeat] Recheck error for key#${keyId} (attempt ${nextAttempt}):`, err);
+    fireRecheck(keyId, modelId, nextAttempt).catch(err => {
+      console.error(`[Heartbeat] Recheck error for key#${keyId} model ${modelId} (attempt ${nextAttempt}):`, err);
     });
   }, recheckSec * 1000);
 
-  recheckTimers.set(keyId, { keyId, attempt: nextAttempt, generation, timerRef, inFlight: false });
+  recheckTimers.set(key, { keyId, modelId, attempt: nextAttempt, generation, timerRef, inFlight: false });
 }
 
 /** Get pending recheck timers (read-only, for testing). */
-export function getPendingRechecks(): ReadonlyMap<number, { keyId: number; attempt: number }> {
-  return new Map([...recheckTimers].map(([k, v]) => [k, { keyId: v.keyId, attempt: v.attempt }]));
+export function getPendingRechecks(): ReadonlyMap<string, { keyId: number; modelId: string; attempt: number }> {
+  return new Map([...recheckTimers].map(([k, v]) => [k, { keyId: v.keyId, modelId: v.modelId, attempt: v.attempt }]));
 }
 
-// ── Configuration (lazy-initialized from feature-settings on first use) ─────
+// ──────────────────────────────────────────────────────────────────────
+// Configuration (lazy-initialized from feature-settings on first use)
+// ──────────────────────────────────────────────────────────────────────
 
 let _enabled: boolean | null = null;
 let _intervalMs: number | null = null;
@@ -287,7 +329,6 @@ function readConfig() {
   return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs!, concurrency: _concurrency!, recheckSec: _recheckSec!, maxRechecks: _maxRechecks! };
 }
 
-
 /** Reset the cached config (used in tests and after settings change). */
 export function resetHeartbeatConfig(): void {
   _enabled = null;
@@ -307,16 +348,21 @@ export function resetHeartbeatConfig(): void {
   recheckTimers.clear();
 }
 
-// ── Module-level state ──────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// Module-level state
+// ──────────────────────────────────────────────────────────────────────
 
 let timerRef: ReturnType<typeof setInterval> | null = null;
 let lastActivityAt = 0;
 let cycleInProgress = false;
 
-// ── Recheck state (exhausted-key proactive recovery) ──
+// ──────────────────────────────────────────────────────────────────────
+// Recheck state (exhausted-key proactive recovery)
+// ──────────────────────────────────────────────────────────────────────
 
 interface RecheckState {
   keyId: number;
+  modelId: string;
   attempt: number;       // 1-based
   /** Monotonically increasing generation counter. Incremented on each new
    *  scheduleRecheck() call so that in-flight fireRecheck() can detect
@@ -328,10 +374,12 @@ interface RecheckState {
   inFlight: boolean;
 }
 
-const recheckTimers = new Map<number, RecheckState>();
+const recheckTimers = new Map<string, RecheckState>();
 let recheckGeneration = 0;
 
-// ── Public API ──────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// Public API
+// ──────────────────────────────────────────────────────────────────────
 
 /** Called from proxy.ts on every /chat/completions request (success or failure). O(1). */
 export function recordActivity(): void {
@@ -347,11 +395,11 @@ export function startHeartbeat(): void {
       return;
     }
     if (timerRef) return; // already running
-    console.log(`[Heartbeat] Starting per-key timer (interval=${intervalMs / 1000}s)`);
+    console.log(`[Heartbeat] Starting per-key-per-model timer (interval=${intervalMs / 1000}s)`);
     timerRef = setInterval(() => { runCycle().catch(e => console.error('[Heartbeat] Cycle error:', e)); }, intervalMs);
     timerRef.unref();
 
-    // ── Startup prewarm: immediately fire a cycle to warm up all keys ──
+    // Startup prewarm: immediately fire a cycle to warm up all keys
     // This ensures keys are prewarmed before the first user request arrives,
     // rather than waiting for the first interval tick (default 10 min delay).
     // The activity gate is bypassed so keys are pinged even if no prior
@@ -372,11 +420,11 @@ export function stopHeartbeat(): void {
     console.log('[Heartbeat] Timer stopped');
   }
 
-    // Clear all pending recheck timers
-    for (const [, state] of recheckTimers) {
-      if (state.timerRef) clearTimeout(state.timerRef);
-    }
-    recheckTimers.clear();
+  // Clear all pending recheck timers
+  for (const [, state] of recheckTimers) {
+    if (state.timerRef) clearTimeout(state.timerRef);
+  }
+  recheckTimers.clear();
 }
 
 /** Trigger a full heartbeat cycle immediately, bypassing the activity gate.
@@ -394,10 +442,13 @@ export async function pokeAllKeys(): Promise<{ poked: number; skipped: boolean }
  *  counterpart to the periodic cycle — it prewarms a newly-added key without
  *  waiting for the next scheduled tick.
  *
+ *  If modelId is provided, ping that specific model. Otherwise, find the
+ *  highest-priority model for the key's platform (current behavior).
+ *
  *  Does NOT block on cycleInProgress — a single-key ping runs independently
  *  of the cycle state. When heartbeat is disabled, returns true immediately
  *  (backward compat: all keys assumed healthy). */
-export async function pokeKey(keyId: number): Promise<boolean> {
+export async function pokeKey(keyId: number, modelId?: string): Promise<boolean> {
   if (!isHeartbeatEnabled()) return true;
 
   const db = getDb();
@@ -406,23 +457,36 @@ export async function pokeKey(keyId: number): Promise<boolean> {
   ).get(keyId) as any | undefined;
   if (!keyRow) return false;
 
-  // Get the highest-priority model for this key's platform
-  const model = db.prepare(`
-    SELECT m.id AS model_db_id, m.model_id
-    FROM fallback_config fc
-    JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
-    WHERE fc.enabled = 1 AND m.platform = ?
-    ORDER BY fc.priority ASC
-    LIMIT 1
-  `).get(keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
+  let model: { model_db_id: number; model_id: string } | undefined;
+  if (modelId) {
+    // Use the specified model
+    const row = db.prepare(`
+      SELECT m.id AS model_db_id, m.model_id
+      FROM models m
+      WHERE m.id = ? AND m.enabled = 1 AND m.platform = ?
+    `).get(modelId, keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
+    model = row;
+  } else {
+    // Get the highest-priority model for this key's platform
+    model = db.prepare(`
+      SELECT m.id AS model_db_id, m.model_id
+      FROM fallback_config fc
+      JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+      WHERE fc.enabled = 1 AND m.platform = ?
+      ORDER BY fc.priority ASC
+      LIMIT 1
+    `).get(keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
+  }
   if (!model) return false;
 
   const { pingTimeoutMs } = readConfig();
   await pingKey(keyRow.platform, model.model_db_id, model.model_id, keyRow, pingTimeoutMs);
-  return isKeyHealthy(keyId);
+  return isKeyHealthy(keyId, model.model_id);
 }
 
-// ── Internal: cycle logic ───────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// Internal: cycle logic
+// ──────────────────────────────────────────────────────────────────────
 
 async function runCycle(skipGate = false): Promise<number> {
   if (cycleInProgress) return 0;
@@ -432,10 +496,7 @@ async function runCycle(skipGate = false): Promise<number> {
     const now = Date.now();
     const { activityWindowMs, pingTimeoutMs, concurrency, staggerMs } = readConfig();
 
-    // ── Activity gate ──
-    // The gate is bypassed for the startup prewarm cycle (skipGate=true)
-    // so that keys are warmed up immediately on startup even when no prior
-    // user request has been recorded.
+    // Activity gate — bypassed for startup prewarm (skipGate=true)
     if (!skipGate && (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs)) {
       publish({
         type: 'heartbeat.cycle_skipped',
@@ -446,7 +507,7 @@ async function runCycle(skipGate = false): Promise<number> {
       return 0;
     }
 
-    // ── Get enabled models from the fallback chain ──
+    // Get enabled models from the fallback chain
     // Order by priority so we deterministically use the highest-priority model
     // on each platform to ping all of its keys. Without ordering, a key might
     // randomly be pinged with a restricted model on some cycles (causing
@@ -463,7 +524,7 @@ async function runCycle(skipGate = false): Promise<number> {
 
     if (models.length === 0) return 0;
 
-    // ── Collect all keys for each platform+model combo ──
+    // Collect all keys for each platform+model combo
     const pingTasks: Array<{
       platform: string;
       modelDbId: number;
@@ -471,16 +532,15 @@ async function runCycle(skipGate = false): Promise<number> {
       key: any;
     }> = [];
 
-    const seenKeys = new Set<number>();
+    // REMOVED seenKeys dedup — each key must be pinged for EVERY model
+    // on its platform, because a key can be healthy on one model but sick on another.
     for (const model of models) {
       const keys = db.prepare(
         "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error', 'sick')"
       ).all(model.platform) as any[];
 
       for (const key of keys) {
-        // Ping each key only once per cycle even if it appears for multiple models
-        if (seenKeys.has(key.id)) continue;
-        seenKeys.add(key.id);
+        // NO dedup — ping for each model separately
         pingTasks.push({
           platform: model.platform,
           modelDbId: model.model_db_id,
@@ -490,7 +550,7 @@ async function runCycle(skipGate = false): Promise<number> {
       }
     }
 
-    // ── Ping each key (concurrent batches) ──
+    // Ping each key (concurrent batches)
     for (let i = 0; i < pingTasks.length; i += concurrency) {
       const batch = pingTasks.slice(i, i + concurrency);
       await Promise.allSettled(batch.map(task =>
@@ -510,7 +570,9 @@ async function runCycle(skipGate = false): Promise<number> {
   }
 }
 
-// ── Internal: ping a single key ─────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// Internal: ping a single key
+// ──────────────────────────────────────────────────────────────────────
 
 async function pingKey(platform: string, modelDbId: number, modelId: string, keyRow: any, pingTimeoutMs: number): Promise<void> {
   const provider = buildProviderFor(platform);
@@ -522,7 +584,8 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
   } catch {
     // Decrypt failure is permanent — mark key unhealthy so the router
     // deprioritizes it until a successful ping or manual key check restores it.
-    keyHealthMap.set(keyRow.id, {
+    const key = healthKey(keyRow.id, modelId);
+    keyHealthMap.set(key, {
       penalty: 0,
       lastPingAt: Date.now(),
       healthy: false,
@@ -545,14 +608,24 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
       pingTimeoutMs,
     );
 
-    // Success — mark key healthy and reduce model-level degradation
-    keyHealthMap.set(keyRow.id, {
+    // Success — mark key+model healthy and reduce model-level degradation
+    const key = healthKey(keyRow.id, modelId);
+    keyHealthMap.set(key, {
       penalty: 0,
       lastPingAt: Date.now(),
       healthy: true,
     });
     const db = getDb();
-    db.prepare("UPDATE api_keys SET status = 'healthy' WHERE id = ? AND status = 'sick'").run(keyRow.id);
+    // If this key was sick in DB, check if it's now healthy on the model
+    // that was just tested. If so, set DB status back to 'healthy'
+    // (one successful model = key is usable).
+    const prevStatus = db.prepare("SELECT status FROM api_keys WHERE id = ?").get(keyRow.id) as { status: string } | undefined;
+    if (prevStatus?.status === 'sick') {
+      // Check if key is now healthy on ANY model
+      if (isKeyHealthyOnAnyModel(keyRow.id)) {
+        db.prepare("UPDATE api_keys SET status = 'healthy' WHERE id = ? AND status = 'sick'").run(keyRow.id);
+      }
+    }
     recordSuccess(modelDbId);
     publish({
       type: 'heartbeat.ping',
@@ -578,16 +651,20 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
         && /forbidden|not found|no endpoints found/i.test(err?.message ?? ''));
 
     if (!isModelError) {
-      const prev = keyHealthMap.get(keyRow.id);
+      const key = healthKey(keyRow.id, modelId);
+      const prev = keyHealthMap.get(key);
       const newPenalty = (prev?.penalty ?? 0) + 1;
-      keyHealthMap.set(keyRow.id, {
+      keyHealthMap.set(key, {
         penalty: newPenalty,
         lastPingAt: Date.now(),
         healthy: false,
         lastError: (err?.message ?? 'unknown').slice(0, 120),
       });
       const db = getDb();
-      db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyRow.id);
+      // DB: Only set sick if key is unhealthy on ALL models for its platform
+      if (!isKeyHealthyOnAnyModel(keyRow.id)) {
+        db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyRow.id);
+      }
     }
 
     // Only record model-level degradation for retryable errors (5xx, 429)
@@ -612,7 +689,9 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {

@@ -30,6 +30,7 @@ interface KeyRow {
   status: string;
   enabled: number;
   base_url: string | null;
+  use_proxy: number;
 }
 
 // Chain row joined with the model fields the bandit needs to score it.
@@ -66,6 +67,44 @@ interface ChainRow {
   benchmark_score: number | null;
 }
 
+// Group-aware routing: a chain entry is a model group, not a single model.
+interface GroupChainRow {
+  group_id: number;
+  priority: number;
+  enabled: number;
+  group_key: string;
+  display_name: string;
+  benchmark_score: number | null;
+  intelligence_rank: number | null;
+  size_label: string;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  supports_vision: number;
+  supports_tools: number;
+}
+
+// A provider (model row) within a group.
+interface ProviderRow {
+  model_db_id: number;
+  platform: string;
+  model_id: string;
+  display_name: string;
+  speed_rank: number;
+  rpm_limit: number | null;
+  rpd_limit: number | null;
+  tpm_limit: number | null;
+  tpd_limit: number | null;
+  key_id: number | null;
+  enabled: number;
+  supports_vision: number;
+  supports_tools: number;
+  context_window: number | null;
+  benchmark_score: number | null;
+  intelligence_rank: number | null;
+  size_label: string;
+  max_output_tokens: number | null;
+}
+
 export interface RouteResult {
   provider: BaseProvider;
   modelId: string;
@@ -84,6 +123,8 @@ export interface RouteResult {
    * proxy as a fallback `max_tokens` when the caller doesn't supply one
    * (NVIDIA NIM minimax-m3 returns empty 200s without an explicit limit). */
   maxOutputTokens: number | null;
+  /** When group-aware routing is active, the model_groups.id this route came from. */
+  groupId?: number;
   // Decrements the in-flight slot for the associated provider.
   // Callers MUST invoke this in a finally block after the request completes.
   release: () => void;
@@ -475,6 +516,75 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
     .map(x => x.e);
 }
 
+// –– Group-aware ordering –––––––––––––––––––––––––––––––––––––––––––––––
+// When grouping is on, the chain is a list of groups. Intelligence is scored
+// at the GROUP level (which group is smarter), speed/reliability at the
+// provider level (which provider within the group is faster/more reliable).
+
+function orderGroupChain(chain: GroupChainRow[], strategy: RoutingStrategy): GroupChainRow[] {
+  if (strategy === 'priority') return chain;
+  // Bandit strategies: sort groups by representative intelligence (descending).
+  // Higher intelligence composite = better group = tried first.
+  return [...chain].sort((a, b) => {
+    const aIntel = intelligenceComposite(a.size_label, a.intelligence_rank ?? 0, a.benchmark_score);
+    const bIntel = intelligenceComposite(b.size_label, b.intelligence_rank ?? 0, b.benchmark_score);
+    return bIntel - aIntel;
+  });
+}
+
+/** Compute a sub-score for a provider within a group.
+ *  Zeroes out the intelligence axis (that's group-level) and
+ *  re-normalises the remaining weights so they still sum to 1. */
+function providerSubScore(
+  provider: ProviderRow,
+  weights: RoutingWeights,
+  speedMin: number, speedMax: number,
+  latencyMin: number, latencyMax: number,
+  sampled: boolean,
+): { subScore: number; axes: { reliability: number; speed: number; latency: number } } {
+  // Re-normalise without intelligence
+  const remaining = weights.speed + weights.reliability + weights.latency;
+  const subWeights: RoutingWeights = remaining > 0
+    ? { speed: weights.speed / remaining, reliability: weights.reliability / remaining, intelligence: 0, latency: weights.latency / remaining }
+    : { speed: 1/3, reliability: 1/3, intelligence: 0, latency: 1/3 };
+
+  const stats = statsCache?.get(`${provider.platform}:${provider.model_id}`);
+  const successes = stats?.successes ?? 0;
+  const failures = stats?.failures ?? 0;
+
+  let reliability: number;
+  if (sampled) {
+    const { alpha, beta } = reliabilityPosterior(successes, failures);
+    reliability = sampleBeta(alpha, beta);
+  } else {
+    reliability = expectedReliability(successes, failures);
+  }
+
+  const speedComposite = speedCompositeFromRank(provider.speed_rank, provider.size_label);
+  const speed = speedMax > speedMin
+    ? (speedComposite - speedMin) / (speedMax - speedMin)
+    : 1;
+
+  const totalRequests = Math.round(successes + failures);
+  const speedVal = heavyWeightedSpeedScore(stats?.tokPerSec ?? 0, totalRequests, speed);
+
+  const latencyComposite = latencyCompositeFromSize(provider.size_label);
+  const defaultLatency = latencyMax > latencyMin
+    ? (latencyComposite - latencyMin) / (latencyMax - latencyMin)
+    : 1;
+  const latency = heavyWeightedLatencyScore(stats?.avgTtfbMs ?? null, totalRequests, defaultLatency);
+
+  const degradationFactor = getDegradationFactor(provider.model_db_id);
+  const boost = getBoost(provider.model_db_id);
+
+  const subScore = combineScore(
+    { reliability, speed: speedVal, intelligence: 0, latency, degradationFactor },
+    subWeights,
+  ) * boost;
+
+  return { subScore, axes: { reliability, speed: speedVal, latency } };
+}
+
 /**
  * Route a request to the best available model.
  *
@@ -504,6 +614,239 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
   const strategy = getRoutingStrategy();
   if (strategy !== 'priority') refreshStatsCache(db);
 
+  // –– GROUP-AWARE ROUTING –––––––––––––––––––––––––––––––––––––––––––––––––
+  const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+  if (groupingEnabled) {
+    // Query the group chain: fallback_config JOIN model_groups
+    const groupChain = db.prepare(`
+      SELECT fc.group_id, fc.priority, fc.enabled,
+             mg.group_key, mg.display_name, mg.benchmark_score,
+             mg.intelligence_rank, mg.size_label, mg.context_window,
+             mg.max_output_tokens, mg.supports_vision, mg.supports_tools
+      FROM fallback_config fc
+      JOIN model_groups mg ON mg.id = fc.group_id
+      WHERE fc.enabled = 1 AND mg.enabled = 1
+    `).all() as GroupChainRow[];
+
+    const sortedGroupChain = orderGroupChain(groupChain, strategy);
+
+    // Sticky session: move preferred model's group to front
+    if (preferredModelDbId) {
+      // Find which group contains the preferred model
+      const prefGroupRow = db.prepare(
+        'SELECT group_id FROM models WHERE id = ?'
+      ).get(preferredModelDbId) as { group_id: number } | undefined;
+      if (prefGroupRow) {
+        const idx = sortedGroupChain.findIndex(g => g.group_id === prefGroupRow.group_id);
+        if (idx > 0) {
+          const [preferred] = sortedGroupChain.splice(idx, 1);
+          sortedGroupChain.unshift(preferred);
+        }
+      }
+    }
+
+    const pinMode = options?.pinMode ?? false;
+
+    // Pre-compute normalization ranges for provider sub-scoring
+    // We need to collect ALL providers from ALL enabled groups first
+    const allProviders: ProviderRow[] = [];
+    for (const group of sortedGroupChain) {
+      const providers = db.prepare(`
+        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+               m.max_output_tokens
+        FROM models m
+        WHERE m.group_id = ? AND m.enabled = 1
+      `).all(group.group_id) as ProviderRow[];
+      allProviders.push(...providers);
+    }
+
+    // Compute min/max for speed/latency normalization across all providers
+    const speedComposites = allProviders.map(p => speedCompositeFromRank(p.speed_rank, p.size_label));
+    const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
+    const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
+
+    const latencyComposites = allProviders.map(p => latencyCompositeFromSize(p.size_label));
+    const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
+    const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+
+    const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+
+    for (const group of sortedGroupChain) {
+      // Filter by vision/tools/context at the GROUP level
+      if (requireVision && !group.supports_vision) continue;
+      if (requireTools && !group.supports_tools) continue;
+      if (group.context_window != null && estimatedTokens > group.context_window) continue;
+
+      // Load providers for this group
+      const providers = db.prepare(`
+        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+               m.max_output_tokens
+        FROM models m
+        WHERE m.group_id = ? AND m.enabled = 1
+      `).all(group.group_id) as ProviderRow[];
+
+      if (providers.length === 0) continue;
+
+      // Score and sort providers within this group
+            const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+            const providersScored = providers
+              .map(p => {
+                const { subScore, axes } = providerSubScore(p, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, true);
+                return { p, subScore, axes };
+              })
+              .sort((a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank);
+
+      for (const { p: provider } of providersScored) {
+        // Models the caller has ruled out for this request
+        if (skipModels?.has(provider.model_db_id)) continue;
+
+        // Same provider/key resolution as flat chain
+        const prov = buildProviderFor(provider.platform);
+        if (!prov) continue;
+
+        const keys = db.prepare(
+          "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
+        ).all(provider.platform) as KeyRow[];
+
+        if (keys.length === 0) {
+          if (pinMode && preferredModelDbId && provider.model_db_id === preferredModelDbId) {
+            const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
+            pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+            pinErr.status = 429;
+            throw pinErr;
+          }
+          continue;
+        }
+
+        // Key health filtering
+        const heartbeatEnabled = isHeartbeatEnabled();
+        const healthyKeys = keys.filter(k => isKeyHealthy(k.id, provider.model_id));
+
+        if (heartbeatEnabled && healthyKeys.length === 0) {
+          if (pinMode && preferredModelDbId && provider.model_db_id === preferredModelDbId) {
+            const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
+            pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+            pinErr.status = 429;
+            throw pinErr;
+          }
+          continue;
+        }
+
+        const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id, provider.model_id));
+
+        // Key ordering
+        const rrKey = `${provider.platform}:${provider.model_id}`;
+        const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
+        let providerStickyEnabled = false;
+        if (!keyAffinityEnabled) {
+          const stickyRow = db.prepare(
+            'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
+          ).get(provider.platform) as { sticky_sessions_enabled: number } | undefined;
+          providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
+        }
+        const useKeyAffinity = (keyAffinityEnabled || (providerStickyEnabled && options?.stickySessionKey))
+          && options?.stickySessionKey;
+
+        let keyOrder: KeyRow[];
+        let idx: number;
+        let rrIdx = 0;
+        if (useKeyAffinity) {
+          keyOrder = [...healthyKeys, ...unhealthyKeys];
+          const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
+          const hashInt = hash.readUInt32BE(0);
+          idx = hashInt % keyOrder.length;
+        } else {
+          rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+          keyOrder = [
+            ...rotateArray(healthyKeys, rrIdx),
+            ...rotateArray(unhealthyKeys, rrIdx),
+          ];
+          idx = 0;
+        }
+
+        for (let attempt = 0; attempt < keyOrder.length; attempt++) {
+          const actualIdx = useKeyAffinity ? (idx + attempt) % keyOrder.length : attempt;
+          const key = keyOrder[actualIdx];
+
+          const skipId = `${provider.platform}:${provider.model_id}:${key.id}`;
+          if (skipKeys?.has(skipId)) continue;
+          if (isExhausted(key.id, provider.model_id)) continue;
+
+          // Parallel request gating
+          const cp = db.prepare(
+            'SELECT max_parallel_requests FROM custom_providers WHERE slug = ?'
+          ).get(provider.platform) as { max_parallel_requests: number | null } | undefined;
+          const maxPar = cp?.max_parallel_requests ?? null;
+          if (!tryReserveSlot(provider.platform, maxPar)) continue;
+
+          let decryptedKey: string;
+          try {
+            decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
+          } catch {
+            db.prepare("UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?").run(key.id);
+            releaseSlot(provider.platform);
+            continue;
+          }
+
+          const release = () => releaseSlot(provider.platform);
+
+          if (useKeyAffinity) {
+            console.log(`[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`);
+            publish({
+              type: 'routing.key_affinity_selected',
+              id: '',
+              sessionKey: options!.stickySessionKey!.slice(0, 8),
+              keyId: key.id,
+              model: provider.model_id,
+              at: Date.now(),
+            });
+          }
+
+          return {
+            provider: prov,
+            modelId: provider.model_id,
+            modelDbId: provider.model_db_id,
+            apiKey: decryptedKey,
+            keyId: key.id,
+            platform: provider.platform,
+            displayName: provider.display_name,
+            rpdLimit: provider.rpd_limit,
+            tpdLimit: provider.tpd_limit,
+            maxOutputTokens: provider.max_output_tokens,
+            release,
+            useProxy: false,
+            groupId: group.group_id,
+          };
+        }
+
+        // If we reach here, this provider has NO available keys.
+        if (!useKeyAffinity) {
+          roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
+        }
+
+        if (pinMode && preferredModelDbId && provider.model_db_id === preferredModelDbId) {
+          const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
+          pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+          pinErr.status = 429;
+          throw pinErr;
+        }
+      }
+      // If we reach here, all providers in this group are exhausted → try next group
+    }
+
+    // All groups exhausted
+    const err = new Error('All models exhausted. Add more API keys or check provider status.') as any;
+    err.status = 429;
+    throw err;
+  }
+
+  // –– FLAT CHAIN (LEGACY) –––––––––––––––––––––––––––––––––––––––––––––––––––
   // Get the enabled fallback chain joined with the fields the scorer needs.
   const chain = db.prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
@@ -616,7 +959,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // excluded — they must first pass a heartbeat cycle to prove health.
     // When heartbeat is disabled, all keys are usable (backward compat).
     const heartbeatEnabled = isHeartbeatEnabled();
-    const healthyKeys = keys.filter(k => isKeyHealthy(k.id));
+    const healthyKeys = keys.filter(k => isKeyHealthy(k.id, entry.model_id));
 
     if (heartbeatEnabled && healthyKeys.length === 0) {
       // No prewarmed healthy keys for this model — skip to the next model.
@@ -633,7 +976,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // Split keys by health status so healthy keys are ALWAYS tried first,
     // regardless of round-robin offset. Apply round-robin within each group
     // independently to maintain fair distribution while respecting health.
-    const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id));
+    const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id, entry.model_id));
 
     // Build the key ordering array and starting index.
     // For key affinity: concatenate healthy+unhealthy and hash into it.
@@ -728,7 +1071,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
               tpdLimit: limits.tpd,
               maxOutputTokens: entry.max_output_tokens,
               release,
-              useProxy: false,
+              useProxy: key.use_proxy === 1,
             };
     }
 
@@ -777,7 +1120,21 @@ export interface RoutingScore {
   totalRequests: number; // decay-weighted observations
 }
 
-export function getRoutingScores(): { strategy: RoutingStrategy; weights: RoutingWeights | null; scores: RoutingScore[] } {
+// Grouped routing scores for the dashboard when grouping is enabled
+export interface GroupedRoutingScore {
+  groupKey: string;
+  groupId: number;
+  groupScore: number;
+  providers: Array<{
+    modelDbId: number;
+    platform: string;
+    modelId: string;
+    subScore: number;
+    degradation: { penalty: number; tier: string };
+  }>;
+}
+
+export function getRoutingScores(): { strategy: RoutingStrategy; weights: RoutingWeights | null; scores: RoutingScore[]; groupedScores?: GroupedRoutingScore[] } {
   const db = getDb();
   const strategy = getRoutingStrategy();
   refreshStatsCache(db);
@@ -830,7 +1187,110 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     };
   }).sort((a, b) => b.score - a.score);
 
-  return { strategy, weights: weightsFor(strategy), scores };
+  // –– Grouped scores when grouping is enabled –––––––––––––––––––––––––––
+  const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+  let groupedScores: GroupedRoutingScore[] | undefined;
+  if (groupingEnabled) {
+    // Query groups with their fallback_config priority
+    const groupChain = db.prepare(`
+      SELECT fc.group_id, fc.priority, fc.enabled,
+             mg.group_key, mg.display_name, mg.benchmark_score,
+             mg.intelligence_rank, mg.size_label, mg.context_window,
+             mg.max_output_tokens, mg.supports_vision, mg.supports_tools
+      FROM fallback_config fc
+      JOIN model_groups mg ON mg.id = fc.group_id
+      WHERE fc.enabled = 1 AND mg.enabled = 1
+    `).all() as GroupChainRow[];
+
+    // Sort groups same way as routing: priority mode = priority order, bandit = intelligence desc
+    const sortedGroups = orderGroupChain(groupChain, strategy);
+
+    // Collect all providers for normalization ranges
+    const allProviders: ProviderRow[] = [];
+    for (const group of sortedGroups) {
+      const providers = db.prepare(`
+        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+               m.max_output_tokens
+        FROM models m
+        WHERE m.group_id = ? AND m.enabled = 1
+      `).all(group.group_id) as ProviderRow[];
+      allProviders.push(...providers);
+    }
+
+    // Min-max for provider sub-scoring
+    const speedComposites = allProviders.map(p => speedCompositeFromRank(p.speed_rank, p.size_label));
+    const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
+    const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
+
+    const latencyComposites = allProviders.map(p => latencyCompositeFromSize(p.size_label));
+    const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
+    const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+
+    const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+
+    groupedScores = [];
+    // Compute intelligence composites for all groups and min-max normalize
+    const groupComposites = sortedGroups.map(g =>
+      intelligenceComposite(g.size_label, g.intelligence_rank ?? 0, g.benchmark_score)
+    );
+    const groupIntelMin = groupComposites.length ? Math.min(...groupComposites) : 0;
+    const groupIntelMax = groupComposites.length ? Math.max(...groupComposites) : 0;
+
+    for (const group of sortedGroups) {
+      // Load enabled providers for this group
+      const providers = db.prepare(`
+        SELECT m.id as model_db_id, m.platform, m.model_id, m.display_name,
+               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+               m.max_output_tokens
+        FROM models m
+        WHERE m.group_id = ? AND m.enabled = 1
+      `).all(group.group_id) as ProviderRow[];
+
+      if (providers.length === 0) continue;
+
+      // Score providers within this group (deterministic, not sampled)
+      const providersScored = providers
+        .map(p => {
+          const { subScore, axes } = providerSubScore(p, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, false);
+          const degradationState = getAllStatesView().get(p.model_db_id);
+          return {
+            modelDbId: p.model_db_id,
+            platform: p.platform,
+            modelId: p.model_id,
+            subScore,
+            degradation: {
+              penalty: degradationState?.penalty ?? 0,
+              tier: degradationState?.tier ?? 'healthy',
+            },
+          };
+        })
+        .sort((a, b) => b.subScore - a.subScore);
+
+      // Group score = min-max normalized intelligence across groups (for bandit)
+      // or 0 for priority mode
+      let groupScore = 0;
+      if (strategy !== 'priority') {
+        groupScore = intelligenceScore(
+          intelligenceComposite(group.size_label, group.intelligence_rank ?? 0, group.benchmark_score),
+          groupIntelMin, groupIntelMax,
+        );
+      }
+
+      groupedScores.push({
+        groupKey: group.group_key,
+        groupId: group.group_id,
+        groupScore,
+        providers: providersScored,
+      });
+    }
+  }
+
+  return { strategy, weights: weightsFor(strategy), scores, groupedScores };
 }
 
 // Whether at least one vision-capable model is enabled in the fallback chain.

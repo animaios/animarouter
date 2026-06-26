@@ -12,6 +12,7 @@ import {
   providerDailyRequestCount,
   getProviderDailyRequestCap,
   computeRetryCooldownMs,
+  clearCooldownHits,
 } from '../../services/ratelimit.js';
 import { parseRetryAfterMs } from '../../providers/base.js';
 import { getFeatureSetting } from '../../services/feature-settings.js';
@@ -119,6 +120,29 @@ describe('Rate Limiter', () => {
       expect(getNextCooldownDuration('groq', `m-${id}`, id)).toBe(2 * 60 * 1000);
       expect(getNextCooldownDuration('groq', `m-${id}`, id + 1)).toBe(2 * 60 * 1000);
       expect(getNextCooldownDuration('groq', `m-${id}-other`, id)).toBe(2 * 60 * 1000);
+    });
+  });
+
+  describe('clearCooldownHits', () => {
+    it('resets escalation so the next cooldown starts fresh at 2m', () => {
+      const id = Math.floor(Math.random() * 1_000_000);
+      const platform = 'cerebras';
+      const model = `cleanup-${id}`;
+      // Escalate a few times
+      expect(getNextCooldownDuration(platform, model, id)).toBe(2 * 60 * 1000);  // 1st: 2m
+      expect(getNextCooldownDuration(platform, model, id)).toBe(10 * 60 * 1000); // 2nd: 10m
+
+      // Clear the cooldown hits
+      clearCooldownHits(platform, model, id);
+
+      // Next cooldown should start fresh at 2m
+      expect(getNextCooldownDuration(platform, model, id)).toBe(2 * 60 * 1000);
+    });
+
+    it('is idempotent — calling with no hits is a no-op', () => {
+      const id = Math.floor(Math.random() * 1_000_000);
+      // Should not throw
+      clearCooldownHits('groq', 'nonexistent', id);
     });
   });
 
@@ -294,11 +318,12 @@ describe('getCooldownDurationForLimit with heartbeat', () => {
     process.env.TRANSIENT_COOLDOWN_SEC = originalEnv.TRANSIENT_COOLDOWN_SEC;
   });
 
-  it('uses 0ms transient cooldown when heartbeat enabled', async () => {
+  it('uses normal transient cooldown when heartbeat enabled', async () => {
     vi.resetModules();
     process.env.HEARTBEAT_ENABLED = 'true';
+    process.env.TRANSIENT_COOLDOWN_SEC = '90';
     const mod = await import('../../services/ratelimit.js');
-    expect(mod.getCooldownDurationForLimit('groq', 'model', testId, { rpd: null, tpd: null })).toBe(0);
+    expect(mod.getCooldownDurationForLimit('groq', 'model', testId, { rpd: null, tpd: null })).toBe(90_000);
   });
 
   it('uses normal transient cooldown when heartbeat disabled', async () => {

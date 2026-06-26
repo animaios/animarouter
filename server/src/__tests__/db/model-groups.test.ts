@@ -20,7 +20,7 @@ describe('resolveGroupKey', () => {
     // separators, strips -instruct/-chat/-it/-hf, normalizes version dots
     expect(resolveGroupKey('openai/gpt-4o', cache)).toBe('gpt-4o');
     expect(resolveGroupKey('GPT-4o', cache)).toBe('gpt-4o');
-    expect(resolveGroupKey('meta-llama/llama-3.3-70b-instruct', cache)).toBe('llama-3.3-70b');
+    expect(resolveGroupKey('meta-llama/llama-3.3-70b-instruct', cache)).toBe('llama-3-3-70b');
   });
 
   it('returns the alias target group_key when the normalized ID matches an alias', () => {
@@ -108,12 +108,12 @@ describe('reconcileGroups', () => {
   });
 
   it('creates groups for models that do not have one', () => {
-    const db = getDb();
-    // Insert a model with no group_id
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 'Frontier');
+      const db = getDb();
+      // Insert a model with no group_id
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 1, 'Frontier');
 
     const result = reconcileGroups(db);
     expect(result.groupsCreated).toBe(1);
@@ -130,20 +130,20 @@ describe('reconcileGroups', () => {
   });
 
   it('reassigns models with stale group_ids', () => {
-    const db = getDb();
-    // Create an initial group
-    db.prepare(`
-      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
-      VALUES (?, ?, ?, ?)
-    `).run('wrong-group', 'Wrong Group', 5, 'Medium');
+      const db = getDb();
+      // Create an initial group
+      db.prepare(`
+        INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+        VALUES (?, ?, ?, ?)
+      `).run('wrong-group', 'Wrong Group', 5, 'Medium');
 
-    const wrongGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('wrong-group') as { id: number };
+      const wrongGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('wrong-group') as { id: number };
 
-    // Insert a model pointing at the wrong group
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, group_id, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 'Frontier', wrongGroup.id);
+      // Insert a model pointing at the wrong group
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, group_id, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 1, 'Frontier', wrongGroup.id);
 
     const result = reconcileGroups(db);
     expect(result.modelsReassigned).toBe(1);
@@ -155,20 +155,20 @@ describe('reconcileGroups', () => {
   });
 
   it('skips models already in the correct group', () => {
-    const db = getDb();
-    // Create the correct group
-    db.prepare(`
-      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
-      VALUES (?, ?, ?, ?)
-    `).run('gpt-4o', 'GPT-4o', 1, 'Frontier');
+      const db = getDb();
+      // Create the correct group
+      db.prepare(`
+        INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+        VALUES (?, ?, ?, ?)
+      `).run('gpt-4o', 'GPT-4o', 1, 'Frontier');
 
-    const group = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('gpt-4o') as { id: number };
+      const group = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('gpt-4o') as { id: number };
 
-    // Insert a model already in the correct group
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, group_id, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 'Frontier', group.id);
+      // Insert a model already in the correct group
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, group_id, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 1, 'Frontier', group.id);
 
     const result = reconcileGroups(db);
     expect(result.groupsCreated).toBe(0);
@@ -176,26 +176,26 @@ describe('reconcileGroups', () => {
   });
 
   it('resolves aliases when determining the correct group_key', () => {
-    const db = getDb();
-    // Set up an alias: deepseek-v4-flash-free → deepseek-v4-flash
-    db.prepare('INSERT OR IGNORE INTO model_group_aliases (alias, group_key) VALUES (?, ?)')
-      .run('deepseek-v4-flash-free', 'deepseek-v4-flash');
-    invalidateAliasCache();
+      const db = getDb();
+      // Set up an alias: deepseek-v4-flash-free → deepseek-v4-flash
+      db.prepare('INSERT OR IGNORE INTO model_group_aliases (alias, group_key) VALUES (?, ?)')
+        .run('deepseek-v4-flash-free', 'deepseek-v4-flash');
+      invalidateAliasCache();
 
-    // Create the target group
-    db.prepare(`
-      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
-      VALUES (?, ?, ?, ?)
-    `).run('deepseek-v4-flash', 'DeepSeek V4 Flash', 2, 'Large');
+      // Create the target group
+      db.prepare(`
+        INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+        VALUES (?, ?, ?, ?)
+      `).run('deepseek-v4-flash', 'DeepSeek V4 Flash', 2, 'Large');
 
-    const targetGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?')
-      .get('deepseek-v4-flash') as { id: number };
+      const targetGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?')
+        .get('deepseek-v4-flash') as { id: number };
 
-    // Insert a model whose canonical key is the alias
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run('openrouter', 'deepseek-v4-flash-free', 'DSV4F Free', 80, 2, 'Large');
+      // Insert a model whose canonical key is the alias
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('openrouter', 'deepseek-v4-flash-free', 'DSV4F Free', 80, 2, 1, 'Large');
 
     const result = reconcileGroups(db);
     // The model should be assigned to the alias target group, not a new group
@@ -216,11 +216,11 @@ describe('ensureModelInGroup', () => {
   });
 
   it('creates a new group when none exists for the model resolved key', () => {
-    const db = getDb();
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 'Frontier');
+      const db = getDb();
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 1, 'Frontier');
 
     const model = db.prepare('SELECT id FROM models WHERE model_id = ?').get('gpt-4o') as { id: number };
     const groupId = ensureModelInGroup(db, model.id);
@@ -232,23 +232,23 @@ describe('ensureModelInGroup', () => {
   });
 
   it('reuses an existing group when one matches the resolved key', () => {
-    const db = getDb();
-    // Pre-create the group
-    db.prepare(`
-      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
-      VALUES (?, ?, ?, ?)
-    `).run('gpt-4o', 'GPT-4o', 1, 'Frontier');
-    const existingGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('gpt-4o') as { id: number };
+      const db = getDb();
+      // Pre-create the group
+      db.prepare(`
+        INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+        VALUES (?, ?, ?, ?)
+      `).run('gpt-4o', 'GPT-4o', 1, 'Frontier');
+      const existingGroup = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get('gpt-4o') as { id: number };
 
-    // Insert two models with same canonical key
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 'Frontier');
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run('nim', 'nim/gpt-4o', 'GPT-4o NIM', 88, 1, 'Frontier');
+      // Insert two models with same canonical key
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('openai', 'gpt-4o', 'GPT-4o', 90, 1, 1, 'Frontier');
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('nim', 'nim/gpt-4o', 'GPT-4o NIM', 88, 1, 1, 'Frontier');
 
     const model1 = db.prepare('SELECT id FROM models WHERE platform = ? AND model_id = ?')
       .get('openai', 'gpt-4o') as { id: number };
@@ -263,11 +263,11 @@ describe('ensureModelInGroup', () => {
   });
 
   it('returns the group_id', () => {
-    const db = getDb();
-    db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run('google', 'gemini-2.5-pro', 'Gemini 2.5 Pro', 85, 2, 'Large');
+      const db = getDb();
+      db.prepare(`
+        INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+      `).run('google', 'gemini-2.5-pro', 'Gemini 2.5 Pro', 85, 2, 1, 'Large');
 
     const model = db.prepare('SELECT id FROM models WHERE model_id = ?').get('gemini-2.5-pro') as { id: number };
     const groupId = ensureModelInGroup(db, model.id);
@@ -306,15 +306,15 @@ describe('propagateGroupProperties', () => {
 
     // Insert two models with different properties, both in this group
     db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label,
+      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label,
         context_window, max_output_tokens, supports_vision, supports_tools, group_id, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `).run('openai', 'gpt-4o', 'GPT-4o Old Name', 80, 2, 'Medium', 64000, 4096, 0, 0, group.id);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run('openai', 'gpt-4o', 'GPT-4o Old Name', 80, 2, 1, 'Medium', 64000, 4096, 0, 0, group.id);
     db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label,
+      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label,
         context_window, max_output_tokens, supports_vision, supports_tools, group_id, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `).run('nim', 'nim/gpt-4o', 'GPT-4o NIM Old', 70, 3, 'Small', 32000, 2048, 0, 0, group.id);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run('nim', 'nim/gpt-4o', 'GPT-4o NIM Old', 70, 3, 1, 'Small', 32000, 2048, 0, 0, group.id);
 
     propagateGroupProperties(db, group.id);
 
@@ -367,13 +367,13 @@ describe('propagateAllGroupProperties', () => {
 
     // Insert models with stale properties
     db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, group_id, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    `).run('p1', 'a', 'Stale A', 0, 99, 'Wrong', groupA.id);
+      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, group_id, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run('p1', 'a', 'Stale A', 0, 99, 1, 'Wrong', groupA.id);
     db.prepare(`
-      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, size_label, group_id, enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    `).run('p2', 'b', 'Stale B', 0, 99, 'Wrong', groupB.id);
+      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, group_id, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+    `).run('p2', 'b', 'Stale B', 0, 99, 1, 'Wrong', groupB.id);
 
     propagateAllGroupProperties(db);
 

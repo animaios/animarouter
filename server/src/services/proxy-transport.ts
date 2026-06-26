@@ -90,6 +90,8 @@ export async function* proxyStreamChatCompletion(
     const text = await res.text().catch(() => '');
     const err: any = new Error(`proxy transport error: ${res.status} ${text.slice(0, 500)}`);
     err.status = res.status;
+    const retryAfter = res.headers.get('retry-after');
+    if (retryAfter) err.retryAfterMs = Number(retryAfter) * 1000;
     throw err;
   }
 

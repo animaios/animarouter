@@ -110,6 +110,16 @@ function addGroup(opts: {
         VALUES (?, 'k', 'enc', 'iv', 'tag', 'healthy', 1)
       `).run(p.platform);
     }
+
+    // Ensure custom_providers entry for this platform slug
+    const hasProvider = db.prepare('SELECT id FROM custom_providers WHERE slug = ?')
+      .get(p.platform);
+    if (!hasProvider) {
+      db.prepare(`
+        INSERT INTO custom_providers (slug, display_name, base_url)
+        VALUES (?, ?, ?)
+      `).run(p.platform, p.name, `https://${p.platform}.example.com/v1`);
+    }
   }
 
   // Create fallback_config entry for the group — uses the first provider’s model_db_id
@@ -142,7 +152,7 @@ describe('group-aware routing', () => {
     initDb(':memory:');
     // Wipe seeded data so each test owns its models/keys/fallback chain
     getDb().exec(
-      'DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests; DELETE FROM model_groups;'
+      'DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests; DELETE FROM model_groups; DELETE FROM custom_providers;'
     );
     vi.clearAllMocks();
     (crypto.decrypt as any).mockReturnValue('mocked-api-key');

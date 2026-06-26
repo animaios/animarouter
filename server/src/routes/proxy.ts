@@ -18,6 +18,16 @@ import { publish } from '../services/events.js';
 import { getFeatureSetting } from '../services/feature-settings.js';
 import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
 import { isProxyTransportConfigured, proxyChatCompletion, proxyStreamChatCompletion, computeWorkerIndex } from '../services/proxy-transport.js';
+import type { BaseProvider } from '../providers/base.js';
+
+
+/** Resolve the upstream base URL for proxy transport. Falls back to the provider's
+ *  baseUrl if available, otherwise throws — proxy transport requires a known upstream URL. */
+function resolveProviderBaseUrl(provider: BaseProvider): string {
+  const url = provider.baseUrl;
+  if (url) return url;
+  throw new Error(`Proxy transport requires a provider with a baseUrl; ${provider.name} does not expose one. Disable use_proxy for this key.`);
+}
 
 export const proxyRouter = Router();
 
@@ -931,7 +941,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
                     };
                     const gen = useProxyTransport
                       ? proxyStreamChatCompletion(
-                          (route.provider as { baseUrl?: string }).baseUrl ?? `https://api.openai.com/v1`,
+                                                resolveProviderBaseUrl(route.provider),
                           route.apiKey,
                           { model: route.modelId, messages: outboundMessages, ...streamOptions },
                           sessionKey || undefined,
@@ -1119,7 +1129,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
               };
               const result = useProxyTransport
                 ? await proxyChatCompletion(
-                    (route.provider as { baseUrl?: string }).baseUrl ?? `https://api.openai.com/v1`,
+                                    resolveProviderBaseUrl(route.provider),
                     route.apiKey,
                     { model: route.modelId, messages: outboundMessages, ...chatOptions },
                     sessionKey || undefined,
@@ -1236,6 +1246,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       }
 
       if (isRetryableError(err)) {
+        // Determine if this is a transient (per-minute) 429 — transient 429s
+        // self-resolve within ~one window and should NOT evict the key from
+        // the healthy pool or increment penalty. Payment-required 402s are
+        // NOT transient even though classifyError returns 'minor'.
+        const isTransient = classifyError(err) === 'minor' && !isPaymentRequiredError(err);
+
         // Dead-turn errors (in-band error, empty completion, stream stall,
         // unparseable dialect): the key WORKS but this specific model
         // can't handle the request. Skip the model, keep the key.
@@ -1261,10 +1277,11 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // excludes it from the healthy pool. Only a successful ping
         // can restore it.
         if (isHeartbeatEnabled()) {
-          const reason = isPaymentRequiredError(err) ? 'payment_required' : 'rate_limited';
-          markKeyUnhealthy(route.keyId, err?.message?.slice(0, 120) ?? 'error');
+          const isPaymentRequired = isPaymentRequiredError(err);
+          const reason = isPaymentRequired ? 'payment_required' : 'rate_limited';
+          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'error', isTransient);
           publish({
-            type: 'routing.key_evicted',
+            type: isTransient ? 'routing.key_transient' : 'routing.key_evicted',
             id: requestId,
             provider: route.platform,
             keyId: route.keyId,
@@ -1278,7 +1295,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Non-retryable error (auth, 4xx, etc.): also evict from
         // healthy pool when heartbeat is enabled, then skip key.
         if (isHeartbeatEnabled()) {
-          markKeyUnhealthy(route.keyId, err?.message?.slice(0, 120) ?? 'auth error');
+          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'auth error');
           publish({
             type: 'routing.key_evicted',
             id: requestId,
