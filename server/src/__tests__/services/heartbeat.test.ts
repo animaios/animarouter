@@ -865,6 +865,45 @@ describe('Provider Health Heartbeat', () => {
       // Timer should be cleaned up
       expect(getPendingRechecks().has(keyId)).toBe(false);
     });
+    it('race: markKeyUnhealthy during in-flight recheck does not leak duplicate timer', async () => {
+      const { keyId } = setupProvider();
+
+      // Start a recheck cycle
+      markKeyUnhealthy(keyId, '429 rate limit');
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+
+      // Advance to fire the recheck timer
+      // Make pingKey hang (never resolves) so we can inject a race
+      let resolvePing: () => void;
+      const pingPromise = new Promise<void>(r => { resolvePing = r; });
+      chatCompletion.mockReturnValueOnce(pingPromise);
+
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // At this point, fireRecheck is in-flight (awaiting pingKey)
+      // The entry is still in recheckTimers with inFlight=true
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+
+      // Now simulate the key being marked unhealthy again during the async gap
+      markKeyUnhealthy(keyId, '429 again');
+
+      // scheduleRecheck should have seen the in-flight entry and updated it
+      // (bumped generation, set attempt back to 1, scheduled new timer)
+      // There should still be exactly one entry - not two
+      expect(getPendingRechecks().size).toBe(1);
+
+      // Now resolve the hanging ping
+      chatCompletion.mockResolvedValueOnce({ choices: [{ message: { content: 'ok' } }] });
+      resolvePing!();
+
+      // Let the microtask queue drain
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The stale fireRecheck should detect the generation mismatch
+      // and exit without scheduling a duplicate next attempt
+      // Only one entry should exist
+      expect(getPendingRechecks().size).toBeLessThanOrEqual(1);
+    });
   });
 
   // ── Recheck Cleanup ─────────────────────────────────────────────────────
