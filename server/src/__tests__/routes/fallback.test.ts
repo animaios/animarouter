@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb } from '../../db/index.js';
+import { getDb, initDb } from '../../db/index.js';
 import { initDegradation } from '../../services/degradation.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
@@ -58,6 +58,32 @@ describe('Fallback API', () => {
     expect(first).toHaveProperty('displayName');
     expect(first).toHaveProperty('intelligenceRank');
     expect(first).toHaveProperty('boost');
+  });
+
+  it('GET /api/fallback excludes archived models from routing views', async () => {
+    const db = getDb();
+    const target = db.prepare(`
+      SELECT m.id
+      FROM models m
+      JOIN fallback_config fc ON fc.model_db_id = m.id
+      WHERE m.enabled = 1 AND fc.enabled = 1
+      LIMIT 1
+    `).get() as { id: number } | undefined;
+    expect(target).toBeDefined();
+    if (!target) return;
+
+    db.prepare('UPDATE models SET enabled = 0 WHERE id = ?').run(target.id);
+    try {
+      const fallback = await request(app, 'GET', '/api/fallback');
+      expect(fallback.status).toBe(200);
+      expect(fallback.body.some((entry: any) => entry.modelDbId === target.id)).toBe(false);
+
+      const performance = await request(app, 'GET', '/api/fallback/performance');
+      expect(performance.status).toBe(200);
+      expect(performance.body.some((entry: any) => entry.modelDbId === target.id)).toBe(false);
+    } finally {
+      db.prepare('UPDATE models SET enabled = 1 WHERE id = ?').run(target.id);
+    }
   });
 
   it('persists model boost and returns it in fallback entries', async () => {

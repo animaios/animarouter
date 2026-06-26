@@ -34,6 +34,7 @@ fallbackRouter.get('/performance', (_req: Request, res: Response) => {
       FROM models m
       LEFT JOIN fallback_config fc ON m.id = fc.model_db_id
       LEFT JOIN model_stats_cache s ON m.platform = s.platform AND m.model_id = s.model_id
+      WHERE m.enabled = 1 AND (fc.enabled IS NULL OR fc.enabled = 1)
       ORDER BY s.tokPerSec DESC NULLS LAST, m.intelligence_rank ASC
     `).all() as Array<{
       id: number; platform: string; model_id: string; display_name: string;
@@ -124,6 +125,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
            m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
+    WHERE fc.enabled = 1 AND m.enabled = 1
     ORDER BY fc.priority ASC
   `).all() as any[];
 
