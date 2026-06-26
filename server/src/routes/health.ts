@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getDb } from '../db/index.js';
 import { checkKeyHealth, checkAllKeys } from '../services/health.js';
+import { getKeyHealth, isHeartbeatEnabled } from '../services/heartbeat.js';
 import { hasProvider } from '../providers/index.js';
 
 export const healthRouter = Router();
