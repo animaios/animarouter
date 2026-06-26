@@ -94,6 +94,8 @@ interface RoutingData {
   scores: (RoutingScore & { platform: string; modelId: string; displayName: string; enabled: boolean })[]
 }
 
+type BoostResponse = { modelDbId: number; boost: number }
+
 // A merged row: fallback-chain metadata + live bandit scores.
 type Row = FallbackEntry & Partial<RoutingScore>
 
@@ -597,9 +599,14 @@ export default function FallbackPage() {
   const boostMutation = useMutation({
     mutationFn: ({ modelDbId, boost }: { modelDbId: number; boost: number }) =>
       boost === 1
-        ? apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
-        : apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
-    onSuccess: () => {
+        ? apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
+        : apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
+    onSuccess: ({ modelDbId, boost }) => {
+      setLocalEntries(current =>
+        current
+          ? current.map(entry => entry.modelDbId === modelDbId ? { ...entry, boost } : entry)
+          : current,
+      )
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
     },
