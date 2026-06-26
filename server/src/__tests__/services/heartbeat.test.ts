@@ -28,6 +28,7 @@ describe('Provider Health Heartbeat', () => {
   let markKeyUnhealthy: (keyId: number, error?: string) => void;
   let pokeKey: (keyId: number) => Promise<boolean>;
   let pokeAllKeys: () => Promise<{ poked: number; skipped: boolean }>;
+  let getPendingRechecks: () => ReadonlyMap<number, { keyId: number; attempt: number }>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -68,6 +69,7 @@ describe('Provider Health Heartbeat', () => {
     markKeyUnhealthy = heartbeatModule.markKeyUnhealthy;
     pokeKey = heartbeatModule.pokeKey;
     pokeAllKeys = heartbeatModule.pokeAllKeys;
+    getPendingRechecks = heartbeatModule.getPendingRechecks;
     initDb = dbModule.initDb;
     getDb = dbModule.getDb;
     setSetting = dbModule.setSetting;
@@ -83,6 +85,8 @@ describe('Provider Health Heartbeat', () => {
     setSetting('heartbeat_interval_min', '10');
     setSetting('heartbeat_activity_window_min', '15');
     setSetting('heartbeat_stagger_ms', '0'); // No stagger in tests to avoid timing issues
+    setSetting('heartbeat_exhausted_recheck_sec', '90');
+    setSetting('heartbeat_exhausted_max_rechecks', '3');
   });
 
   afterEach(() => {
@@ -704,6 +708,280 @@ describe('Provider Health Heartbeat', () => {
       expect(pingEvents.length).toBe(3);
     });
   });
+  // ── Recheck Scheduling ──────────────────────────────────────────────────
+
+  describe('Recheck scheduling', () => {
+    it('markKeyUnhealthy schedules a recheck timer', () => {
+      const { keyId } = setupProvider();
+      markKeyUnhealthy(keyId, '429 rate limit');
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+      expect(getPendingRechecks().get(keyId)!.attempt).toBe(1);
+    });
+
+    it('no duplicate recheck for same key', () => {
+      const { keyId } = setupProvider();
+      markKeyUnhealthy(keyId, '429 rate limit');
+      markKeyUnhealthy(keyId, '429 rate limit again');
+      expect(getPendingRechecks().size).toBe(1);
+      expect(getPendingRechecks().get(keyId)!.attempt).toBe(1);
+    });
+
+    it('disabled heartbeat → no recheck scheduled', async () => {
+      // Need a fresh module with heartbeat disabled
+      vi.resetModules();
+      vi.doMock('../../providers/index.js', async (importOriginal) => {
+        const actual = await importOriginal() as any;
+        return { ...actual, buildProviderFor: () => ({ name: 'fake', chatCompletion: vi.fn() }) };
+      });
+      vi.doMock('../../services/events.js', () => ({
+        publish: vi.fn(),
+      }));
+      vi.doMock('../../lib/crypto.js', async (importOriginal) => {
+        const actual = await importOriginal() as any;
+        return { ...actual, decrypt: vi.fn(() => 'mocked-api-key') };
+      });
+
+      process.env.ENCRYPTION_KEY = '0'.repeat(64);
+      const freshDb = await import('../../db/index.js');
+      const freshHb = await import('../../services/heartbeat.js');
+      const freshDegr = await import('../../services/degradation.js');
+
+      freshDb.initDb(':memory:');
+      freshDegr.initDegradation();
+      // heartbeat_enabled defaults to false — no setting needed
+
+      // Setup provider in fresh DB
+      const db = freshDb.getDb();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('testprov', 'test-model', 'Test', 1, 1, 1)").run();
+      const id = (db.prepare("SELECT id FROM models WHERE platform = 'testprov'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(id);
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('testprov', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+      const keyRow = db.prepare("SELECT id FROM api_keys WHERE platform = ? AND enabled = 1").get('testprov') as any;
+
+      freshHb.markKeyUnhealthy(keyRow.id, '429 rate limit');
+      expect(freshHb.getPendingRechecks().size).toBe(0);
+    });
+  });
+
+  // ── Recheck Execution ──────────────────────────────────────────────────
+
+  describe('Recheck execution', () => {
+    it('recheck success clears timer and emits event', async () => {
+      const { keyId } = setupProvider();
+      chatCompletion.mockResolvedValueOnce({ choices: [{ message: { content: 'ok' } }] });
+
+      markKeyUnhealthy(keyId, '429 rate limit');
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+
+      // Advance past the recheck delay (90s default)
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // Timer should be cleared
+      expect(getPendingRechecks().has(keyId)).toBe(false);
+      // Key should be healthy again
+      expect(isKeyHealthy(keyId)).toBe(true);
+      // Should emit heartbeat.recheck event with success
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(1);
+      expect(recheckEvents[0].success).toBe(true);
+      expect(recheckEvents[0].attempt).toBe(1);
+      expect(recheckEvents[0].keyId).toBe(keyId);
+    });
+
+    it('recheck failure schedules next attempt', async () => {
+      const { keyId } = setupProvider();
+      // Fail the ping — simulate a rate limit error
+      const err = new Error('429 rate limited');
+      (err as any).status = 429;
+      chatCompletion.mockRejectedValueOnce(err);
+
+      markKeyUnhealthy(keyId, '429 rate limit');
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // Should have emitted a failure recheck event
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(1);
+      expect(recheckEvents[0].success).toBe(false);
+      expect(recheckEvents[0].attempt).toBe(1);
+      // Should schedule next attempt
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+      expect(getPendingRechecks().get(keyId)!.attempt).toBe(2);
+    });
+
+    it('max rechecks stops retrying', async () => {
+      const { keyId } = setupProvider();
+      // Set max rechecks to 1 for this test
+      setSetting('heartbeat_exhausted_max_rechecks', '1');
+      resetHeartbeatConfig();
+
+      const err = new Error('429 rate limited');
+      (err as any).status = 429;
+      chatCompletion.mockRejectedValue(err);
+
+      markKeyUnhealthy(keyId, '429 rate limit');
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // After max rechecks (1), no more timers
+      expect(getPendingRechecks().has(keyId)).toBe(false);
+
+      // Reset setting for other tests
+      setSetting('heartbeat_exhausted_max_rechecks', '3');
+      resetHeartbeatConfig();
+    });
+
+    it('key already healthy → recheck no-ops', async () => {
+      const { keyId } = setupProvider();
+      markKeyUnhealthy(keyId, '429 rate limit');
+
+      // Manually mark key healthy before timer fires (via pokeKey)
+      chatCompletion.mockResolvedValueOnce({ choices: [{ message: { content: 'ok' } }] });
+      await pokeKey(keyId);
+      expect(isKeyHealthy(keyId)).toBe(true);
+
+      // Clear any published events from pokeKey
+      publishedEvents.length = 0;
+
+      // Now advance past the recheck timer
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // No recheck event should be emitted — key is already healthy
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(0);
+    });
+
+    it('key disabled → recheck no-ops', async () => {
+      const { keyId } = setupProvider();
+      markKeyUnhealthy(keyId, '429 rate limit');
+
+      // Disable the key in DB before timer fires
+      const db = getDb();
+      db.prepare('UPDATE api_keys SET enabled = 0 WHERE id = ?').run(keyId);
+
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // No recheck event — key is disabled
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(0);
+      // Timer should be cleaned up
+      expect(getPendingRechecks().has(keyId)).toBe(false);
+    });
+    it('race: markKeyUnhealthy during in-flight recheck does not leak duplicate timer', async () => {
+      const { keyId } = setupProvider();
+
+      // Start a recheck cycle
+      markKeyUnhealthy(keyId, '429 rate limit');
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+
+      // Advance to fire the recheck timer
+      // Make pingKey hang (never resolves) so we can inject a race
+      let resolvePing: () => void;
+      const pingPromise = new Promise<void>(r => { resolvePing = r; });
+      chatCompletion.mockReturnValueOnce(pingPromise);
+
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      // At this point, fireRecheck is in-flight (awaiting pingKey)
+      // The entry is still in recheckTimers with inFlight=true
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+
+      // Now simulate the key being marked unhealthy again during the async gap
+      markKeyUnhealthy(keyId, '429 again');
+
+      // scheduleRecheck should have seen the in-flight entry and updated it
+      // (bumped generation, set attempt back to 1, scheduled new timer)
+      // There should still be exactly one entry - not two
+      expect(getPendingRechecks().size).toBe(1);
+
+      // Now resolve the hanging ping
+      chatCompletion.mockResolvedValueOnce({ choices: [{ message: { content: 'ok' } }] });
+      resolvePing!();
+
+      // Let the microtask queue drain
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The stale fireRecheck should detect the generation mismatch
+      // and exit without scheduling a duplicate next attempt
+      // Only one entry should exist
+      expect(getPendingRechecks().size).toBeLessThanOrEqual(1);
+    });
+  });
+
+  // ── Recheck Cleanup ─────────────────────────────────────────────────────
+
+  describe('Recheck cleanup', () => {
+    it('stopHeartbeat clears all rechecks', () => {
+      const { keyId: keyId1 } = setupProvider('testprov', 'test-model');
+      // Add a second key on a different platform
+      const db = getDb();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('prov2', 'model2', 'Model 2', 2, 2, 1)").run();
+      const id2 = (db.prepare("SELECT id FROM models WHERE platform = 'prov2' AND model_id = 'model2'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)').run(id2);
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('prov2', 'Key 2', 'enc2', 'iv2', 'tag2', 'healthy', 1)").run();
+      const keyRow2 = db.prepare("SELECT id FROM api_keys WHERE platform = ? AND enabled = 1").get('prov2') as any;
+
+      markKeyUnhealthy(keyId1, '429');
+      markKeyUnhealthy(keyRow2.id, '429');
+      expect(getPendingRechecks().size).toBe(2);
+
+      stopHeartbeat();
+      expect(getPendingRechecks().size).toBe(0);
+    });
+
+    it('resetHeartbeatConfig clears rechecks', () => {
+      const { keyId } = setupProvider();
+      markKeyUnhealthy(keyId, '429');
+      expect(getPendingRechecks().has(keyId)).toBe(true);
+
+      resetHeartbeatConfig();
+      expect(getPendingRechecks().size).toBe(0);
+    });
+  });
+
+  // ── Recheck Event Shape ─────────────────────────────────────────────────
+
+  describe('Recheck event shape', () => {
+    it('success event has correct fields', async () => {
+      const { keyId } = setupProvider();
+      chatCompletion.mockResolvedValueOnce({ choices: [{ message: { content: 'ok' } }] });
+
+      markKeyUnhealthy(keyId, '429 rate limit');
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(1);
+      const evt = recheckEvents[0];
+      expect(evt).toMatchObject({
+        type: 'heartbeat.recheck',
+        keyId,
+        provider: 'testprov',
+        model: 'test-model',
+        success: true,
+        attempt: 1,
+      });
+      expect(evt.latencyMs).toBeGreaterThanOrEqual(0);
+      expect(typeof evt.at).toBe('number');
+      // No error field on success
+      expect(evt.error).toBeUndefined();
+    });
+
+    it('failure event has error field', async () => {
+      const { keyId } = setupProvider();
+      const err = new Error('429 Too Many Requests');
+      (err as any).status = 429;
+      chatCompletion.mockRejectedValueOnce(err);
+
+      markKeyUnhealthy(keyId, '429 rate limit');
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(1);
+      const evt = recheckEvents[0];
+      expect(evt.success).toBe(false);
+      expect(evt.error).toBeTruthy();
+      expect(typeof evt.attempt).toBe('number');
+    });
+  });
+
 });
 
 // ── Route-level: POST /heartbeat/poke ─────────────────────────────────────
@@ -770,4 +1048,5 @@ describe('Heartbeat Poke API', () => {
     expect(status).toBe(400);
     expect(body.error.message).toBe('keyId must be a number');
   });
+
 });

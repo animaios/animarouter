@@ -23,6 +23,7 @@ interface ModelSwitchEvent extends RequestEventBase { type: 'routing.model_switc
 interface ProviderFastFailEvent extends RequestEventBase { type: 'routing.provider_fastfail'; provider: string; failedModelCount: number; }
 interface KeyEvictedEvent extends RequestEventBase { type: 'routing.key_evicted'; provider: string; keyId: number; model: string; reason: 'rate_limited' | 'payment_required' | 'auth_error'; }
 interface HeartbeatPingEvent extends TimestampOnly { type: 'heartbeat.ping'; provider: string; model: string; keyId: number; success: boolean; latencyMs: number; error?: string; }
+interface HeartbeatRecheckEvent extends TimestampOnly { type: 'heartbeat.recheck'; keyId: number; provider: string; model: string; success: boolean; latencyMs: number; attempt: number; error?: string; }
 interface HeartbeatCycleSkippedEvent extends TimestampOnly { type: 'heartbeat.cycle_skipped'; reason: string; lastActivityAgeMs: number; }
 interface StreamChunkEvent extends RequestEventBase { type: 'stream.chunk'; text: string; }
 
@@ -30,7 +31,7 @@ type LiveEvent =
   | RequestStartEvent | RequestDoneEvent | RequestErrorEvent | RequestAbortedEvent
   | KeyExhaustedEvent | ModelSwitchEvent | ProviderFastFailEvent
   | KeyEvictedEvent
-  | HeartbeatPingEvent | HeartbeatCycleSkippedEvent
+  | HeartbeatPingEvent | HeartbeatRecheckEvent | HeartbeatCycleSkippedEvent
   | StreamChunkEvent;
 
 /** Exhaustive-check helper: assigning a LiveEvent to this type in a switch
@@ -88,6 +89,13 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       }
       return { id: 'hb', ts, kind: 'warn', text: `♥ [heartbeat] ${evt.provider}/${evt.model} key#${evt.keyId} FAILED: ${evt.error?.slice(0, 60) ?? 'unknown'}` };
     }
+    case 'heartbeat.recheck':
+      if (evt.success) {
+        return { id: 'hbr', ts, kind: 'info',
+          text: `⚡ [recheck] key#${evt.keyId} on ${evt.provider}/${evt.model} recovered (${evt.latencyMs}ms, attempt ${evt.attempt})` };
+      }
+      return { id: 'hbr', ts, kind: 'warn',
+        text: `⚡ [recheck] key#${evt.keyId} on ${evt.provider}/${evt.model} still unhealthy: ${evt.error?.slice(0, 60) ?? 'unknown'} (attempt ${evt.attempt})` };
     case 'heartbeat.cycle_skipped': {
       return { id: 'hb', ts, kind: 'info', text: `♥ [heartbeat] Cycle skipped: ${evt.reason} (idle ${Math.round(evt.lastActivityAgeMs / 1000)}s)` };
     }

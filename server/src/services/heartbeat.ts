@@ -67,6 +67,7 @@ export function markKeyUnhealthy(keyId: number, error?: string): void {
     healthy: false,
     lastError: error ?? 'evicted by traffic 429',
   });
+  scheduleRecheck(keyId);
 }
 
 /**
@@ -83,6 +84,182 @@ export function getAllKeyHealth(): Map<number, KeyHealth> {
   return new Map(keyHealthMap);
 }
 
+/** Schedule a proactive re-ping of an exhausted key after a configured delay.
+ *  No-op if a recheck timer is already pending or in-flight for this key (FR-3).
+ *  If a prior cycle's in-flight check is stale (key marked unhealthy again),
+ *  the new schedule supersedes it — the stale fireRecheck will detect this
+ *  via the generation counter and exit without scheduling a next attempt. */
+function scheduleRecheck(keyId: number): void {
+  // FR-3: No duplicate timers — also blocks while a fireRecheck is in-flight
+  const existing = recheckTimers.get(keyId);
+  if (existing) {
+    if (existing.inFlight) {
+      // A fireRecheck is running for this key. Bump the generation so the
+      // in-flight fireRecheck knows its cycle is stale and won't schedule
+      // a next attempt. We start a fresh cycle from attempt 1.
+      existing.generation = ++recheckGeneration;
+      existing.attempt = 1;
+      // Clear the old timer (already fired if in-flight, but be safe)
+      if (existing.timerRef) clearTimeout(existing.timerRef);
+      const { recheckSec } = readConfig();
+      existing.timerRef = setTimeout(() => {
+        fireRecheck(keyId, 1).catch(err => {
+          console.error(`[Heartbeat] Recheck error for key#${keyId}:`, err);
+        });
+      }, recheckSec * 1000);
+      existing.inFlight = false;
+      return;
+    }
+    return; // Already has a pending timer (not in-flight) — skip
+  }
+
+  const { recheckSec } = readConfig();
+  const generation = ++recheckGeneration;
+
+  const timerRef = setTimeout(() => {
+    fireRecheck(keyId, 1).catch(err => {
+      console.error(`[Heartbeat] Recheck error for key#${keyId}:`, err);
+    });
+  }, recheckSec * 1000);
+
+  recheckTimers.set(keyId, { keyId, attempt: 1, generation, timerRef, inFlight: false });
+}
+
+/** Fire a recheck ping for an exhausted key. Called when a recheck timer fires.
+ *  Checks preconditions (key still unhealthy, not recently pinged, still enabled)
+ *  before calling the existing pingKey() logic.
+ *
+ *  Race-safety: We mark the entry in-flight before the async ping and check
+ *  the generation counter after the await. If scheduleRecheck() was called
+ *  during the async gap (because the key was marked unhealthy again), the
+ *  generation will have changed — we exit without scheduling a next attempt
+ *  to avoid creating a duplicate recheck loop. */
+async function fireRecheck(keyId: number, attempt: number): Promise<void> {
+  const entry = recheckTimers.get(keyId);
+  if (!entry) return; // Slot was cleared (stopHeartbeat / resetConfig)
+
+  // Mark in-flight so scheduleRecheck sees the entry (FR-3 dedup)
+  const myGeneration = entry.generation;
+  entry.inFlight = true;
+  entry.timerRef = null; // Timer already fired
+
+  const health = keyHealthMap.get(keyId);
+  // Key already recovered — clean up and done
+  if (!health || health.healthy) {
+    recheckTimers.delete(keyId);
+    return;
+  }
+
+  const { recheckSec, maxRechecks, pingTimeoutMs } = readConfig();
+  const minRecencyMs = recheckSec * 1000 / 2;
+
+  // FR-4: Skip if this key was pinged very recently
+  if (Date.now() - health.lastPingAt < minRecencyMs) {
+    // Only schedule next if we still own the slot
+    const currentEntry = recheckTimers.get(keyId);
+    if (currentEntry && currentEntry.generation === myGeneration) {
+      recheckTimers.delete(keyId);
+      if (attempt < maxRechecks) {
+        scheduleNextRecheck(keyId, attempt + 1);
+      }
+    }
+    return;
+  }
+
+  // FR-5: Check key is still enabled in DB
+  const db = getDb();
+  const keyRow = db.prepare(
+    "SELECT * FROM api_keys WHERE id = ? AND enabled = 1"
+  ).get(keyId) as any | undefined;
+  if (!keyRow) {
+    recheckTimers.delete(keyId);
+    return;
+  }
+
+  // FR-2: Pick highest-priority model for the key's platform
+  const model = db.prepare(`
+    SELECT m.id AS model_db_id, m.model_id
+    FROM fallback_config fc
+    JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+    WHERE fc.enabled = 1 AND m.platform = ?
+    ORDER BY fc.priority ASC
+    LIMIT 1
+  `).get(keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
+  if (!model) {
+    recheckTimers.delete(keyId);
+    return;
+  }
+
+  const start = Date.now();
+  await pingKey(keyRow.platform, model.model_db_id, model.model_id, keyRow, pingTimeoutMs);
+  const latencyMs = Date.now() - start;
+
+  // ── Post-await: check if our generation is still current ──
+  // If scheduleRecheck() was called during the async gap (key got 429'd
+  // again), it bumped the generation and started a fresh timer. We must
+  // NOT schedule a next attempt — that would leak a duplicate timer.
+  const currentEntry = recheckTimers.get(keyId);
+  if (!currentEntry || currentEntry.generation !== myGeneration) {
+    // Our cycle is stale — a newer recheck cycle owns the slot. Exit.
+    return;
+  }
+  if (currentEntry.inFlight) {
+    // Still marked in-flight (by us) — clean up
+    recheckTimers.delete(keyId);
+  }
+
+  const newHealth = keyHealthMap.get(keyId);
+  const success = !!newHealth?.healthy;
+
+  if (success) {
+    publish({
+      type: 'heartbeat.recheck',
+      keyId,
+      provider: keyRow.platform,
+      model: model.model_id,
+      success: true,
+      latencyMs,
+      attempt,
+      at: Date.now(),
+    });
+  } else {
+    publish({
+      type: 'heartbeat.recheck',
+      keyId,
+      provider: keyRow.platform,
+      model: model.model_id,
+      success: false,
+      latencyMs,
+      error: newHealth?.lastError?.slice(0, 120) ?? 'unknown',
+      attempt,
+      at: Date.now(),
+    });
+
+    if (attempt < maxRechecks) {
+      scheduleNextRecheck(keyId, attempt + 1);
+    }
+  }
+}
+
+/** Schedule the next recheck attempt for a key that hasn't recovered yet. */
+function scheduleNextRecheck(keyId: number, nextAttempt: number): void {
+  const { recheckSec } = readConfig();
+  const generation = ++recheckGeneration;
+
+  const timerRef = setTimeout(() => {
+    fireRecheck(keyId, nextAttempt).catch(err => {
+      console.error(`[Heartbeat] Recheck error for key#${keyId} (attempt ${nextAttempt}):`, err);
+    });
+  }, recheckSec * 1000);
+
+  recheckTimers.set(keyId, { keyId, attempt: nextAttempt, generation, timerRef, inFlight: false });
+}
+
+/** Get pending recheck timers (read-only, for testing). */
+export function getPendingRechecks(): ReadonlyMap<number, { keyId: number; attempt: number }> {
+  return new Map([...recheckTimers].map(([k, v]) => [k, { keyId: v.keyId, attempt: v.attempt }]));
+}
+
 // ── Configuration (lazy-initialized from feature-settings on first use) ─────
 
 let _enabled: boolean | null = null;
@@ -91,6 +268,8 @@ let _activityWindowMs: number | null = null;
 let _pingTimeoutMs: number | null = null;
 let _staggerMs: number | null = null;
 let _concurrency: number | null = null;
+let _recheckSec: number | null = null;
+let _maxRechecks: number | null = null;
 
 function readConfig() {
   if (_enabled === null) {
@@ -100,8 +279,10 @@ function readConfig() {
     _pingTimeoutMs = getFeatureSetting('heartbeat_timeout_ms') as number;
     _staggerMs = getFeatureSetting('heartbeat_stagger_ms') as number;
     _concurrency = getFeatureSetting('heartbeat_concurrency') as number;
+    _recheckSec = getFeatureSetting('heartbeat_exhausted_recheck_sec') as number;
+    _maxRechecks = getFeatureSetting('heartbeat_exhausted_max_rechecks') as number;
   }
-  return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs!, concurrency: _concurrency! };
+  return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs!, concurrency: _concurrency!, recheckSec: _recheckSec!, maxRechecks: _maxRechecks! };
 }
 
 
@@ -113,7 +294,15 @@ export function resetHeartbeatConfig(): void {
   _pingTimeoutMs = null;
   _staggerMs = null;
   _concurrency = null;
+  _recheckSec = null;
+  _maxRechecks = null;
   keyHealthMap.clear();
+
+  // Clear pending rechecks
+  for (const [, state] of recheckTimers) {
+    if (state.timerRef) clearTimeout(state.timerRef);
+  }
+  recheckTimers.clear();
 }
 
 // ── Module-level state ──────────────────────────────────────────────────────
@@ -121,6 +310,24 @@ export function resetHeartbeatConfig(): void {
 let timerRef: ReturnType<typeof setInterval> | null = null;
 let lastActivityAt = 0;
 let cycleInProgress = false;
+
+// ── Recheck state (exhausted-key proactive recovery) ──
+
+interface RecheckState {
+  keyId: number;
+  attempt: number;       // 1-based
+  /** Monotonically increasing generation counter. Incremented on each new
+   *  scheduleRecheck() call so that in-flight fireRecheck() can detect
+   *  whether its slot has been superseded by a newer recheck cycle. */
+  generation: number;
+  timerRef: ReturnType<typeof setTimeout> | null;
+  /** True while fireRecheck is awaiting pingKey(). Prevents the async gap
+   *  from allowing scheduleRecheck() to create a duplicate timer. */
+  inFlight: boolean;
+}
+
+const recheckTimers = new Map<number, RecheckState>();
+let recheckGeneration = 0;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -162,6 +369,12 @@ export function stopHeartbeat(): void {
     timerRef = null;
     console.log('[Heartbeat] Timer stopped');
   }
+
+    // Clear all pending recheck timers
+    for (const [, state] of recheckTimers) {
+      if (state.timerRef) clearTimeout(state.timerRef);
+    }
+    recheckTimers.clear();
 }
 
 /** Trigger a full heartbeat cycle immediately, bypassing the activity gate.
