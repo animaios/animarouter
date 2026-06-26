@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
+import { initDb, getDb, getUnifiedApiKey, setSetting } from '../../db/index.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
@@ -266,6 +266,96 @@ describe('strict pinning (no silent fallback on pinned-model errors)', () => {
 
     const fbHits = calls.filter(u => u.includes(fallbackPlatform));
     expect(fbHits).toEqual([]);
+  });
+});
+
+describe('grouped bare model pinning', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    initDb(':memory:');
+    app = createApp();
+    dashToken = mintDashboardToken();
+
+    const db = getDb();
+    db.exec(
+      'DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM requests; DELETE FROM models; DELETE FROM model_groups; DELETE FROM custom_providers; DELETE FROM model_group_aliases;'
+    );
+    setSetting('model_grouping_enabled', 'true');
+
+    db.prepare(`
+      INSERT INTO custom_providers (slug, display_name, base_url)
+      VALUES
+        ('group-pin-a', 'Group Pin A', 'https://group-pin-a.example.com/v1'),
+        ('group-pin-b', 'Group Pin B', 'https://group-pin-b.example.com/v1')
+    `).run();
+
+    db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label, supports_tools, enabled)
+      VALUES ('deepseek-v4-flash', 'DeepSeek V4 Flash', 1, 'Frontier', 1, 1)
+    `).run();
+    const groupId = (db.prepare('SELECT id FROM model_groups WHERE group_key = ?')
+      .get('deepseek-v4-flash') as { id: number }).id;
+
+    const insertModel = db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, monthly_token_budget, enabled, group_id)
+      VALUES (?, ?, ?, 1, ?, 'Frontier', '', 1, ?)
+    `);
+    insertModel.run('group-pin-a', 'provider-a/deepseek-v4-flash-instruct', 'DeepSeek V4 Flash A', 1, groupId);
+    insertModel.run('group-pin-b', 'provider-b/deepseek-v4-flash-chat', 'DeepSeek V4 Flash B', 10, groupId);
+
+    const firstModel = db.prepare('SELECT id FROM models WHERE platform = ?').get('group-pin-a') as { id: number };
+    db.prepare('INSERT INTO fallback_config (model_db_id, priority, group_id, enabled) VALUES (?, 1, ?, 1)')
+      .run(firstModel.id, groupId);
+
+    const addKey = await request(app, 'POST', '/api/keys', {
+      platform: 'group-pin-b',
+      key: 'group-pin-b-key',
+      label: 'group-pin-b',
+    });
+    expect(addKey.status).toBe(201);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('resolves a bare group key to preferredGroupId and routes to a healthy provider in that group', async () => {
+    const origFetch = global.fetch;
+    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const urlStr = typeof url === 'string' ? url : url.toString();
+      if (urlStr.includes('group-pin-a.example.com')) {
+        throw new Error('first provider should not be called without a key');
+      }
+      if (urlStr.includes('group-pin-b.example.com')) {
+        return {
+          ok: true,
+          json: () => Promise.resolve({
+            id: 'chatcmpl-group-pin',
+            object: 'chat.completion',
+            created: 1,
+            model: 'provider-b/deepseek-v4-flash-chat',
+            choices: [{ index: 0, message: { role: 'assistant', content: 'group ok' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
+          }),
+        } as any;
+      }
+      return origFetch(url, init);
+    });
+
+    const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: 'hi' }],
+    }, authHeaders());
+
+    expect(status).toBe(200);
+    expect(body?.model).toBe('provider-b/deepseek-v4-flash-chat');
+
+    const row = getDb().prepare('SELECT platform, model_id, requested_model FROM requests ORDER BY id DESC LIMIT 1').get() as any;
+    expect(row.platform).toBe('group-pin-b');
+    expect(row.model_id).toBe('provider-b/deepseek-v4-flash-chat');
+    expect(row.requested_model).toBe('deepseek-v4-flash');
   });
 });
 

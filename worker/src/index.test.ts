@@ -53,6 +53,20 @@ describe('AnimaRouter anonymizing Worker', () => {
     expect(res.status).toBe(401);
   });
 
+  it('rejects malformed encoded upstream paths without calling fetch', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await handleRequest(new Request(`https://relay.example.test/${env.PROXY_AUTH_KEY}/1/not-base64!`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer provider-key' },
+    }), env);
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe('Invalid upstream URL');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('allows wildcard upstream hosts for custom providers', async () => {
     expect(isAllowedHost('custom-provider.internal', '*')).toBe(true);
     expect(isAllowedHost('anything.example.com', '')).toBe(true);

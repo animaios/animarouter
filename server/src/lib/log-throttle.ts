@@ -30,6 +30,7 @@ const DEFAULT_TTLS: Record<string, number> = {
 };
 
 const FALLBACK_TTL = 5_000; // 5s default for unlisted types
+const MAX_ENTRIES = 1000;
 
 /**
  * Create a deterministic signature for an event based on its type and identity fields.
@@ -76,6 +77,23 @@ export class LogThrottle {
     this.entries = new Map();
   }
 
+  private evictOverflow(now: number): void {
+    if (this.entries.size <= MAX_ENTRIES) return;
+
+    for (const [key, entry] of this.entries.entries()) {
+      if (this.entries.size <= MAX_ENTRIES) return;
+      if (now >= entry.expiresAt) {
+        this.entries.delete(key);
+      }
+    }
+
+    while (this.entries.size > MAX_ENTRIES) {
+      const oldest = this.entries.keys().next();
+      if (oldest.done) break;
+      this.entries.delete(oldest.value);
+    }
+  }
+
   /**
    * Determine if an event should be emitted based on deduplication rules.
    *
@@ -84,14 +102,7 @@ export class LogThrottle {
    * @returns Object with `emit` boolean and `suppressed` count of duplicates skipped
    */
   shouldEmit(evt: Record<string, any>, now: number = Date.now()): { emit: boolean; suppressed: number } {
-    // Lazy eviction: if map gets too large, remove expired entries
-    if (this.entries.size > 1000) {
-      for (const [key, entry] of this.entries.entries()) {
-        if (now >= entry.expiresAt) {
-          this.entries.delete(key);
-        }
-      }
-    }
+    this.evictOverflow(now);
 
     const signature = createSignature(evt);
     const type = evt.type as string;
@@ -102,7 +113,9 @@ export class LogThrottle {
       // Either no previous entry or TTL expired
       const suppressed = entry ? entry.suppressed : 0;
       // Reset the entry for this signature
+      if (entry) this.entries.delete(signature);
       this.entries.set(signature, { expiresAt: now + ttl, suppressed: 0 });
+      this.evictOverflow(now);
       return { emit: true, suppressed };
     } else {
       // Still within TTL window, increment suppression counter

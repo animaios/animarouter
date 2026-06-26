@@ -566,12 +566,13 @@ async function runCycle(skipGate = false): Promise<number> {
     if (models.length === 0) return 0;
 
     // Collect all keys for each platform+model combo
-    const pingTasks: Array<{
+    type PingTask = {
       platform: string;
       modelDbId: number;
       modelId: string;
       key: any;
-    }> = [];
+    };
+    const pingTasks: PingTask[] = [];
 
     // REMOVED seenKeys dedup — each key must be pinged for EVERY model
     // on its platform, because a key can be healthy on one model but sick on another.
@@ -591,16 +592,36 @@ async function runCycle(skipGate = false): Promise<number> {
       }
     }
 
-    // Ping each key (concurrent batches)
-    for (let i = 0; i < pingTasks.length; i += concurrency) {
-      const batch = pingTasks.slice(i, i + concurrency);
-      await Promise.allSettled(batch.map(task =>
-        pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs)
+    const pingTaskGroupsByKey = new Map<number, PingTask[]>();
+    for (const task of pingTasks) {
+      const keyTasks = pingTaskGroupsByKey.get(task.key.id);
+      if (keyTasks) {
+        keyTasks.push(task);
+      } else {
+        pingTaskGroupsByKey.set(task.key.id, [task]);
+      }
+    }
+    const pingTaskGroups = Array.from(pingTaskGroupsByKey.values());
+
+    const runKeyGroup = async (group: PingTask[]): Promise<void> => {
+      for (let i = 0; i < group.length; i++) {
+        const task = group[i];
+        await pingKey(task.platform, task.modelDbId, task.modelId, task.key, pingTimeoutMs)
           .catch(err => {
             console.error(`[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`, err);
-          })
-      ));
-      if (concurrency === 1 && staggerMs > 0 && i + concurrency < pingTasks.length) {
+          });
+
+        if (staggerMs > 0 && i + 1 < group.length) {
+          await sleep(staggerMs);
+        }
+      }
+    };
+
+    // Ping key groups concurrently, but never run two pings for the same API key at once.
+    for (let i = 0; i < pingTaskGroups.length; i += concurrency) {
+      const batch = pingTaskGroups.slice(i, i + concurrency);
+      await Promise.allSettled(batch.map(group => runKeyGroup(group)));
+      if (concurrency === 1 && staggerMs > 0 && i + concurrency < pingTaskGroups.length) {
         await sleep(staggerMs);
       }
     }

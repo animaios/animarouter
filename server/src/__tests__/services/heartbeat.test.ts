@@ -719,6 +719,49 @@ describe('Provider Health Heartbeat', () => {
       expect(pingEvents.every(e => e.success)).toBe(true);
     });
 
+    it('serializes pings for the same key across multiple models when concurrency > 1', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('samekey', 'model-a', 'Model A', 1, 1, 1)").run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('samekey', 'model-b', 'Model B', 2, 2, 1)").run();
+      const idA = (db.prepare("SELECT id FROM models WHERE platform = 'samekey' AND model_id = 'model-a'").get() as any).id;
+      const idB = (db.prepare("SELECT id FROM models WHERE platform = 'samekey' AND model_id = 'model-b'").get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(idA);
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)').run(idB);
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('samekey', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+
+      setSetting('heartbeat_concurrency', '2');
+      resetHeartbeatConfig();
+
+      let active = 0;
+      let maxActive = 0;
+      chatCompletion.mockImplementation(() => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        return new Promise(resolve => {
+          setTimeout(() => {
+            active--;
+            resolve({
+              choices: [{ message: { role: 'assistant', content: 'pong' } }],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            });
+          }, 1);
+        });
+      });
+
+      const cyclePromise = pokeAllKeys();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await cyclePromise;
+
+      expect(result.poked).toBe(2);
+      expect(maxActive).toBe(1);
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(2);
+      expect(pingEvents.every(e => e.success)).toBe(true);
+    });
+
     it('high concurrency pings all keys in a single batch', async () => {
       setupMultiKey(2);
       setSetting('heartbeat_concurrency', '10');

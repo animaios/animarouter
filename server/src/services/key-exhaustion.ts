@@ -16,7 +16,6 @@
  */
 
 import { getDb } from '../db/index.js';
-import { clearCooldownHits } from './ratelimit.js';
 
 /** Composite key for the exhaustion map: `${keyId}:${modelId}` */
 function mkKey(keyId: number, modelId: string): string {
@@ -146,7 +145,6 @@ export function sweepStaleExhaustion(): number {
     `).get(keyId, info.modelId, now) as unknown;
     if (!row) {
       exhaustionMap.delete(compositeKey);
-      clearCooldownHits(info.provider, info.modelId, keyId);
       swept++;
     }
   }

@@ -56,6 +56,150 @@ describe('Migration idempotency', () => {
     expect(rows).toEqual([]);
   });
 
+  it('V38 preserves fallback rows while normalizing one grouped fallback per group', () => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const tmpPath = `/tmp/animarouter-v38-fallback-${suffix}.db`;
+
+    const db = initDb(tmpPath);
+    db.prepare('DROP INDEX IF EXISTS idx_fallback_config_group_id_unique').run();
+
+    const insertGroup = db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+      VALUES (?, ?, 1, 'Test')
+    `);
+    const insertModel = db.prepare(`
+      INSERT INTO models
+        (platform, model_id, display_name, intelligence_rank, speed_rank, size_label,
+         monthly_token_budget, enabled, group_id)
+      VALUES (?, ?, ?, 1, 1, 'Test', '', 1, ?)
+    `);
+    const insertFallback = db.prepare(`
+      INSERT INTO fallback_config (model_db_id, priority, group_id, enabled)
+      VALUES (?, ?, ?, 1)
+    `);
+
+    const priorityGroupId = insertGroup.run(
+      `v38-priority-${suffix}`,
+      'V38 Priority',
+    ).lastInsertRowid as number;
+    const highPriorityModelId = insertModel.run(
+      `v38-priority-a-${suffix}`,
+      'model-a',
+      'V38 Priority A',
+      priorityGroupId,
+    ).lastInsertRowid as number;
+    const lowPriorityModelId = insertModel.run(
+      `v38-priority-b-${suffix}`,
+      'model-b',
+      'V38 Priority B',
+      priorityGroupId,
+    ).lastInsertRowid as number;
+    insertFallback.run(highPriorityModelId, 20, priorityGroupId);
+    insertFallback.run(lowPriorityModelId, 10, priorityGroupId);
+
+    const tieGroupId = insertGroup.run(
+      `v38-tie-${suffix}`,
+      'V38 Tie',
+    ).lastInsertRowid as number;
+    const firstTieModelId = insertModel.run(
+      `v38-tie-a-${suffix}`,
+      'model-a',
+      'V38 Tie A',
+      tieGroupId,
+    ).lastInsertRowid as number;
+    const secondTieModelId = insertModel.run(
+      `v38-tie-b-${suffix}`,
+      'model-b',
+      'V38 Tie B',
+      tieGroupId,
+    ).lastInsertRowid as number;
+    insertFallback.run(firstTieModelId, 7, tieGroupId);
+    insertFallback.run(secondTieModelId, 7, tieGroupId);
+    db.close();
+
+    const db2 = initDb(tmpPath);
+
+    const priorityRows = db2.prepare(`
+      SELECT model_db_id, priority, group_id
+        FROM fallback_config
+       WHERE model_db_id IN (?, ?)
+       ORDER BY model_db_id
+    `).all(highPriorityModelId, lowPriorityModelId) as Array<{
+      model_db_id: number;
+      priority: number;
+      group_id: number | null;
+    }>;
+    expect(priorityRows).toHaveLength(2);
+    expect(priorityRows.filter(row => row.group_id === priorityGroupId)).toEqual([
+      { model_db_id: lowPriorityModelId, priority: 10, group_id: priorityGroupId },
+    ]);
+
+    const tieRows = db2.prepare(`
+      SELECT model_db_id, priority, group_id
+        FROM fallback_config
+       WHERE model_db_id IN (?, ?)
+       ORDER BY model_db_id
+    `).all(firstTieModelId, secondTieModelId) as Array<{
+      model_db_id: number;
+      priority: number;
+      group_id: number | null;
+    }>;
+    expect(tieRows).toHaveLength(2);
+    expect(tieRows.filter(row => row.group_id === tieGroupId)).toEqual([
+      { model_db_id: firstTieModelId, priority: 7, group_id: tieGroupId },
+    ]);
+
+    const duplicateGroups = db2.prepare(`
+      SELECT group_id, COUNT(*) AS c
+        FROM fallback_config
+       WHERE group_id IS NOT NULL
+       GROUP BY group_id
+      HAVING COUNT(*) > 1
+    `).all();
+    expect(duplicateGroups).toEqual([]);
+
+    const indexRow = db2.prepare(`
+      SELECT name
+        FROM sqlite_master
+       WHERE type = 'index'
+         AND name = 'idx_fallback_config_group_id_unique'
+    `).get();
+    expect(indexRow).toBeTruthy();
+    db2.close();
+  });
+
+  it('adds group_id columns before V38 runs on legacy schemas', () => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const tmpPath = `/tmp/animarouter-v38-legacy-columns-${suffix}.db`;
+
+    const db = initDb(tmpPath);
+    db.pragma('foreign_keys = OFF');
+    db.prepare('DROP INDEX IF EXISTS idx_fallback_config_group_id_unique').run();
+    db.prepare('DELETE FROM model_group_aliases').run();
+    db.prepare('DELETE FROM model_groups').run();
+
+    db.exec(`
+      ALTER TABLE models DROP COLUMN group_id;
+      ALTER TABLE fallback_config DROP COLUMN group_id;
+      PRAGMA user_version = 4;
+    `);
+    db.close();
+
+    const db2 = initDb(tmpPath);
+    const upgradedModelColumns = (db2.prepare('PRAGMA table_info(models)').all() as Array<{ name: string }>)
+      .map(col => col.name);
+    const upgradedFallbackColumns = (db2.prepare('PRAGMA table_info(fallback_config)').all() as Array<{ name: string }>)
+      .map(col => col.name);
+
+    expect(upgradedModelColumns).toContain('group_id');
+    expect(upgradedFallbackColumns).toContain('group_id');
+    expect((db2.prepare('SELECT COUNT(*) AS c FROM model_groups').get() as { c: number }).c).toBeGreaterThan(0);
+    expect((db2.prepare('SELECT COUNT(*) AS c FROM models WHERE enabled = 1 AND group_id IS NULL').get() as { c: number }).c).toBe(0);
+    db2.close();
+  });
+
   it('UNIQUE(platform, model_id) constraint holds — no duplicate catalog rows', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     const db = initDb(':memory:');

@@ -307,6 +307,7 @@ function createTables(db: Database.Database) {
   ensureDegradationTable(db);
   ensureDegradationBoostColumn(db);
   ensureApiKeysUseProxyColumn(db);
+  ensureModelGroupsColumns(db);
 
 }
 
@@ -2716,12 +2717,68 @@ function migrateModelsV37MultiSourceBenchmarks(db: Database.Database) {
       }
     }
 
-    // ───── V38: Model Groups — populate model_groups and model_group_aliases from existing models ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────│
+function normalizeFallbackConfigGroupsV38(db: Database.Database) {
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE fallback_config
+         SET group_id = NULL
+       WHERE group_id IS NOT NULL
+         AND id NOT IN (
+           SELECT f.id
+             FROM fallback_config f
+             JOIN models m ON m.id = f.model_db_id
+            WHERE m.group_id IS NOT NULL
+              AND f.group_id = m.group_id
+              AND f.id = (
+                SELECT f2.id
+                  FROM fallback_config f2
+                  JOIN models m2 ON m2.id = f2.model_db_id
+                 WHERE m2.group_id = m.group_id
+                 ORDER BY f2.priority ASC, f2.id ASC
+                 LIMIT 1
+              )
+         )
+    `).run();
+
+    db.prepare(`
+      UPDATE fallback_config
+         SET group_id = (
+           SELECT m.group_id
+             FROM models m
+            WHERE m.id = fallback_config.model_db_id
+         )
+       WHERE id IN (
+         SELECT f.id
+           FROM fallback_config f
+           JOIN models m ON m.id = f.model_db_id
+          WHERE m.group_id IS NOT NULL
+            AND f.id = (
+              SELECT f2.id
+                FROM fallback_config f2
+                JOIN models m2 ON m2.id = f2.model_db_id
+               WHERE m2.group_id = m.group_id
+               ORDER BY f2.priority ASC, f2.id ASC
+               LIMIT 1
+            )
+       )
+    `).run();
+
+    db.prepare(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_fallback_config_group_id_unique
+      ON fallback_config(group_id)
+      WHERE group_id IS NOT NULL
+    `).run();
+  });
+  tx();
+}
+
+    // V38: Model Groups - populate model_groups and aliases from existing models.
     function migrateModelsV38ModelGroups(db: Database.Database) {
       try {
         // Check if model_groups already has data (idempotent)
         const existing = db.prepare('SELECT COUNT(*) as cnt FROM model_groups').get() as { cnt: number };
         if (existing.cnt > 0) {
+          normalizeFallbackConfigGroupsV38(db);
           console.log('[V38] Model groups already populated, skipping');
           return;
         }
@@ -2800,10 +2857,7 @@ function migrateModelsV37MultiSourceBenchmarks(db: Database.Database) {
         });
         tx();
 
-        // Populate fallback_config.group_id from models.group_id
-        db.prepare(
-          'UPDATE fallback_config SET group_id = (SELECT group_id FROM models WHERE id = fallback_config.model_db_id) WHERE group_id IS NULL'
-        ).run();
+        normalizeFallbackConfigGroupsV38(db);
 
         console.log(`[V38] Created ${groups.size} model groups from ${models.length} models`);
       } catch (err: any) {

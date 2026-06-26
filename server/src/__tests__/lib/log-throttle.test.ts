@@ -102,21 +102,18 @@ describe('LogThrottle', () => {
     expect(result.suppressed).toBe(0);
   });
 
-  test('lazy eviction when map grows large', () => {
+  test('hard caps unexpired entries when map grows large', () => {
     const throttle = new LogThrottle();
     const baseEvent = { type: 'heartbeat.ping', provider: 'openai', model: 'gpt-4', success: true };
 
-    // Fill the map beyond the 1000 threshold
-    for (let i = 0; i < 1001; i++) {
+    for (let i = 0; i < 1006; i++) {
       const evt = { ...baseEvent, keyId: i };
       throttle.shouldEmit(evt, now);
     }
 
-    // After adding 1001 entries, the next call should trigger eviction of expired entries
-    // Since all were added at the same time, none are expired yet, so size should still be >1000
-    // But let's test that we can still add more
-    const newEvent = { ...baseEvent, keyId: 9999 };
-    const result = throttle.shouldEmit(newEvent, now);
-    expect(result.emit).toBe(true); // Should still be able to add new entries
+    const entries = (throttle as unknown as { entries: Map<string, unknown> }).entries;
+    expect(entries.size).toBe(1000);
+    expect(entries.has(LogThrottle.createSignature({ ...baseEvent, keyId: 0 }))).toBe(false);
+    expect(entries.has(LogThrottle.createSignature({ ...baseEvent, keyId: 1005 }))).toBe(true);
   });
 });

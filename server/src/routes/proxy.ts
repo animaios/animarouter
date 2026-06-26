@@ -8,7 +8,8 @@ import { classifyError, recordFailure, recordSuccess } from '../services/degrada
 import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
 import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs, isDailyLimitExhausted } from '../services/ratelimit.js';
 import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
-import { getDb, getUnifiedApiKey } from '../db/index.js';
+import { getDb, getSetting, getUnifiedApiKey } from '../db/index.js';
+import { getAliasCache, resolveGroupKey } from '../db/model-groups.js';
 import { contentToString, messageHasImage, normalizeOutboundContent } from '../lib/content.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
 import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
@@ -733,32 +734,75 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // different model would be surprising to OpenAI-compatible clients.
   // Sticky-session is the fallback when no `model` field was sent at all.
   let preferredModel: number | undefined;
+  let preferredGroupId: number | undefined;
+  let strictPinnedModelDbId: number | undefined;
   if (isAutoModel(requestedModel)) {
     // Explicit "auto" → behave exactly like an omitted model field.
     preferredModel = getStickyModel(messages, sessionIdHeader);
   } else if (requestedModel) {
     const db = getDb();
+    const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
     // Parse platform/model_id format: the first '/' separates the platform
     // from the provider-qualified model_id (e.g. nvidia/moonshotai/kimi-k2.6).
     // Falls back to bare model_id lookup for backward compatibility.
     const slashIdx = requestedModel.indexOf('/');
-    let enabled: { id: number } | undefined;
+    let enabled: { id: number; group_id: number | null; model_id: string } | undefined;
+    let exactPlatformModel = false;
     if (slashIdx > 0) {
       const platform = requestedModel.slice(0, slashIdx);
       const modelId = requestedModel.slice(slashIdx + 1);
       enabled = db.prepare(
-        'SELECT id FROM models WHERE platform = ? AND model_id = ? AND enabled = 1'
-      ).get(platform, modelId) as { id: number } | undefined;
+        'SELECT id, group_id, model_id FROM models WHERE platform = ? AND model_id = ? AND enabled = 1'
+      ).get(platform, modelId) as { id: number; group_id: number | null; model_id: string } | undefined;
+      exactPlatformModel = !!enabled;
     }
-    // Fallback: look up by model_id alone (backward compat for old clients).
-    if (!enabled) {
-      enabled = db.prepare('SELECT id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModel) as { id: number } | undefined;
+
+    if (groupingEnabled) {
+      const aliasCache = getAliasCache(db);
+      const groupKey = resolveGroupKey(exactPlatformModel && enabled ? enabled.model_id : requestedModel, aliasCache);
+      const group = db.prepare(
+        'SELECT id FROM model_groups WHERE group_key = ? AND enabled = 1'
+      ).get(groupKey) as { id: number } | undefined;
+      if (group) {
+        preferredGroupId = group.id;
+      } else if (enabled?.group_id != null) {
+        const enabledGroup = db.prepare(
+          'SELECT id FROM model_groups WHERE id = ? AND enabled = 1'
+        ).get(enabled.group_id) as { id: number } | undefined;
+        preferredGroupId = enabledGroup?.id;
+      }
     }
+
     if (enabled) {
       preferredModel = enabled.id;
-    } else {
+      if (exactPlatformModel) strictPinnedModelDbId = enabled.id;
+    }
+
+    // Fallback: look up by model_id alone (backward compat for old clients).
+    // With grouping enabled, don't convert a bare group key into an arbitrary
+    // provider row; only use this exact-row fallback when no group matched.
+    if (!enabled && (!groupingEnabled || preferredGroupId == null)) {
+      enabled = db.prepare('SELECT id, group_id, model_id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModel) as
+        { id: number; group_id: number | null; model_id: string } | undefined;
+      if (enabled) {
+        preferredModel = enabled.id;
+        strictPinnedModelDbId = enabled.id;
+        if (groupingEnabled && preferredGroupId == null && enabled.group_id != null) {
+          const enabledGroup = db.prepare(
+            'SELECT id FROM model_groups WHERE id = ? AND enabled = 1'
+          ).get(enabled.group_id) as { id: number } | undefined;
+          preferredGroupId = enabledGroup?.id;
+        }
+      }
+    }
+
+    if (!preferredModel && preferredGroupId == null) {
+      const groupKey = groupingEnabled ? resolveGroupKey(requestedModel, getAliasCache(db)) : undefined;
+      const disabledGroup = groupKey
+        ? db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get(groupKey) as { id: number } | undefined
+        : undefined;
       const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(requestedModel) as { id: number } | undefined;
-      const reason = disabled ? 'is disabled' : 'is not in the catalog';
+      const reason = disabled || disabledGroup ? 'is disabled' : 'is not in the catalog';
       res.status(400).json({
         error: {
           message: `Model '${requestedModel}' ${reason}. Use 'auto' (or omit the 'model' field) to auto-route, or call /v1/models for the available list.`,
@@ -813,7 +857,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         hasImage,
         wantsTools,
         skipModels.size > 0 ? skipModels : undefined,
-        { pinMode: isPinned, stickySessionKey: sessionKey || undefined },
+        { pinMode: isPinned, preferredGroupId, stickySessionKey: sessionKey || undefined },
       );
     } catch (err: any) {
       // All keys/models exhausted — return 429 immediately.
@@ -1229,7 +1273,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       // a 404/403 to the user so they know to pick a live model instead of
       // silently getting a stranger.
       if (isModelNotFoundError(err) || isModelAccessForbiddenError(err)) {
-        if (isPinned && route.modelDbId === preferredModel) {
+        if (isPinned && strictPinnedModelDbId !== undefined && route.modelDbId === strictPinnedModelDbId) {
           publish({ type: 'request.error', id: requestId, error: `Pinned model ${requestedModel} returned ${isModelNotFoundError(err) ? '404 not found' : '403 forbidden'} upstream — no fallback in pin mode.`, at: Date.now() });
           res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
           res.setHeader('X-Pinned-Model-Dead', '1');
@@ -1261,7 +1305,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Dead-turn errors (in-band error, empty completion, stream stall,
         // unparseable dialect): the key WORKS but this specific model
         // can't handle the request. Skip the model, keep the key.
-        if (!(isPinned && route.modelDbId === preferredModel)) {
+        if (!(isPinned && strictPinnedModelDbId !== undefined && route.modelDbId === strictPinnedModelDbId)) {
           const msg = (err.message ?? '').toLowerCase();
           const isDeadTurn = msg.includes('in-band provider error')
             || msg.includes('empty completion')

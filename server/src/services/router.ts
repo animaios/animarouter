@@ -607,8 +607,17 @@ function providerSubScore(
 export interface RouteOptions {
   /** Don't fall through to other models when the preferred model's keys are exhausted. */
   pinMode?: boolean;
+  /** Preferred model group for group-aware routing. Takes precedence over deriving the group from preferredModelDbId. */
+  preferredGroupId?: number;
   /** Session key for key affinity — when set and key_affinity_enabled is true (or the provider has sticky_sessions_enabled), key selection is deterministic. */
   stickySessionKey?: string;
+}
+
+function pinnedModelExhaustedError(): Error {
+  const err = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
+  err.code = 'PINNED_MODEL_EXHAUSTED';
+  err.status = 429;
+  return err;
 }
 
 export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, options?: RouteOptions): RouteResult {
@@ -632,23 +641,28 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     `).all() as GroupChainRow[];
 
     const sortedGroupChain = orderGroupChain(groupChain, strategy);
+    const pinMode = options?.pinMode ?? false;
 
-    // Sticky session: move preferred model's group to front
-    if (preferredModelDbId) {
+    // Sticky/group pinning: move the preferred group to the front. Explicit
+    // group pins take precedence; deriving from preferredModelDbId preserves
+    // sticky-session compatibility for older callers.
+    let preferredGroupId = options?.preferredGroupId;
+    if (preferredGroupId == null && preferredModelDbId) {
       // Find which group contains the preferred model
       const prefGroupRow = db.prepare(
         'SELECT group_id FROM models WHERE id = ?'
-      ).get(preferredModelDbId) as { group_id: number } | undefined;
-      if (prefGroupRow) {
-        const idx = sortedGroupChain.findIndex(g => g.group_id === prefGroupRow.group_id);
-        if (idx > 0) {
-          const [preferred] = sortedGroupChain.splice(idx, 1);
-          sortedGroupChain.unshift(preferred);
-        }
+      ).get(preferredModelDbId) as { group_id: number | null } | undefined;
+      preferredGroupId = prefGroupRow?.group_id ?? undefined;
+    }
+    if (preferredGroupId != null) {
+      const idx = sortedGroupChain.findIndex(g => g.group_id === preferredGroupId);
+      if (idx > 0) {
+        const [preferred] = sortedGroupChain.splice(idx, 1);
+        sortedGroupChain.unshift(preferred);
+      } else if (idx < 0 && pinMode) {
+        throw pinnedModelExhaustedError();
       }
     }
-
-    const pinMode = options?.pinMode ?? false;
 
     // Pre-compute normalization ranges for provider sub-scoring
     // We need to collect ALL providers from ALL enabled groups first
@@ -678,10 +692,20 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
 
     for (const group of sortedGroupChain) {
+      const isPreferredGroup = preferredGroupId != null && group.group_id === preferredGroupId;
       // Filter by vision/tools/context at the GROUP level
-      if (requireVision && !group.supports_vision) continue;
-      if (requireTools && !group.supports_tools) continue;
-      if (group.context_window != null && estimatedTokens > group.context_window) continue;
+      if (requireVision && !group.supports_vision) {
+        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+        continue;
+      }
+      if (requireTools && !group.supports_tools) {
+        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+        continue;
+      }
+      if (group.context_window != null && estimatedTokens > group.context_window) {
+        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+        continue;
+      }
 
       // Load providers for this group
       const providers = db.prepare(`
@@ -694,7 +718,10 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         WHERE m.group_id = ? AND m.enabled = 1
       `).all(group.group_id) as ProviderRow[];
 
-      if (providers.length === 0) continue;
+      if (providers.length === 0) {
+        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+        continue;
+      }
 
       // Score and sort providers within this group
             const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
@@ -718,12 +745,6 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         ).all(provider.platform) as KeyRow[];
 
         if (keys.length === 0) {
-          if (pinMode && preferredModelDbId && provider.model_db_id === preferredModelDbId) {
-            const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-            pinErr.code = 'PINNED_MODEL_EXHAUSTED';
-            pinErr.status = 429;
-            throw pinErr;
-          }
           continue;
         }
 
@@ -732,12 +753,6 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         const healthyKeys = keys.filter(k => isKeyHealthy(k.id, provider.model_id));
 
         if (heartbeatEnabled && healthyKeys.length === 0) {
-          if (pinMode && preferredModelDbId && provider.model_db_id === preferredModelDbId) {
-            const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-            pinErr.code = 'PINNED_MODEL_EXHAUSTED';
-            pinErr.status = 429;
-            throw pinErr;
-          }
           continue;
         }
 
@@ -833,15 +848,11 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         if (!useKeyAffinity) {
           roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
         }
-
-        if (pinMode && preferredModelDbId && provider.model_db_id === preferredModelDbId) {
-          const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-          pinErr.code = 'PINNED_MODEL_EXHAUSTED';
-          pinErr.status = 429;
-          throw pinErr;
-        }
       }
-      // If we reach here, all providers in this group are exhausted → try next group
+      // If we reach here, all providers in this group are exhausted. In pin
+      // mode, the preferred group is the full allowed surface; otherwise try
+      // the next group in the fallback chain.
+      if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
     }
 
     // All groups exhausted

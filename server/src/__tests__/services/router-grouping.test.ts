@@ -279,6 +279,71 @@ describe('group-aware routing', () => {
     expect(r.platform).toBe('backup-provider');
   });
 
+  it('preferredGroupId + pinMode falls through from an unavailable provider to a healthy provider in the pinned group', () => {
+    const db = getDb();
+    const groupId = addGroup({
+      groupKey: 'pinned-group', displayName: 'Pinned Group',
+      intelligenceRank: 1, sizeLabel: 'Frontier',
+      priority: 1,
+      providers: [
+        { platform: 'pinned-provider-a', modelId: 'a/pinned', name: 'Pinned A', speedRank: 1 },
+        { platform: 'pinned-provider-b', modelId: 'b/pinned', name: 'Pinned B', speedRank: 10 },
+      ],
+    });
+    db.prepare('DELETE FROM api_keys WHERE platform = ?').run('pinned-provider-a');
+
+    addGroup({
+      groupKey: 'backup-group', displayName: 'Backup Group',
+      intelligenceRank: 5, sizeLabel: 'Medium',
+      priority: 2,
+      providers: [
+        { platform: 'backup-provider', modelId: 'backup/pinned', name: 'Backup', speedRank: 1 },
+      ],
+    });
+
+    setSetting('model_grouping_enabled', 'true');
+    setRoutingStrategy('priority');
+    refreshStatsCache(getDb(), true);
+    const r = routeRequest(100, undefined, undefined, false, false, undefined, {
+      pinMode: true,
+      preferredGroupId: groupId,
+    });
+    expect(r.platform).toBe('pinned-provider-b');
+    expect(r.modelId).toBe('b/pinned');
+    expect(r.groupId).toBe(groupId);
+  });
+
+  it('preferredGroupId + pinMode throws when every provider in the pinned group is unavailable', () => {
+    const db = getDb();
+    const groupId = addGroup({
+      groupKey: 'dead-pinned-group', displayName: 'Dead Pinned Group',
+      intelligenceRank: 1, sizeLabel: 'Frontier',
+      priority: 1,
+      providers: [
+        { platform: 'dead-provider-a', modelId: 'a/dead', name: 'Dead A', speedRank: 1 },
+        { platform: 'dead-provider-b', modelId: 'b/dead', name: 'Dead B', speedRank: 10 },
+      ],
+    });
+    db.prepare("DELETE FROM api_keys WHERE platform IN ('dead-provider-a', 'dead-provider-b')").run();
+
+    addGroup({
+      groupKey: 'healthy-backup-group', displayName: 'Healthy Backup Group',
+      intelligenceRank: 5, sizeLabel: 'Medium',
+      priority: 2,
+      providers: [
+        { platform: 'healthy-backup-provider', modelId: 'backup/healthy', name: 'Healthy Backup', speedRank: 1 },
+      ],
+    });
+
+    setSetting('model_grouping_enabled', 'true');
+    setRoutingStrategy('priority');
+    refreshStatsCache(getDb(), true);
+    expect(() => routeRequest(100, undefined, undefined, false, false, undefined, {
+      pinMode: true,
+      preferredGroupId: groupId,
+    })).toThrow(/Pinned model exhausted|exhausted/i);
+  });
+
   // ── Vision / tools / context filters respect group-level properties ─────
 
   it('skips a non-vision group when requireVision is set', () => {

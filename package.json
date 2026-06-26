@@ -17,8 +17,7 @@
     "build": "npm run build -w server && npm run build -w client && npm run typecheck -w worker",
     "build:server": "npm run build -w server",
     "build:worker": "npm run typecheck -w worker",
-    "deploy:worker": "node scripts/deploy-worker-wizard.mjs",
-    "postinstall": "node scripts/proxy-up.mjs"
+    "deploy:worker": "node scripts/deploy-worker-wizard.mjs"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^3.2.6",
