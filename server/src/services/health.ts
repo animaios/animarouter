@@ -35,9 +35,6 @@ export async function checkKeyHealth(keyId: number): Promise<KeyStatus> {
     if (model) {
       const healthKeyVal = healthKey(keyId, model.model_id);
       keyHealthMap.set(healthKeyVal, { penalty: 0, lastPingAt: Date.now(), healthy: false, lastError: 'decrypt failed' });
-    } else {
-      // Fallback if no model found for platform
-      keyHealthMap.set(healthKey(keyId, 'default'), { penalty: 0, lastPingAt: Date.now(), healthy: false, lastError: 'decrypt failed' });
     }
     return 'invalid';
   }

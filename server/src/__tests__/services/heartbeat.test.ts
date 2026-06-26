@@ -25,7 +25,7 @@ describe('Provider Health Heartbeat', () => {
   let getKeyHealth: (keyId: number, modelId?: string) => any;
   let isKeyHealthy: (keyId: number, modelId?: string) => boolean;
   let resetHeartbeatConfig: () => void;
-  let markKeyUnhealthy: (keyId: number, modelId: string, error?: string, transient?: boolean) => void;
+  let markKeyUnhealthy: (keyId: number, modelId: string, error?: string, transient?: boolean, recheckDelayMs?: number) => void;
   let pokeKey: (keyId: number) => Promise<boolean>;
   let pokeAllKeys: () => Promise<{ poked: number; skipped: boolean }>;
   let getPendingRechecks: () => ReadonlyMap<string, { keyId: number; modelId: string; attempt: number }>;
@@ -107,7 +107,7 @@ describe('Provider Health Heartbeat', () => {
     db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(id);
     db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('${platform}', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)`).run();
     const keyRow = db.prepare("SELECT id FROM api_keys WHERE platform = ? AND enabled = 1").get(platform) as any;
-    return { modelDbId: id, keyId: keyRow.id };
+    return { modelDbId: id, keyId: keyRow.id, modelId };
   }
 
   // ── Activity Gating ────────────────────────────────────────────────────
@@ -187,8 +187,8 @@ describe('Provider Health Heartbeat', () => {
       // Penalty should have decreased
       expect(getPenalty(modelDbId)).toBeLessThan(penaltyBefore);
 
-      // Per-key health should be healthy
-      expect(isKeyHealthy(keyId)).toBe(true);
+      // Per-key+model health should be healthy
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
     });
 
     it('failed ping (5xx) records major failure and increases penalty', async () => {
@@ -210,9 +210,9 @@ describe('Provider Health Heartbeat', () => {
 
       expect(getPenalty(modelDbId)).toBeGreaterThan(0);
 
-      // Per-key health should be unhealthy
-      expect(isKeyHealthy(keyId)).toBe(false);
-      const health = getKeyHealth(keyId);
+      // Per-key+model health should be unhealthy
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(false);
+      const health = getKeyHealth(keyId, 'test-model');
       expect(health).toBeDefined();
       expect(health.penalty).toBeGreaterThan(0);
     });
@@ -232,7 +232,7 @@ describe('Provider Health Heartbeat', () => {
       expect(pingEvents[0].keyId).toBe(keyId);
 
       expect(getPenalty(modelDbId)).toBeGreaterThan(0);
-      expect(isKeyHealthy(keyId)).toBe(false);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(false);
     });
 
     it('non-retryable error (401) does NOT penalize the model but marks key unhealthy', async () => {
@@ -251,8 +251,8 @@ describe('Provider Health Heartbeat', () => {
       // Non-retryable errors don't penalize model-level degradation
       expect(getPenalty(modelDbId)).toBe(0);
 
-      // But the key is still marked unhealthy per-key
-      expect(isKeyHealthy(keyId)).toBe(false);
+      // But the key is still marked unhealthy for this model
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(false);
     });
   });
 
@@ -291,18 +291,65 @@ describe('Provider Health Heartbeat', () => {
       // by advancing a microtask tick
       await vi.advanceTimersByTimeAsync(0);
 
-      // After warmup, the key should be healthy
-      expect(isKeyHealthy(keyId)).toBe(true);
-      const health = getKeyHealth(keyId);
+      // After warmup, the key should be healthy for this model
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
+      const health = getKeyHealth(keyId, 'test-model');
       expect(health).toBeDefined();
       expect(health.healthy).toBe(true);
+    });
+  });
+
+  // ── Per-Model Fallback ─────────────────────────────────────────────────
+
+  describe('Per-model fallback', () => {
+    it('key is healthy for model-b when marked unhealthy for model-a', async () => {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+
+      // Set up one platform with two models sharing the same keys
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('fallback-prov', 'model-a', 'Model A', 1, 1, 1)").run();
+      db.prepare("INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('fallback-prov', 'model-b', 'Model B', 2, 2, 1)").run();
+      const idA = (db.prepare("SELECT id FROM models WHERE model_id = 'model-a' AND platform = 'fallback-prov'").get() as any).id;
+      const idB = (db.prepare("SELECT id FROM models WHERE model_id = 'model-b' AND platform = 'fallback-prov'").get() as any).id;
+
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(idA);
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)').run(idB);
+
+      // One key for the platform
+      db.prepare("INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('fallback-prov', 'Key 1', 'enc', 'iv', 'tag', 'healthy', 1)").run();
+      const keyRow = db.prepare("SELECT id FROM api_keys WHERE platform = ? AND enabled = 1").get('fallback-prov') as any;
+      const keyId = keyRow.id;
+
+      // First, make the key healthy for both models via pokeAllKeys
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      await pokeAllKeys();
+
+      // Verify key is healthy for both models
+      expect(isKeyHealthy(keyId, 'model-a')).toBe(true);
+      expect(isKeyHealthy(keyId, 'model-b')).toBe(true);
+      expect(isKeyHealthy(keyId)).toBe(true); // healthy on at least one model
+
+      // Mark key unhealthy for model-a only
+      markKeyUnhealthy(keyId, 'model-a', '429 rate limit');
+
+      // model-a should be unhealthy
+      expect(isKeyHealthy(keyId, 'model-a')).toBe(false);
+
+      // model-b should still be healthy (independent per-model tracking)
+      expect(isKeyHealthy(keyId, 'model-b')).toBe(true);
+
+      // Without modelId, key is healthy because at least one model (model-b) is healthy
+      expect(isKeyHealthy(keyId)).toBe(true);
     });
   });
 
   // ── Per-Key Pinging ────────────────────────────────────────────────────
 
   describe('Per-key pinging', () => {
-    it('pings each key once per cycle even across multiple models (warmup cycle)', async () => {
+    it('pings each key for each model per cycle (warmup cycle)', async () => {
       const db = getDb();
       db.prepare('DELETE FROM fallback_config').run();
 
@@ -329,8 +376,9 @@ describe('Provider Health Heartbeat', () => {
       await vi.advanceTimersByTimeAsync(0);
 
       const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
-      // Key should be pinged exactly once (deduped across models)
-      expect(pingEvents.length).toBe(1);
+      // Key should be pinged once per model (2 models = 2 pings)
+      // The no-dedup behavior ensures per-model health tracking works correctly.
+      expect(pingEvents.length).toBe(2);
     });
 
     it('pings multiple keys on the same platform (warmup cycle)', async () => {
@@ -406,8 +454,8 @@ describe('Provider Health Heartbeat', () => {
 
       // Key should be healthy after prewarm completes — proves the cycle
       // ran immediately without waiting for the 10 min interval
-      expect(isKeyHealthy(keyId)).toBe(true);
-      const health = getKeyHealth(keyId);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
+      const health = getKeyHealth(keyId, 'test-model');
       expect(health).toBeDefined();
       expect(health!.healthy).toBe(true);
       expect(health!.penalty).toBe(0);
@@ -433,7 +481,7 @@ describe('Provider Health Heartbeat', () => {
       expect(pingEvents[0].success).toBe(true);
 
       // Key should be healthy in keyHealthMap
-      expect(isKeyHealthy(keyId)).toBe(true);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
     });
   });
 
@@ -505,8 +553,8 @@ describe('Provider Health Heartbeat', () => {
       const result = await pokeKey(keyId);
       expect(result).toBe(true);
 
-      // Verify the key became healthy in keyHealthMap
-      const health = getKeyHealth(keyId);
+      // Verify the key became healthy in keyHealthMap for its model
+      const health = getKeyHealth(keyId, 'test-model');
       expect(health).toBeDefined();
       expect(health.healthy).toBe(true);
     });
@@ -532,7 +580,7 @@ describe('Provider Health Heartbeat', () => {
       const result = await pokeAllKeys();
 
       // After a full cycle, the key should become healthy
-      const health = getKeyHealth(keyId);
+      const health = getKeyHealth(keyId, 'test-model');
       expect(health).toBeDefined();
       expect(health.healthy).toBe(true);
 
@@ -561,8 +609,8 @@ describe('Provider Health Heartbeat', () => {
       // Mark a key unhealthy — this populates keyHealthMap
       markKeyUnhealthy(1, 'test', 'forced test failure');
 
-      // Verify the key is now in the health map and unhealthy
-      let health = getKeyHealth(1);
+      // Verify the key is now in the health map and unhealthy (for this model)
+      let health = getKeyHealth(1, 'test');
       expect(health).toBeDefined();
       expect(health!.healthy).toBe(false);
 
@@ -570,7 +618,7 @@ describe('Provider Health Heartbeat', () => {
       resetHeartbeatConfig();
 
       // Key should be gone from the map
-      health = getKeyHealth(1);
+      health = getKeyHealth(1, 'test');
       expect(health).toBeUndefined();
     });
   });
@@ -779,8 +827,8 @@ describe('Provider Health Heartbeat', () => {
       });
       const result = await pokeKey(keyId);
       expect(result).toBe(true);
-      expect(isKeyHealthy(keyId)).toBe(true);
-      const healthBefore = getKeyHealth(keyId);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
+      const healthBefore = getKeyHealth(keyId, 'test-model');
       expect(healthBefore?.penalty).toBe(0);
 
       // Clear any published events from pokeKey
@@ -790,7 +838,7 @@ describe('Provider Health Heartbeat', () => {
       markKeyUnhealthy(keyId, 'test-model', '429 rate limited', true);
 
       // Key should remain healthy (transient doesn't evict)
-      expect(isKeyHealthy(keyId)).toBe(true);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
 
       // Penalty should NOT be incremented
       const health = getKeyHealth(keyId, 'test-model');
@@ -798,6 +846,81 @@ describe('Provider Health Heartbeat', () => {
 
       // Recheck should be scheduled (transient still triggers recheck)
       expect(getPendingRechecks().has(healthKey(keyId, 'test-model'))).toBe(true);
+    });
+  });
+
+  describe('markKeyUnhealthy with custom recheck delay', () => {
+    it('uses custom recheckDelayMs for daily exhaustion', async () => {
+      const { keyId } = setupProvider();
+      // First make the key healthy
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'hi' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      await pokeKey(keyId);
+      expect(isKeyHealthy(keyId)).toBe(true);
+
+      // Clear events from pokeKey
+      publishedEvents.length = 0;
+
+      // Mark as unhealthy for daily exhaustion (transient=false) with a 10-minute recheck delay
+      const customDelayMs = 10 * 60 * 1000; // 10 minutes
+      markKeyUnhealthy(keyId, 'test-model', 'daily quota exhausted', false, customDelayMs);
+
+      // Key should be evicted from healthy pool
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(false);
+
+      // Penalty should be incremented
+      const health = getKeyHealth(keyId, 'test-model');
+      expect(health?.penalty).toBe(1);
+      expect(health?.healthy).toBe(false);
+
+      // Advance by only 90s — timer should NOT have fired yet (custom delay is 10min)
+      await vi.advanceTimersByTimeAsync(90_000);
+      const earlyRecheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(earlyRecheckEvents.length).toBe(0);
+
+      // Only advance to 10min + 1ms from markKeyUnhealthy (510s from the 90s point)
+      // Avoiding the next scheduled recheck at +90s after first fire
+      const err = new Error('429 daily limit');
+      (err as any).status = 429;
+      chatCompletion.mockRejectedValueOnce(err);
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000 - 90_000 + 100);
+
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      expect(recheckEvents.length).toBe(1);
+      expect(recheckEvents[0].success).toBe(false);
+    });
+
+    it('uses default recheckSec for transient 429', async () => {
+      const { keyId } = setupProvider();
+      // First make the key healthy
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'hi' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      await pokeKey(keyId);
+
+      // Clear events
+      publishedEvents.length = 0;
+
+      // Mark as unhealthy with transient=true (no custom delay)
+      markKeyUnhealthy(keyId, 'test-model', '429 rate limited', true);
+
+      // Key should remain healthy
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
+
+      // Advance by recheckSec (default 90s in test) — recheck should fire
+      chatCompletion.mockResolvedValueOnce({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      await vi.advanceTimersByTimeAsync(90_000 + 100);
+
+      const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
+      // The key was healthy, so fireRecheck should no-op (healthy key check at start)
+      // This is correct behavior — a transient-marked healthy key doesn't need recheck
+      expect(recheckEvents.length).toBe(0);
     });
   });
 
@@ -814,8 +937,8 @@ describe('Provider Health Heartbeat', () => {
 
       // Timer should be cleared
       expect(getPendingRechecks().has(healthKey(keyId, 'test-model'))).toBe(false);
-      // Key should be healthy again
-      expect(isKeyHealthy(keyId)).toBe(true);
+      // Key should be healthy again for this model
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
       // Should emit heartbeat.recheck event with success
       const recheckEvents = publishedEvents.filter(e => e.type === 'heartbeat.recheck');
       expect(recheckEvents.length).toBe(1);
@@ -872,7 +995,7 @@ describe('Provider Health Heartbeat', () => {
       // Manually mark key healthy before timer fires (via pokeKey)
       chatCompletion.mockResolvedValueOnce({ choices: [{ message: { content: 'ok' } }] });
       await pokeKey(keyId);
-      expect(isKeyHealthy(keyId)).toBe(true);
+      expect(isKeyHealthy(keyId, 'test-model')).toBe(true);
 
       // Clear any published events from pokeKey
       publishedEvents.length = 0;

@@ -46,8 +46,9 @@ export function getKeyHealth(keyId: number, modelId?: string): KeyHealth | undef
     return keyHealthMap.get(healthKey(keyId, modelId));
   }
   // No model specified: return first entry for this keyId
+  const keyIdStr = String(keyId);
   for (const [key, health] of keyHealthMap) {
-    if (key.startsWith(`${keyId}:`)) return health;
+    if (key.split(':')[0] === keyIdStr) return health;
   }
   return undefined;
 }
@@ -72,8 +73,10 @@ export function isKeyHealthy(keyId: number, modelId?: string): boolean {
 
 /** Internal helper: check if a key is healthy on ANY model. */
 function isKeyHealthyOnAnyModel(keyId: number): boolean {
+  const keyIdStr = String(keyId);
   for (const [key, health] of keyHealthMap) {
-    if (key.startsWith(`${keyId}:`) && health.healthy) return true;
+    // Exact match: key must be "${keyId}:${modelId}" (split by ":" first part === keyId)
+    if (key.split(':')[0] === keyIdStr && health.healthy) return true;
   }
   return !isHeartbeatEnabled();
 }
@@ -85,14 +88,14 @@ function isKeyHealthyOnAnyModel(keyId: number): boolean {
  *    keep DB status as 'healthy'.
  *  - Schedules a recheck for the specific model.
  */
-export function markKeyUnhealthy(keyId: number, modelId: string, error?: string, transient = false): void {
+export function markKeyUnhealthy(keyId: number, modelId: string, error?: string, transient = false, recheckDelayMs?: number): void {
   if (!isHeartbeatEnabled()) return;
   // Transient 429s (per-minute/quota-window) should NOT evict the key from
   // the healthy pool or increment its penalty — they are expected and
   // self-resolving. We still schedule a recheck so the key gets verified
   // after the transient cooldown expires.
   if (transient) {
-    scheduleRecheck(keyId, modelId);
+    scheduleRecheck(keyId, modelId, recheckDelayMs);
     return;
   }
   const key = healthKey(keyId, modelId);
@@ -109,7 +112,7 @@ export function markKeyUnhealthy(keyId: number, modelId: string, error?: string,
   if (!isKeyHealthyOnAnyModel(keyId)) {
     db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyId);
   }
-  scheduleRecheck(keyId, modelId);
+  scheduleRecheck(keyId, modelId, recheckDelayMs);
 }
 
 /**
@@ -131,7 +134,7 @@ export function getAllKeyHealth(): Map<string, KeyHealth> {
  *  If a prior cycle's in-flight check is stale (key marked unhealthy again),
  *  the new schedule supersedes it — the stale fireRecheck will detect this
  *  via the generation counter and exit without scheduling a next attempt. */
-function scheduleRecheck(keyId: number, modelId: string): void {
+function scheduleRecheck(keyId: number, modelId: string, customDelayMs?: number): void {
   const key = healthKey(keyId, modelId);
   // FR-3: No duplicate timers — also blocks while a fireRecheck is in-flight
   const existing = recheckTimers.get(key);
@@ -145,11 +148,12 @@ function scheduleRecheck(keyId: number, modelId: string): void {
       // Clear the old timer (already fired if in-flight, but be safe)
       if (existing.timerRef) clearTimeout(existing.timerRef);
       const { recheckSec } = readConfig();
+      const delayMs = customDelayMs ?? recheckSec * 1000;
       existing.timerRef = setTimeout(() => {
         fireRecheck(keyId, modelId, 1).catch(err => {
           console.error(`[Heartbeat] Recheck error for key#${keyId} model ${modelId}:`, err);
         });
-      }, recheckSec * 1000);
+      }, delayMs);
       existing.inFlight = false;
       return;
     }
@@ -157,13 +161,14 @@ function scheduleRecheck(keyId: number, modelId: string): void {
   }
 
   const { recheckSec } = readConfig();
+  const delayMs = customDelayMs ?? recheckSec * 1000;
   const generation = ++recheckGeneration;
 
   const timerRef = setTimeout(() => {
     fireRecheck(keyId, modelId, 1).catch(err => {
       console.error(`[Heartbeat] Recheck error for key#${keyId} model ${modelId}:`, err);
     });
-  }, recheckSec * 1000);
+  }, delayMs);
 
   recheckTimers.set(key, { keyId, modelId, attempt: 1, generation, timerRef, inFlight: false });
 }
@@ -224,7 +229,7 @@ async function fireRecheck(keyId: number, modelId: string, attempt: number): Pro
   const model = db.prepare(`
     SELECT m.id AS model_db_id, m.model_id
     FROM models m
-    WHERE m.id = ? AND m.enabled = 1 AND m.platform = ?
+    WHERE m.model_id = ? AND m.enabled = 1 AND m.platform = ?
   `).get(modelId, keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
   if (!model) {
     recheckTimers.delete(key);
@@ -463,7 +468,7 @@ export async function pokeKey(keyId: number, modelId?: string): Promise<boolean>
     const row = db.prepare(`
       SELECT m.id AS model_db_id, m.model_id
       FROM models m
-      WHERE m.id = ? AND m.enabled = 1 AND m.platform = ?
+      WHERE m.model_id = ? AND m.enabled = 1 AND m.platform = ?
     `).get(modelId, keyRow.platform) as { model_db_id: number; model_id: string } | undefined;
     model = row;
   } else {
@@ -497,30 +502,66 @@ async function runCycle(skipGate = false): Promise<number> {
     const { activityWindowMs, pingTimeoutMs, concurrency, staggerMs } = readConfig();
 
     // Activity gate — bypassed for startup prewarm (skipGate=true)
-    if (!skipGate && (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs)) {
-      publish({
-        type: 'heartbeat.cycle_skipped',
-        reason: 'activity_gate',
-        lastActivityAgeMs: lastActivityAt === 0 ? -1 : now - lastActivityAt,
-        at: now,
-      });
-      return 0;
-    }
+        if (!skipGate && (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs)) {
+          publish({
+            type: 'heartbeat.cycle_skipped',
+            reason: 'activity_gate',
+            lastActivityAgeMs: lastActivityAt === 0 ? -1 : now - lastActivityAt,
+            at: now,
+          });
+          return 0;
+        }
 
-    // Get enabled models from the fallback chain
-    // Order by priority so we deterministically use the highest-priority model
-    // on each platform to ping all of its keys. Without ordering, a key might
-    // randomly be pinged with a restricted model on some cycles (causing
-    // 403/404 failures) and a standard model on others.
-    const db = getDb();
-    const models = db.prepare(`
-      SELECT m.platform, m.id AS model_db_id, m.model_id, MIN(fc.priority) AS priority
-      FROM fallback_config fc
-      JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
-      WHERE fc.enabled = 1
-      GROUP BY m.platform, m.id, m.model_id
-      ORDER BY priority ASC
-    `).all() as Array<{ platform: string; model_db_id: number; model_id: string }>;
+        // ─── Prune stale keyHealthMap entries for models that no longer exist ───
+        // Get all currently enabled models from the fallback chain
+        const db = getDb();
+        const activeModels = db.prepare(`
+          SELECT m.platform, m.id AS model_db_id, m.model_id
+          FROM fallback_config fc
+          JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+          WHERE fc.enabled = 1
+        `).all() as Array<{ platform: string; model_db_id: number; model_id: string }>;
+
+        // Build set of valid composite keys
+        const validKeys = new Set<string>();
+        const keysForPlatform = new Map<string, number[]>();
+        for (const m of activeModels) {
+          const platformKeys = db.prepare(
+            "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1"
+          ).all(m.platform) as Array<{ id: number }>;
+          for (const k of platformKeys) {
+            validKeys.add(healthKey(k.id, m.model_id));
+            // Track keys per platform for missing-model detection
+            if (!keysForPlatform.has(m.platform)) keysForPlatform.set(m.platform, []);
+            keysForPlatform.get(m.platform)!.push(k.id);
+          }
+        }
+
+        // Prune: remove any health entry not in validKeys
+        let pruned = 0;
+        for (const existingKey of keyHealthMap.keys()) {
+          if (!validKeys.has(existingKey)) {
+            keyHealthMap.delete(existingKey);
+            pruned++;
+          }
+        }
+        if (pruned > 0) {
+          console.log(`[Heartbeat] Pruned ${pruned} stale health entries for removed models/keys`);
+        }
+
+        // Get enabled models from the fallback chain
+        // Order by priority so we deterministically use the highest-priority model
+        // on each platform to ping all of its keys. Without ordering, a key might
+        // randomly be pinged with a restricted model on some cycles (causing
+        // 403/404 failures) and a standard model on others.
+        const models = db.prepare(`
+          SELECT m.platform, m.id AS model_db_id, m.model_id, MIN(fc.priority) AS priority
+          FROM fallback_config fc
+          JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
+          WHERE fc.enabled = 1
+          GROUP BY m.platform, m.id, m.model_id
+          ORDER BY priority ASC
+        `).all() as Array<{ platform: string; model_db_id: number; model_id: string }>;
 
     if (models.length === 0) return 0;
 

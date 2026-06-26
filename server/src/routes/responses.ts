@@ -10,7 +10,8 @@ import type {
 } from '@animarouter/shared/types.js';
 import { routeRequest, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
 import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
-import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs } from '../services/ratelimit.js';
+import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs, isDailyLimitExhausted } from '../services/ratelimit.js';
+import { markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
 import { getUnifiedApiKey } from '../db/index.js';
 import { contentToString } from '../lib/content.js';
 import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
@@ -526,6 +527,11 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
             skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
             setCooldown(route.platform, route.modelId, route.keyId, computeRetryCooldownMs(false, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
             recordFailure(route.modelDbId, 'minor');
+
+          // Heartbeat: model-level skip (key healthy, response useless) — transient only
+          if (isHeartbeatEnabled()) {
+            markKeyUnhealthy(route.keyId, route.modelId, 'model skip: unparseable dialect', true);
+          }
             lastError = new Error(`unparseable inline tool-call dialect from ${route.displayName}`);
             continue;
           }
@@ -567,6 +573,11 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
           skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
           setCooldown(route.platform, route.modelId, route.keyId, computeRetryCooldownMs(false, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
           recordFailure(route.modelDbId, 'minor');
+
+          // Heartbeat: model-level skip (key healthy, response useless) — transient only
+          if (isHeartbeatEnabled()) {
+            markKeyUnhealthy(route.keyId, route.modelId, 'model skip: empty completion', true);
+          }
           lastError = new Error(`empty completion from ${route.displayName}`);
           continue;
         }
@@ -640,6 +651,11 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
           skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);
           setCooldown(route.platform, route.modelId, route.keyId, computeRetryCooldownMs(false, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }));
           recordFailure(route.modelDbId, 'minor');
+
+          // Heartbeat: model-level skip (key healthy, response useless) — transient only
+          if (isHeartbeatEnabled()) {
+            markKeyUnhealthy(route.keyId, route.modelId, 'model skip: empty completion', true);
+          }
           lastError = new Error(`empty completion from ${route.displayName}`);
           continue;
         }
@@ -686,8 +702,27 @@ responsesRouter.post('/responses', async (req: Request, res: Response) => {
         }
         const respTier = classifyError(err);
         if (respTier) recordFailure(route.modelDbId, respTier);
+
+        // Heartbeat integration for retryable errors
+        if (isHeartbeatEnabled()) {
+          const isDailyExhausted = isDailyLimitExhausted(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit });
+          const isPaymentRequired = isPaymentRequiredError(err);
+          const isTransient = classifyError(err) === 'minor' && !isPaymentRequired && !isDailyExhausted;
+          const reason = isPaymentRequired ? 'payment_required' : isDailyExhausted ? 'daily_exhausted' : 'rate_limited';
+          const recheckDelayMs = isDailyExhausted || isPaymentRequired
+            ? computeRetryCooldownMs(isPaymentRequired, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, err?.retryAfterMs)
+            : undefined;
+          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'error', isTransient, recheckDelayMs);
+        }
+
         lastError = err;
         continue;
+      }
+
+      // Non-retryable error (auth, 4xx, etc.): also evict from
+      // healthy pool when heartbeat is enabled, then skip key.
+      if (isHeartbeatEnabled()) {
+        markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'auth error', false, undefined);
       }
 
       res.status(502).json({ error: { message: `Provider error (${route.displayName}): ${safeError}`, type: 'provider_error' } });

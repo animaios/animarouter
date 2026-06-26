@@ -340,6 +340,23 @@ export function computeRetryCooldownMs(
 // (2m → 10m → 1h → 24h) and quarantined a perfectly healthy provider for the
 // rest of the day. Daily counters are persisted (countPersistedRequests /
 // sumPersistedTokens), so this verdict is stable across restarts.
+/** Check whether a key+model has genuinely exhausted its daily request or token quota.
+ *  Used by the proxy to distinguish transient (per-minute) 429s from daily exhaustion,
+ *  which needs different eviction/recheck handling in the heartbeat system. */
+export function isDailyLimitExhausted(
+  platform: string,
+  modelId: string,
+  keyId: number,
+  limits: { rpd: number | null; tpd: number | null },
+): boolean {
+  const now = Date.now();
+  const rpdExhausted =
+    limits.rpd !== null && requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd;
+  const tpdExhausted =
+    limits.tpd !== null && tokenCount(platform, modelId, keyId, DAY, now) >= limits.tpd;
+  return rpdExhausted || tpdExhausted;
+}
+
 export function getCooldownDurationForLimit(
   platform: string,
   modelId: string,
@@ -347,12 +364,7 @@ export function getCooldownDurationForLimit(
   limits: { rpd: number | null; tpd: number | null },
   retryAfterMs?: number | null,
 ): number {
-  const now = Date.now();
-  const rpdExhausted =
-    limits.rpd !== null && requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd;
-  const tpdExhausted =
-    limits.tpd !== null && tokenCount(platform, modelId, keyId, DAY, now) >= limits.tpd;
-  const base = (rpdExhausted || tpdExhausted)
+  const base = isDailyLimitExhausted(platform, modelId, keyId, limits)
     ? getNextCooldownDuration(platform, modelId, keyId)
     : getTransientCooldownMs();
   // Honor an upstream Retry-After as a floor: never bench shorter than our own
