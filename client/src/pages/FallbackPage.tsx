@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { motion, LayoutGroup } from 'framer-motion'
 import {
   DndContext,
   closestCenter,
@@ -758,12 +759,10 @@ export default function FallbackPage() {
   }
 
   function handleArchive(row: Row) {
-    if (!confirm(`Archive model '${row.platform}/${row.modelId}'? It will be removed from routing.`)) return
     archiveModelMutation.mutate(row.modelDbId)
   }
 
   function handleUnarchive(model: Model) {
-    if (!confirm(`Unarchive model '${model.modelId}'? It will be added back to routing.`)) return
     unarchiveModelMutation.mutate(model.id)
   }
 
@@ -949,6 +948,7 @@ export default function FallbackPage() {
               <>
                 {/* DndContext must wrap OUTSIDE the table: it renders hidden a11y
                     live-region <div>s, which are invalid as direct <table> children. */}
+                <LayoutGroup id="model-table">
                 {activeRows.length > 0 && (
                   isManual && query === '' ? (
                     <DndContext
@@ -1000,9 +1000,9 @@ export default function FallbackPage() {
                         {tableHead}
                         <tbody>
                           {activeRows.map((row, i) => (
-                            <tr key={row.modelDbId} className="border-b last:border-0 group">
+                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group">
                               <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
-                            </tr>
+                            </motion.tr>
                           ))}
                         </tbody>
                       </table>
@@ -1027,15 +1027,16 @@ export default function FallbackPage() {
                       <table className="w-full text-sm">
                         <tbody className="bg-card/50">
                           {filteredRows.map((row) => (
-                            <tr key={row.modelDbId} className="border-b last:border-0 group opacity-[0.55]">
+                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group opacity-[0.55]">
                               <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} />
-                            </tr>
+                            </motion.tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
                   </details>
                 )}
+                </LayoutGroup>
 
                 {/* Floating action bar — fixed to the viewport so it's always visible,
                     sliding up when there are unsaved changes and back down on save/discard. */}

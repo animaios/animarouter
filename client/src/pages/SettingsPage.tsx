@@ -131,7 +131,7 @@ export default function SettingsPage() {
         (acc[s.group] ??= []).push(s)
         return acc
       },
-      {} as Record<string, FeatureSetting[]>,
+      {} as Record<(typeof GROUP_ORDER)[number], FeatureSetting[]>,
     )
 
     return Object.entries(grouped)
