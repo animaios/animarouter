@@ -108,7 +108,7 @@ export function recomputeBenchmarkComposite(
   let recomputed = 0;
 
   const select = db.prepare(`
-    SELECT id, aa_score, aa_score_updated, aa_confidence, bg_score, bg_score_updated, bg_confidence, aiiq_score, aiiq_score_updated, aiiq_confidence
+    SELECT id, canonical_model_key, aa_score, aa_score_updated, aa_confidence, bg_score, bg_score_updated, bg_confidence, aiiq_score, aiiq_score_updated, aiiq_confidence
     FROM models WHERE id = ?
   `);
 
@@ -174,9 +174,10 @@ export function recomputeBenchmarkComposite(
         totalWeight += w;
       }
 
-      if (totalWeight <= 0) continue; // no valid sources (R4.4)
+      const manualOverride = lookupManualBenchmarkOverride(row.canonical_model_key);
+      if (totalWeight <= 0 && manualOverride == null) continue; // no valid sources (R4.4)
 
-      const composite = totalWeightedScore / totalWeight;
+      const composite = manualOverride ?? (totalWeightedScore / totalWeight);
 
       // Canary: reject NaN, Infinity, <0, >100 (R8.1b)
       if (!validateComposite(composite)) {
@@ -184,7 +185,9 @@ export function recomputeBenchmarkComposite(
         continue;
       }
 
-      const lastUpdate = [row.aa_score_updated, row.bg_score_updated, row.aiiq_score_updated].filter(t => t != null).sort().pop() ?? null;
+      const lastUpdate = manualOverride != null
+        ? MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT
+        : [row.aa_score_updated, row.bg_score_updated, row.aiiq_score_updated].filter(t => t != null).sort().pop() ?? null;
 
       update.run(
         composite,
@@ -205,7 +208,16 @@ export function recomputeBenchmarkComposite(
   return recomputed;
 }
 
-type BenchmarkRow = [string, number]; // [model_id_pattern, aa_index_score]
+type BenchmarkRow = [string, number]; // [model_id_pattern, intelligence score]
+
+export const MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT = '2026-06-27T00:00:00.000Z';
+
+// Manual overrides are intentionally authoritative over live benchmark sources.
+// Nemotron 3 Ultra is a 550B MoE/A55B-active model; public benchmark feeds have
+// been misclassifying it as a lower-tier worker.
+export const MANUAL_BENCHMARK_OVERRIDES: BenchmarkRow[] = [
+  ['%nemotron-3-ultra%', 86],
+];
 
 // ─── BENCHMARK SCORE TABLE ──────────────────────────────────────────────────
 // Patterns are matched via canonical_model_key lookup.
@@ -213,6 +225,7 @@ type BenchmarkRow = [string, number]; // [model_id_pattern, aa_index_score]
 // come first (e.g. 'gemini-3.1-pro%' before 'gemini-3%').
 const BENCHMARK_SCORES: BenchmarkRow[] = [
   // ── Frontier (AA ≥ 45) ──
+  ['%nemotron-3-ultra%', 86],
   ['%kimi-k2.6%', 58],
   ['%kimi-k2.5%', 54],
   ['%kimi-k2-thinking%', 55],
@@ -244,7 +257,6 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
   ['%glm-4.7-flash%', 39],
   ['%nemotron-3-super%', 36],
   ['%nemotron-3-120b%', 36],
-  ['%nemotron-3-ultra%', 40],
   ['%gemini-2.5-pro%', 35],
   ['%deepseek-v3.2%', 32],
   ['%deepseek-v3.1%', 28],
@@ -334,14 +346,32 @@ export function scoreToIntelligenceRank(score: number): number {
   return Math.max(1, Math.min(100, Math.round(101 - score)));
 }
 
+function patternNeedle(pattern: string): string {
+  return pattern.replace(/%/g, '').toLowerCase();
+}
+
+export function lookupManualBenchmarkOverride(modelIdOrKey: string | null | undefined): number | null {
+  if (!modelIdOrKey) return null;
+  const lower = modelIdOrKey.toLowerCase();
+  for (const [pattern, score] of MANUAL_BENCHMARK_OVERRIDES) {
+    if (lower.includes(patternNeedle(pattern))) {
+      return score;
+    }
+  }
+  return null;
+}
+
 // ─── PATTERN LOOKUP ─────────────────────────────────────────────────────────
 // Given a model_id, find the best matching benchmark score.
 // Returns 0 if no pattern matches (unknown model).
 export function lookupBenchmarkScore(modelId: string): number {
+  const manualOverride = lookupManualBenchmarkOverride(modelId);
+  if (manualOverride != null) return manualOverride;
+
   const lower = modelId.toLowerCase();
   // First match wins (the table is ordered specific → general)
   for (const [pattern, score] of BENCHMARK_SCORES) {
-    const sqlPattern = pattern.replace(/%/g, '');
+    const sqlPattern = patternNeedle(pattern);
     // SQL LIKE semantics: % matches any sequence, _ matches one char.
     // We use a simpler approach: check if the model_id contains the
     // pattern stripped of % wildcards.
@@ -386,6 +416,105 @@ export function applyBenchmarkScores(db: Database.Database): void {
     }
   });
   apply();
+}
+
+export function applyManualBenchmarkOverrides(db: Database.Database): number {
+  const modelColumns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
+  const requiredModelColumns = [
+    'canonical_model_key',
+    'benchmark_score',
+    'last_benchmark_update',
+    'size_label',
+    'intelligence_rank',
+    'benchmark_composite_version',
+  ];
+  if (!requiredModelColumns.every(name => modelColumns.some(c => c.name === name))) {
+    return 0;
+  }
+
+  backfillCanonicalKeys(db);
+
+  const updateModels = db.prepare(`
+    UPDATE models SET
+      benchmark_score = ?,
+      last_benchmark_update = ?,
+      size_label = ?,
+      intelligence_rank = ?,
+      benchmark_composite_version = 1
+    WHERE canonical_model_key LIKE ?
+      AND (
+        benchmark_score IS NULL OR benchmark_score != ?
+        OR last_benchmark_update IS NULL OR last_benchmark_update != ?
+        OR size_label IS NULL OR size_label != ?
+        OR intelligence_rank IS NULL OR intelligence_rank != ?
+        OR benchmark_composite_version IS NULL OR benchmark_composite_version != 1
+      )
+  `);
+
+  const groupColumns = db.prepare('PRAGMA table_info(model_groups)').all() as { name: string }[];
+  const canUpdateGroups = [
+    'group_key',
+    'benchmark_score',
+    'size_label',
+    'intelligence_rank',
+    'benchmark_composite_version',
+  ].every(name => groupColumns.some(c => c.name === name));
+
+  const updateGroups = canUpdateGroups
+    ? db.prepare(`
+      UPDATE model_groups SET
+        benchmark_score = ?,
+        size_label = ?,
+        intelligence_rank = ?,
+        benchmark_composite_version = 1
+      WHERE group_key LIKE ?
+        AND (
+          benchmark_score IS NULL OR benchmark_score != ?
+          OR size_label IS NULL OR size_label != ?
+          OR intelligence_rank IS NULL OR intelligence_rank != ?
+          OR benchmark_composite_version IS NULL OR benchmark_composite_version != 1
+        )
+    `)
+    : null;
+
+  let updated = 0;
+  const apply = db.transaction(() => {
+    for (const [pattern, score] of MANUAL_BENCHMARK_OVERRIDES) {
+      const tier = scoreToTier(score);
+      const rank = scoreToIntelligenceRank(score);
+      const modelResult = updateModels.run(
+        score,
+        MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT,
+        tier,
+        rank,
+        pattern,
+        score,
+        MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT,
+        tier,
+        rank,
+      );
+      updated += modelResult.changes;
+
+      if (updateGroups) {
+        const groupResult = updateGroups.run(
+          score,
+          tier,
+          rank,
+          pattern,
+          score,
+          tier,
+          rank,
+        );
+        updated += groupResult.changes;
+      }
+    }
+  });
+  apply();
+
+  if (updated > 0) {
+    console.log(`[Benchmarks] Applied ${updated} manual benchmark overrides`);
+  }
+  return updated;
 }
 
 // ─── CANONICAL KEY BACKFILL ────────────────────────────────────────────────

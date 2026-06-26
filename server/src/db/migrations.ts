@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { initEncryptionKey } from '../lib/crypto.js';
-import { applyBenchmarkScores } from './benchmark-scores.js';
+import { applyBenchmarkScores, applyManualBenchmarkOverrides } from './benchmark-scores.js';
 import { invalidateAliasCache, reconcileGroups, seedDefaultModelGroupAliases } from './model-groups.js';
 import { BenchmarkService } from '../services/benchmarks.js';
 
@@ -78,6 +78,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateModelsV37MultiSourceBenchmarks(db);
   migrateModelsV38ModelGroups(db);
   seedModelGroupAliasesV38(db);
+  applyManualBenchmarkOverrides(db);
 
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.

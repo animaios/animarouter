@@ -376,6 +376,19 @@ export interface TimelinePoint {
   failureCount: number;
 }
 
+export interface ModelTimelineSeries {
+  key: string;
+  platform: string;
+  modelId: string;
+  displayName: string;
+  requests: number;
+}
+
+export interface ModelTimelineResponse {
+  series: ModelTimelineSeries[];
+  points: Array<Record<string, string | number>>;
+}
+
 export interface RequestLog {
   id: number;
   platform: Platform;

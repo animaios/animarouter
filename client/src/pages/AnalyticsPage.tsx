@@ -2,10 +2,10 @@ import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, Legend,
+  AreaChart, Area,
 } from 'recharts'
 import { apiFetch } from '@/lib/api'
-import type { AnalyticsSummary, PlatformStats, TimelinePoint, ModelStats, ErrorEntry, ErrorDistribution } from '../../../shared/types'
+import type { AnalyticsSummary, PlatformStats, ModelStats, ErrorEntry, ErrorDistribution, ModelTimelineResponse } from '../../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PageHeader } from '@/components/page-header'
@@ -14,6 +14,7 @@ import { Tooltip as HoverTooltip } from '@/components/tooltip'
 import { formatSqliteUtcToLocalTime, formatIsoUtcToLocalChart } from '@/lib/utils'
 
 type TimeRange = '15m' | '1h' | '24h' | '7d' | '30d'
+type ChartInterval = 'minute' | '5min' | 'hour' | 'day'
 
 function formatTokens(n?: number): string {
   if (!n) return '0'
@@ -48,6 +49,28 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 const axisStyle = { fontSize: 11, fill: 'var(--muted-foreground)' } as const
 const gridStyle = 'var(--border)'
 const primaryFill = 'var(--foreground)'
+const EMPTY_MODEL_TIMELINE: ModelTimelineResponse = { series: [], points: [] }
+const modelAreaColors = [
+  '#2563eb',
+  '#16a34a',
+  '#dc2626',
+  '#9333ea',
+  '#ea580c',
+  '#0891b2',
+  '#ca8a04',
+  '#64748b',
+  '#db2777',
+]
+
+function rangeToInterval(range: TimeRange): ChartInterval {
+  return range === '15m' ? 'minute' :
+    range === '1h' ? '5min' :
+    range === '24h' ? 'hour' : 'day'
+}
+
+function getModelSeriesName(series: ModelTimelineResponse['series'][number]): string {
+  return series.platform ? `${series.displayName} (${series.platform})` : series.displayName
+}
 
 export default function AnalyticsPage() {
   const [range, setRange] = useState<TimeRange>('24h')
@@ -62,24 +85,23 @@ export default function AnalyticsPage() {
     queryFn: () => apiFetch<PlatformStats[]>(`/api/analytics/by-platform?range=${range}`),
   })
 
-  const { data: timeline = [] } = useQuery({
-    queryKey: ['analytics', 'timeline', range],
-    queryFn: () => apiFetch<TimelinePoint[]>(`/api/analytics/timeline?range=${range}`),
+  const { data: modelTimeline = EMPTY_MODEL_TIMELINE } = useQuery({
+    queryKey: ['analytics', 'model-timeline', range],
+    queryFn: () => apiFetch<ModelTimelineResponse>(`/api/analytics/model-timeline?range=${range}`),
   })
 
-  // Format timeline timestamps in local time before they reach Recharts.
-  const formattedTimeline = useMemo(() =>
-    timeline.map((d) => ({
+  const formattedModelTimeline = useMemo(() =>
+    modelTimeline.points.map((d) => ({
       ...d,
       timestamp: formatIsoUtcToLocalChart(
-        d.timestamp,
-        range === '15m' ? 'minute' :
-        range === '1h'  ? '5min'  :
-        range === '24h' ? 'hour'  : 'day',
+        String(d.timestamp),
+        rangeToInterval(range),
       ),
     })),
-    [timeline, range],
+    [modelTimeline.points, range],
   );
+  const hasModelTimelineData = modelTimeline.series.length > 0 &&
+    formattedModelTimeline.some((d) => Number(d.totalRequests ?? 0) > 0)
 
   const { data: byModel = [] } = useQuery({
     queryKey: ['analytics', 'by-model', range],
@@ -174,21 +196,49 @@ export default function AnalyticsPage() {
           </Panel>
 
           <div className="lg:col-span-2">
-            <Panel title="Requests over time">
-              {formattedTimeline.length === 0 ? (
+            <Panel title="Model usage over time">
+              {!hasModelTimelineData ? (
                 <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
               ) : (
-                <ResponsiveContainer width="100%" height={240}>
-                  <LineChart data={formattedTimeline} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                    <XAxis dataKey="timestamp" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
-                    <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
-                    <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
-                    <Legend wrapperStyle={{ fontSize: 12 }} iconType="line" />
-                    <Line type="monotone" dataKey="successCount" name="Success" stroke={primaryFill} strokeWidth={1.5} dot={false} />
-                    <Line type="monotone" dataKey="failureCount" name="Failures" stroke="var(--destructive)" strokeWidth={1.5} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
+                <>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <AreaChart data={formattedModelTimeline} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
+                      <XAxis dataKey="timestamp" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
+                      <YAxis allowDecimals={false} tick={axisStyle} tickLine={false} axisLine={false} />
+                      <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                      {modelTimeline.series.map((series, index) => {
+                        const color = modelAreaColors[index % modelAreaColors.length]
+                        return (
+                          <Area
+                            key={series.key}
+                            type="monotone"
+                            dataKey={series.key}
+                            name={getModelSeriesName(series)}
+                            stackId="models"
+                            stroke={color}
+                            fill={color}
+                            fillOpacity={0.62}
+                            strokeWidth={1.2}
+                            dot={false}
+                          />
+                        )
+                      })}
+                    </AreaChart>
+                  </ResponsiveContainer>
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
+                    {modelTimeline.series.map((series, index) => {
+                      const color = modelAreaColors[index % modelAreaColors.length]
+                      const name = getModelSeriesName(series)
+                      return (
+                        <span key={series.key} className="inline-flex max-w-full items-center gap-1.5">
+                          <span className="size-2 rounded-sm shrink-0" style={{ backgroundColor: color }} />
+                          <span className="max-w-[220px] truncate" title={name}>{name}</span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                </>
               )}
             </Panel>
           </div>
