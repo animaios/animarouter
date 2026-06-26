@@ -437,6 +437,38 @@ describe('Analytics API', () => {
     });
   });
 
+  describe('timeline interval limits', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    it('coerces minute buckets to daily buckets for 30d timelines', async () => {
+      const { status, body } = await request(app, '/api/analytics/timeline?range=30d&interval=minute');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(31);
+      expect(body.every((pt: any) => pt.timestamp.endsWith('T00:00:00Z'))).toBe(true);
+    });
+
+    it('coerces 5-minute buckets to daily buckets for 7d model timelines', async () => {
+      const { status, body } = await request(app, '/api/analytics/model-timeline?range=7d&interval=5min');
+
+      expect(status).toBe(200);
+      expect(body.points).toHaveLength(8);
+      expect(body.points.every((pt: any) => pt.timestamp.endsWith('T00:00:00Z'))).toBe(true);
+    });
+
+    it('still allows hourly buckets for 30d timelines', async () => {
+      const { status, body } = await request(app, '/api/analytics/timeline?range=30d&interval=hour');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(721);
+      expect(body[0].timestamp).toBe('2026-04-29T12:00:00Z');
+      expect(body.at(-1).timestamp).toBe('2026-05-29T12:00:00Z');
+    });
+  });
+
   describe('model-timeline stacked series', () => {
     beforeEach(() => {
       vi.useFakeTimers();

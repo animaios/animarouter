@@ -28,16 +28,55 @@ function getSinceTimestamp(range: string): string {
   }
 }
 
+type AnalyticsRange = '15m' | '1h' | '24h' | '7d' | '30d';
 type TimelineInterval = 'minute' | '5min' | 'hour' | 'day';
 
+function normalizeAnalyticsRange(range: string): AnalyticsRange {
+  switch (range) {
+    case '15m':
+    case '1h':
+    case '24h':
+    case '30d':
+      return range;
+    case '7d':
+    default:
+      return '7d';
+  }
+}
+
+const DEFAULT_TIMELINE_INTERVAL_BY_RANGE: Record<AnalyticsRange, TimelineInterval> = {
+  '15m': 'minute',
+  '1h': '5min',
+  '24h': 'hour',
+  '7d': 'day',
+  '30d': 'day',
+};
+
+const ALLOWED_TIMELINE_INTERVALS_BY_RANGE: Record<AnalyticsRange, readonly TimelineInterval[]> = {
+  '15m': ['minute', '5min', 'hour', 'day'],
+  '1h': ['minute', '5min', 'hour', 'day'],
+  '24h': ['minute', '5min', 'hour', 'day'],
+  '7d': ['hour', 'day'],
+  '30d': ['hour', 'day'],
+};
+
+function isTimelineInterval(value: unknown): value is TimelineInterval {
+  return value === 'minute' || value === '5min' || value === 'hour' || value === 'day';
+}
+
 function getTimelineInterval(range: string, requested?: string): TimelineInterval {
-  if (requested === 'minute' || requested === '5min' || requested === 'hour' || requested === 'day') {
+  const normalizedRange = normalizeAnalyticsRange(range);
+  const defaultInterval = DEFAULT_TIMELINE_INTERVAL_BY_RANGE[normalizedRange];
+  if (!isTimelineInterval(requested)) {
+    return defaultInterval;
+  }
+
+  const allowedIntervals = ALLOWED_TIMELINE_INTERVALS_BY_RANGE[normalizedRange];
+  if (allowedIntervals.includes(requested)) {
     return requested;
   }
 
-  return range === '15m' ? 'minute' :
-    range === '1h'  ? '5min'  :
-    range === '24h' ? 'hour'  : 'day';
+  return defaultInterval;
 }
 
 function getTimelineBucketSql(interval: TimelineInterval) {
