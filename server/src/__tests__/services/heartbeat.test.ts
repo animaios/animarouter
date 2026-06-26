@@ -566,6 +566,144 @@ describe('Provider Health Heartbeat', () => {
       expect(health).toBeUndefined();
     });
   });
+
+  // ── Concurrency Batching ───────────────────────────────────────────────
+
+  describe('Concurrency batching', () => {
+    /** Set up N keys on a single platform/model for concurrency tests. */
+    function setupMultiKey(n: number, platform = 'conctest') {
+      const db = getDb();
+      db.prepare('DELETE FROM fallback_config').run();
+
+      db.prepare(`INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled) VALUES ('${platform}', 'conc-model', 'Conc Model', 1, 1, 1)`).run();
+      const modelDbId = (db.prepare(`SELECT id FROM models WHERE platform = '${platform}' AND model_id = 'conc-model'`).get() as any).id;
+      db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)').run(modelDbId);
+
+      for (let i = 1; i <= n; i++) {
+        db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES ('${platform}', 'Key ${i}', 'enc${i}', 'iv${i}', 'tag${i}', 'healthy', 1)`).run();
+      }
+
+      return { modelDbId };
+    }
+
+    it('concurrency=1 pings all keys sequentially (no parallel batches)', async () => {
+      setupMultiKey(3);
+      setSetting('heartbeat_concurrency', '1');
+      resetHeartbeatConfig();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      const result = await pokeAllKeys();
+
+      // All 3 keys should be pinged
+      expect(result.poked).toBe(3);
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(3);
+      expect(pingEvents.every(e => e.success)).toBe(true);
+    });
+
+    it('concurrency=1 with stagger delays between sequential pings', async () => {
+      setupMultiKey(3);
+      setSetting('heartbeat_concurrency', '1');
+      setSetting('heartbeat_stagger_ms', '50');
+      resetHeartbeatConfig();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      // pokeAllKeys resolves runCycle(true). With concurrency=1 and stagger=50ms,
+      // the cycle awaits sleep(50) after each ping except the last.
+      // Since sleep uses setTimeout internally, fake timers control progress.
+      const cyclePromise = pokeAllKeys();
+
+      // After first ping resolves but before first sleep resolves,
+      // only 1 ping event should have been published.
+      await vi.advanceTimersByTimeAsync(0);
+      let pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(1);
+
+      // Advance past first stagger sleep — second ping fires
+      await vi.advanceTimersByTimeAsync(50);
+      pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(2);
+
+      // Advance past second stagger sleep — third ping fires
+      await vi.advanceTimersByTimeAsync(50);
+      pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(3);
+
+      const result = await cyclePromise;
+      expect(result.poked).toBe(3);
+    });
+
+    it('concurrency=2 batches keys into groups of 2', async () => {
+      setupMultiKey(3);
+      setSetting('heartbeat_concurrency', '2');
+      resetHeartbeatConfig();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      const result = await pokeAllKeys();
+
+      // All 3 keys pinged: batch 1 = 2 keys, batch 2 = 1 key
+      expect(result.poked).toBe(3);
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(3);
+      expect(pingEvents.every(e => e.success)).toBe(true);
+    });
+
+    it('high concurrency pings all keys in a single batch', async () => {
+      setupMultiKey(2);
+      setSetting('heartbeat_concurrency', '10');
+      resetHeartbeatConfig();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      const result = await pokeAllKeys();
+
+      // Both keys pinged concurrently in a single batch
+      expect(result.poked).toBe(2);
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(2);
+      expect(pingEvents.every(e => e.success)).toBe(true);
+    });
+
+    it('no stagger sleep when concurrency > 1', async () => {
+      setupMultiKey(3);
+      setSetting('heartbeat_concurrency', '2');
+      setSetting('heartbeat_stagger_ms', '100');
+      resetHeartbeatConfig();
+
+      chatCompletion.mockResolvedValue({
+        choices: [{ message: { role: 'assistant', content: 'pong' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      recordActivity();
+      // With concurrency=2, sleep is never invoked even when stagger > 0
+      // (sleep only fires when concurrency === 1 && staggerMs > 0)
+      const result = await pokeAllKeys();
+
+      expect(result.poked).toBe(3);
+      const pingEvents = publishedEvents.filter(e => e.type === 'heartbeat.ping');
+      expect(pingEvents.length).toBe(3);
+    });
+  });
 });
 
 // ── Route-level: POST /heartbeat/poke ─────────────────────────────────────
