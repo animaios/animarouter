@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
 import { getDb, initDb } from '../../db/index.js';
-import { initDegradation } from '../../services/degradation.js';
+import { evictGhostStates, initDegradation } from '../../services/degradation.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
 let dashToken = '';
@@ -104,6 +104,24 @@ describe('Fallback API', () => {
     const { body: afterReset } = await request(app, 'GET', '/api/fallback');
     const resetEntry = afterReset.find((entry: any) => entry.modelDbId === modelDbId);
     expect(resetEntry.boost).toBe(1);
+  });
+
+  it('keeps model boost until it is manually reset', async () => {
+    const { body: original } = await request(app, 'GET', '/api/fallback');
+    const modelDbId = original[0].modelDbId;
+
+    const demoted = await request(app, 'PUT', `/api/fallback/boost/${modelDbId}`, { boost: 0.5 });
+    expect(demoted.status).toBe(200);
+    expect(demoted.body.boost).toBe(0.5);
+
+    expect(evictGhostStates()).not.toContain(modelDbId);
+
+    const { body: afterEviction } = await request(app, 'GET', '/api/fallback');
+    const demotedEntry = afterEviction.find((entry: any) => entry.modelDbId === modelDbId);
+    expect(demotedEntry.boost).toBe(0.5);
+
+    const reset = await request(app, 'DELETE', `/api/fallback/boost/${modelDbId}`);
+    expect(reset.status).toBe(200);
   });
 
   it('PUT /api/fallback updates order', async () => {
