@@ -28,6 +28,71 @@ function getSinceTimestamp(range: string): string {
   }
 }
 
+type TimelineInterval = 'minute' | '5min' | 'hour' | 'day';
+
+function getTimelineInterval(range: string, requested?: string): TimelineInterval {
+  if (requested === 'minute' || requested === '5min' || requested === 'hour' || requested === 'day') {
+    return requested;
+  }
+
+  return range === '15m' ? 'minute' :
+    range === '1h'  ? '5min'  :
+    range === '24h' ? 'hour'  : 'day';
+}
+
+function getTimelineBucketSql(interval: TimelineInterval) {
+  // dateFormat is a hardcoded whitelist; never user-controlled.
+  // For 5-minute buckets we floor the minute value to the nearest multiple of 5.
+  const dateFormat =
+    interval === 'minute' ? '%Y-%m-%dT%H:%M:00' :
+    interval === '5min'   ? "strftime('%Y-%m-%dT%H:', r.created_at) || printf('%02d', (CAST(strftime('%M', r.created_at) AS INTEGER) / 5) * 5) || ':00'" :
+    interval === 'hour'   ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
+
+  // selectExpr and groupExpr must be identical SQL fragments so SELECT and GROUP BY match.
+  const selectExpr = interval === '5min'
+    ? dateFormat
+    : `strftime('${dateFormat}', r.created_at)`;
+
+  return { selectExpr, groupExpr: selectExpr };
+}
+
+const BUCKET_MS: Record<TimelineInterval, number> = {
+  minute: 60 * 1000,
+  '5min': 5 * 60 * 1000,
+  hour: 60 * 60 * 1000,
+  day: 24 * 60 * 60 * 1000,
+};
+
+const floorToBucket = (ms: number, size: number): number =>
+  Math.floor(ms / size) * size;
+
+function msToBucketKey(ms: number, interval: TimelineInterval): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const datePart = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  if (interval === 'day') return datePart;
+  return `${datePart}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
+}
+
+function buildTimelineBuckets(since: string, interval: TimelineInterval): Array<{ key: string; timestamp: string }> {
+  const bucketSize = BUCKET_MS[interval];
+  const nowMs = Date.now();
+  const sinceMs = new Date(since.replace(' ', 'T') + 'Z').getTime();
+  const startBucket = floorToBucket(sinceMs, bucketSize);
+  const endBucket = floorToBucket(nowMs, bucketSize);
+
+  const buckets: Array<{ key: string; timestamp: string }> = [];
+  for (let t = startBucket; t <= endBucket; t += bucketSize) {
+    const key = msToBucketKey(t, interval);
+    buckets.push({
+      key,
+      timestamp: interval === 'day' ? key + 'T00:00:00Z' : key + 'Z',
+    });
+  }
+
+  return buckets;
+}
+
 /** Return platforms that have ≥1 enabled key AND ≥1 model. */
 function getActivePlatforms(db: Database.Database): string[] {
   return (db.prepare(`
@@ -220,11 +285,7 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
 // Timeline data
 analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const range = (req.query.range as string) ?? '24h';
-  const interval = (req.query.interval as string) ?? (
-    range === '15m' ? 'minute' :
-    range === '1h'  ? '5min'  :
-    range === '24h' ? 'hour'  : 'day'
-  );
+  const interval = getTimelineInterval(range, req.query.interval as string | undefined);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -232,18 +293,7 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
   const pf = buildPlatformFilter(active, 'r');
   const mf = buildModelEnabledFilter();
 
-  // dateFormat is a hardcoded whitelist — never user-controlled.
-  // For 5-minute buckets we floor the minute value to the nearest multiple of 5.
-  const dateFormat =
-    interval === 'minute' ? '%Y-%m-%dT%H:%M:00' :
-    interval === '5min'   ? "strftime('%Y-%m-%dT%H:', r.created_at) || printf('%02d', (CAST(strftime('%M', r.created_at) AS INTEGER) / 5) * 5) || ':00'" :
-    interval === 'hour'   ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
-
-  // selectExpr and groupExpr must be identical SQL fragments so SELECT and GROUP BY match.
-  const selectExpr = interval === '5min'
-    ? dateFormat
-    : `strftime('${dateFormat}', r.created_at)`;
-  const groupExpr = selectExpr;
+  const { selectExpr, groupExpr } = getTimelineBucketSql(interval);
 
   // Only query when there are active platforms; otherwise dbRows stays empty
   // and the zero-fill below still produces a full flat-line x-axis.
@@ -262,46 +312,145 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
     ORDER BY timestamp ASC
   `).all(since, ...pf.params) as any[];
 
-  // ── Zero-fill: always emit the complete set of buckets ──────────────────
-  const BUCKET_MS: Record<string, number> = {
-    minute: 60 * 1000,
-    '5min': 5 * 60 * 1000,
-    hour: 60 * 60 * 1000,
-    day: 24 * 60 * 60 * 1000,
-  };
-
-  const floorToBucket = (ms: number, size: number): number =>
-    Math.floor(ms / size) * size;
-
-  const msToBucketKey = (ms: number, iv: string): string => {
-    const d = new Date(ms);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const datePart = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-    if (iv === 'day') return datePart;
-    return `${datePart}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
-  };
-
   const dataMap = new Map(dbRows.map(r => [r.timestamp, r]));
-
-  const bucketSize = BUCKET_MS[interval] ?? BUCKET_MS.hour;
-  const nowMs = Date.now();
-  const sinceMs = new Date(since.replace(' ', 'T') + 'Z').getTime();
-  const startBucket = floorToBucket(sinceMs, bucketSize);
-  const endBucket = floorToBucket(nowMs, bucketSize);
-
-  const filled: any[] = [];
-  for (let t = startBucket; t <= endBucket; t += bucketSize) {
-    const key = msToBucketKey(t, interval);
+  const filled = buildTimelineBuckets(since, interval).map(({ key, timestamp }) => {
     const r = dataMap.get(key);
-    filled.push({
-      timestamp: interval === 'day' ? key + 'T00:00:00Z' : key + 'Z',
+    return {
+      timestamp,
       requests: r?.requests ?? 0,
       successCount: r?.success_count ?? 0,
       failureCount: r?.failure_count ?? 0,
+    };
+  });
+
+  res.json(filled);
+});
+
+interface ModelTimelineSeriesRow {
+  platform: string;
+  model_id: string;
+  display_name: string | null;
+  requests: number;
+}
+
+interface ModelTimelineBucketRow extends ModelTimelineSeriesRow {
+  timestamp: string;
+}
+
+function getModelMapKey(platform: string, modelId: string): string {
+  return `${platform}\u0000${modelId}`;
+}
+
+function getModelTimelineLimit(rawLimit: unknown): number {
+  const parsed = Number(rawLimit);
+  if (!Number.isFinite(parsed)) return 8;
+  return Math.min(Math.max(Math.trunc(parsed), 1), 12);
+}
+
+// Timeline data stacked by served model
+analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? '24h';
+  const interval = getTimelineInterval(range, req.query.interval as string | undefined);
+  const limit = getModelTimelineLimit(req.query.limit);
+  const since = getSinceTimestamp(range);
+  const db = getDb();
+
+  const active = getActivePlatforms(db);
+  const pf = buildPlatformFilter(active, 'r');
+  const mf = buildModelEnabledFilter();
+  const { selectExpr, groupExpr } = getTimelineBucketSql(interval);
+
+  const topRows = active.length === 0 ? [] : db.prepare(`
+    SELECT
+      r.platform,
+      r.model_id,
+      m.display_name,
+      COUNT(*) as requests
+    FROM requests r
+    ${mf.joinSql}
+    WHERE r.created_at >= ?
+      ${pf.sql}
+      ${mf.whereSql}
+    GROUP BY r.platform, r.model_id
+    ORDER BY requests DESC, r.platform ASC, r.model_id ASC
+    LIMIT ?
+  `).all(since, ...pf.params, limit) as ModelTimelineSeriesRow[];
+
+  const topByModel = new Map<string, {
+    key: string;
+    platform: string;
+    modelId: string;
+    displayName: string;
+    requests: number;
+  }>();
+
+  topRows.forEach((row, index) => {
+    topByModel.set(getModelMapKey(row.platform, row.model_id), {
+      key: `model_${index}`,
+      platform: row.platform,
+      modelId: row.model_id,
+      displayName: row.display_name ?? row.model_id,
+      requests: row.requests,
+    });
+  });
+
+  const bucketRows = active.length === 0 ? [] : db.prepare(`
+    SELECT
+      ${selectExpr} as timestamp,
+      r.platform,
+      r.model_id,
+      m.display_name,
+      COUNT(*) as requests
+    FROM requests r
+    ${mf.joinSql}
+    WHERE r.created_at >= ?
+      ${pf.sql}
+      ${mf.whereSql}
+    GROUP BY ${groupExpr}, r.platform, r.model_id
+    ORDER BY timestamp ASC
+  `).all(since, ...pf.params) as ModelTimelineBucketRow[];
+
+  const otherRequests = bucketRows.reduce((sum, row) => {
+    return topByModel.has(getModelMapKey(row.platform, row.model_id)) ? sum : sum + row.requests;
+  }, 0);
+
+  const series = Array.from(topByModel.values());
+  if (otherRequests > 0) {
+    series.push({
+      key: 'other',
+      platform: '',
+      modelId: '__other__',
+      displayName: 'Other',
+      requests: otherRequests,
     });
   }
 
-  res.json(filled);
+  const pointMap = new Map<string, Record<string, string | number>>();
+  for (const bucket of buildTimelineBuckets(since, interval)) {
+    const point: Record<string, string | number> = {
+      timestamp: bucket.timestamp,
+      totalRequests: 0,
+    };
+    for (const item of series) {
+      point[item.key] = 0;
+    }
+    pointMap.set(bucket.key, point);
+  }
+
+  for (const row of bucketRows) {
+    const point = pointMap.get(row.timestamp);
+    if (!point) continue;
+
+    const topSeries = topByModel.get(getModelMapKey(row.platform, row.model_id));
+    const key = topSeries?.key ?? 'other';
+    point[key] = Number(point[key] ?? 0) + row.requests;
+    point.totalRequests = Number(point.totalRequests ?? 0) + row.requests;
+  }
+
+  res.json({
+    series,
+    points: Array.from(pointMap.values()),
+  });
 });
 
 // Error distribution (grouped by error type and platform)

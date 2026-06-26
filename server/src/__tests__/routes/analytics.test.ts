@@ -297,6 +297,22 @@ describe('Analytics API', () => {
       expect(nonZeroBuckets.every((pt: any) => pt.requests === 1)).toBe(true);
     });
 
+    it('filters model-timeline endpoint', async () => {
+      insertKey('mtactive', 1);
+      insertModel('mtactive', 'm1');
+      insertFallbackConfig('mtactive', 'm1', 1);
+      insertTokensRequest('mtactive', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+      insertTokensRequest('mtinactive', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { body } = await request(app, '/api/analytics/model-timeline?range=24h');
+
+      expect(body.series).toHaveLength(1);
+      expect(body.series[0].platform).toBe('mtactive');
+      const nonZeroBuckets = body.points.filter((pt: any) => pt.totalRequests > 0);
+      expect(nonZeroBuckets.length).toBeGreaterThan(0);
+      expect(nonZeroBuckets.every((pt: any) => pt.totalRequests === 1)).toBe(true);
+    });
+
     it('filters errors endpoint', async () => {
       insertKey('erractive', 1);
       insertModel('erractive', 'm1');
@@ -418,6 +434,45 @@ describe('Analytics API', () => {
 
       const fbRows = body.filter((r: any) => r.platform === 'fb');
       expect(fbRows).toHaveLength(1);
+    });
+  });
+
+  describe('model-timeline stacked series', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    it('returns top models plus Other with zero-filled timeline points', async () => {
+      insertKey('stacked', 1);
+      insertModel('stacked', 'm1');
+      insertModel('stacked', 'm2');
+      insertModel('stacked', 'm3');
+      insertFallbackConfig('stacked', 'm1', 1);
+      insertFallbackConfig('stacked', 'm2', 1);
+      insertFallbackConfig('stacked', 'm3', 1);
+
+      for (let i = 0; i < 3; i++) {
+        insertTokensRequest('stacked', 'm1', 'success', 100, 100, '2026-05-29 11:00:00');
+      }
+      for (let i = 0; i < 2; i++) {
+        insertTokensRequest('stacked', 'm2', 'success', 100, 100, '2026-05-29 11:00:00');
+      }
+      insertTokensRequest('stacked', 'm3', 'success', 100, 100, '2026-05-29 11:00:00');
+
+      const { status, body } = await request(app, '/api/analytics/model-timeline?range=24h&limit=2');
+
+      expect(status).toBe(200);
+      expect(body.series.map((s: any) => s.key)).toEqual(['model_0', 'model_1', 'other']);
+      expect(body.series.map((s: any) => s.modelId)).toEqual(['m1', 'm2', '__other__']);
+      expect(body.points.length).toBeGreaterThan(1);
+
+      const nonZeroBuckets = body.points.filter((pt: any) => pt.totalRequests > 0);
+      expect(nonZeroBuckets).toHaveLength(1);
+      expect(nonZeroBuckets[0].totalRequests).toBe(6);
+      expect(nonZeroBuckets[0].model_0).toBe(3);
+      expect(nonZeroBuckets[0].model_1).toBe(2);
+      expect(nonZeroBuckets[0].other).toBe(1);
     });
   });
 
