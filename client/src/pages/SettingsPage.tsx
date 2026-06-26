@@ -14,6 +14,7 @@ import {
 
 const GROUP_ORDER = [
   'Retry & Failover',
+  'Models',
   'Rate Limiting',
   'Sessions',
   'Resilience',
@@ -38,6 +39,7 @@ const SETTING_ORDER: Record<string, readonly string[]> = {
     'forbidden_cooldown_hours',
   ],
   'Rate Limiting': ['proxy_rate_limit_rpm'],
+  Models: ['model_grouping_enabled'],
   Sessions: [
     'key_affinity_enabled',
     'sticky_session_enabled',

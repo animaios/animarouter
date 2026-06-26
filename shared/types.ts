@@ -133,6 +133,9 @@ export interface Model {
   enabled: boolean;
   supportsVision: boolean;
   supportsTools: boolean;
+  groupId?: number | null;
+  groupKey?: string | null;
+  groupDisplayName?: string | null;
 }
 
 export interface ModelListRow {
@@ -371,6 +374,19 @@ export interface TimelinePoint {
   requests: number;
   successCount: number;
   failureCount: number;
+}
+
+export interface ModelTimelineSeries {
+  key: string;
+  platform: string;
+  modelId: string;
+  displayName: string;
+  requests: number;
+}
+
+export interface ModelTimelineResponse {
+  series: ModelTimelineSeries[];
+  points: Array<Record<string, string | number>>;
 }
 
 export interface RequestLog {

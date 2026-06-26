@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../../app.js';
-import { getDb, initDb } from '../../db/index.js';
+import { getDb, initDb, setSetting } from '../../db/index.js';
 import { evictGhostStates, initDegradation } from '../../services/degradation.js';
 import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
 
@@ -148,6 +148,48 @@ describe('Fallback API', () => {
       enabled: e.enabled,
     }));
     await request(app, 'PUT', '/api/fallback', restore);
+  });
+
+  it('GET /api/fallback returns one row per model group when grouping is enabled', async () => {
+    setSetting('model_grouping_enabled', 'true');
+    try {
+      const { status, body } = await request(app, 'GET', '/api/fallback');
+      expect(status).toBe(200);
+      expect(body.length).toBeGreaterThan(0);
+      expect(body.every((entry: any) => entry.isGroup === true)).toBe(true);
+      expect(body[0]).toHaveProperty('groupId');
+      expect(body[0]).toHaveProperty('groupKey');
+      expect(body[0]).toHaveProperty('providerCount');
+      expect(Array.isArray(body[0].providers)).toBe(true);
+    } finally {
+      setSetting('model_grouping_enabled', 'false');
+    }
+  });
+
+  it('PUT /api/fallback updates grouped manual order by groupId', async () => {
+    setSetting('model_grouping_enabled', 'true');
+    try {
+      const { body: original } = await request(app, 'GET', '/api/fallback');
+      expect(original.length).toBeGreaterThan(1);
+
+      const reversed = original.map((entry: any, index: number) => ({
+        groupId: entry.groupId,
+        priority: original.length - index,
+      }));
+      const { status } = await request(app, 'PUT', '/api/fallback', reversed);
+      expect(status).toBe(200);
+
+      const { body: after } = await request(app, 'GET', '/api/fallback');
+      expect(after[0].groupId).toBe(original[original.length - 1].groupId);
+
+      const restore = original.map((entry: any, index: number) => ({
+        groupId: entry.groupId,
+        priority: index + 1,
+      }));
+      await request(app, 'PUT', '/api/fallback', restore);
+    } finally {
+      setSetting('model_grouping_enabled', 'false');
+    }
   });
 
   it('POST /api/fallback/sort/intelligence sorts by cross-provider tier, then rank', async () => {

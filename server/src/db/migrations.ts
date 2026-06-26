@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { initEncryptionKey } from '../lib/crypto.js';
-import { applyBenchmarkScores } from './benchmark-scores.js';
+import { applyBenchmarkScores, applyManualBenchmarkOverrides } from './benchmark-scores.js';
+import { invalidateAliasCache, reconcileGroups, seedDefaultModelGroupAliases } from './model-groups.js';
 import { BenchmarkService } from '../services/benchmarks.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
@@ -76,6 +77,8 @@ export function migrateDbSchema(db: Database.Database) {
   migrateModelsV36PurgeSweNim(db);
   migrateModelsV37MultiSourceBenchmarks(db);
   migrateModelsV38ModelGroups(db);
+  seedModelGroupAliasesV38(db);
+  applyManualBenchmarkOverrides(db);
 
   // OpenRouter/OpenCode free-only enforcement is now a one-time versioned
   // migration (v2) — user re-enables persist across reboots.
@@ -2786,6 +2789,20 @@ function normalizeFallbackConfigGroupsV38(db: Database.Database) {
     `).run();
   });
   tx();
+}
+
+function seedModelGroupAliasesV38(db: Database.Database) {
+  try {
+    const inserted = seedDefaultModelGroupAliases(db);
+    if (inserted > 0) {
+      invalidateAliasCache();
+      const result = reconcileGroups(db);
+      normalizeFallbackConfigGroupsV38(db);
+      console.log(`[V38] Seeded ${inserted} default model group aliases; reassigned ${result.modelsReassigned} models`);
+    }
+  } catch (err: any) {
+    console.warn('[V38] Default model group alias seed skipped:', err.message);
+  }
 }
 
     // V38: Model Groups - populate model_groups and aliases from existing models.

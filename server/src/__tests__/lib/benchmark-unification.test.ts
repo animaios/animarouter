@@ -9,6 +9,7 @@ import {
   invalidateSourceWeightsCache,
   scoreToTier,
   scoreToIntelligenceRank,
+  lookupBenchmarkScore,
   TIER_BANDS,
 } from '../../db/benchmark-scores.js';
 import type Database from 'better-sqlite3';
@@ -180,6 +181,14 @@ describe('scoreToIntelligenceRank', () => {
   });
 });
 
+// ── manual benchmark overrides ──────────────────────────────────────────────
+describe('manual benchmark overrides', () => {
+  it('hardcodes Nemotron 3 Ultra to the curated benchmark score', () => {
+    expect(lookupBenchmarkScore('nvidia/nemotron-3-ultra-550b-a55b:free')).toBe(86);
+    expect(lookupBenchmarkScore('nemotron-3-ultra-free')).toBe(86);
+  });
+});
+
 // ── recomputeBenchmarkComposite (with real DB) ──────────────────────────────
 describe('recomputeBenchmarkComposite', () => {
   let db: Database.Database;
@@ -336,6 +345,25 @@ describe('recomputeBenchmarkComposite', () => {
     const row = getModel(id);
     expect(row.size_label).toBe('Frontier'); // 50 >= 45
     expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(50));
+  });
+
+  it('manual override wins over lower source composites', () => {
+    const now = new Date().toISOString();
+    const id = insertModel({
+      model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+      canonical_model_key: 'nemotron-3-ultra-550b-a55b:free',
+      aa_score: 40, aa_score_updated: now, aa_confidence: 1.0,
+      bg_score: 42, bg_score_updated: now, bg_confidence: 1.0,
+      aiiq_score: 38, aiiq_score_updated: now, aiiq_confidence: 1.0,
+    });
+
+    const weights = getWeights();
+    recomputeBenchmarkComposite(db, new Set([id]), weights);
+
+    const row = getModel(id);
+    expect(row.benchmark_score).toBe(86);
+    expect(row.size_label).toBe('Frontier');
+    expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(86));
   });
 
   it('staleness decay reduces composite for stale source (R4.5)', () => {

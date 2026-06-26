@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import { getDb } from '../db/index.js';
+import { getDb, getSetting } from '../db/index.js';
 import { getAllPenalties, getCustomWeights, getRoutingScores, getRoutingStrategy, setCustomWeights, setRoutingStrategy, refreshStatsCache } from '../services/router.js';
 import { getAllStatesView, getDisplayTier, getBoost, setBoost, resetBoost } from '../services/degradation.js';
 import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
@@ -117,14 +117,103 @@ fallbackRouter.put('/routing', (req: Request, res: Response) => {
 // Get fallback chain (with dynamic penalties)
 fallbackRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
+  const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+  if (groupingEnabled) {
+    const groups = db.prepare(`
+      SELECT fc.group_id, fc.priority,
+             mg.group_key, mg.display_name, mg.intelligence_rank,
+             mg.size_label, mg.context_window, mg.max_output_tokens,
+             mg.supports_vision, mg.supports_tools
+      FROM fallback_config fc
+      JOIN model_groups mg ON mg.id = fc.group_id
+      WHERE fc.enabled = 1 AND mg.enabled = 1
+      ORDER BY fc.priority ASC
+    `).all() as any[];
+
+    const providers = db.prepare(`
+      SELECT m.id, m.group_id, m.platform, m.model_id, m.display_name,
+             m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+             m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools
+      FROM models m
+      WHERE m.enabled = 1 AND m.group_id IS NOT NULL
+    `).all() as any[];
+
+    const keyCounts = db.prepare(`
+      SELECT platform, COUNT(*) as count
+      FROM api_keys WHERE enabled = 1
+      GROUP BY platform
+    `).all() as { platform: string; count: number }[];
+    const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
+    const providersByGroup = new Map<number, any[]>();
+    for (const provider of providers) {
+      const list = providersByGroup.get(provider.group_id);
+      if (list) list.push(provider);
+      else providersByGroup.set(provider.group_id, [provider]);
+    }
+
+    const penalties = getAllPenalties();
+    const penaltyMap = new Map(penalties.map(p => [p.modelDbId, p]));
+
+    res.json(groups.map(g => {
+      const groupProviders = providersByGroup.get(g.group_id) ?? [];
+      const groupPenalty = groupProviders.reduce((max, p) => {
+        const penalty = penaltyMap.get(p.id)?.penalty ?? 0;
+        return Math.max(max, penalty);
+      }, 0);
+      const keyCount = [...new Set(groupProviders.map(p => p.platform))]
+        .reduce((sum, platform) => sum + (keyCountMap.get(platform) ?? 0), 0);
+      const speedRanks = groupProviders.map(p => p.speed_rank).filter((rank): rank is number => typeof rank === 'number');
+
+      return {
+        isGroup: true,
+        modelDbId: -g.group_id,
+        groupId: g.group_id,
+        groupKey: g.group_key,
+        groupDisplayName: g.display_name,
+        providerCount: groupProviders.length,
+        priority: g.priority,
+        effectivePriority: g.priority + groupPenalty,
+        penalty: groupPenalty,
+        rateLimitHits: 0,
+        boost: 1,
+        enabled: true,
+        platform: groupProviders.map(p => p.platform).join(', '),
+        modelId: g.group_key,
+        displayName: g.display_name,
+        intelligenceRank: g.intelligence_rank,
+        speedRank: speedRanks.length > 0 ? Math.min(...speedRanks) : 99,
+        sizeLabel: g.size_label,
+        rpmLimit: null,
+        rpdLimit: null,
+        tpmLimit: null,
+        tpdLimit: null,
+        contextWindow: g.context_window,
+        maxOutputTokens: g.max_output_tokens,
+        supportsVision: g.supports_vision === 1,
+        supportsTools: g.supports_tools === 1,
+        keyCount,
+        providers: groupProviders.map(p => ({
+          modelDbId: p.id,
+          platform: p.platform,
+          modelId: p.model_id,
+          displayName: p.display_name,
+          keyCount: keyCountMap.get(p.platform) ?? 0,
+        })),
+      };
+    }));
+    return;
+  }
+
   const rows = db.prepare(`
     SELECT fc.model_db_id, fc.priority,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit,
-           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools
+           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
+           m.group_id, mg.group_key, mg.display_name as group_display_name
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
+    LEFT JOIN model_groups mg ON mg.id = m.group_id
     WHERE fc.enabled = 1 AND m.enabled = 1
     ORDER BY fc.priority ASC
   `).all() as any[];
@@ -165,14 +254,20 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       maxOutputTokens: r.max_output_tokens,
       supportsVision: r.supports_vision === 1,
       supportsTools: r.supports_tools === 1,
+      groupId: r.group_id,
+      groupKey: r.group_key,
+      groupDisplayName: r.group_display_name,
       keyCount: keyCountMap.get(r.platform) ?? 0,
     };
   }));
 });
 
 const updateSchema = z.array(z.object({
-  modelDbId: z.number(),
+  modelDbId: z.number().optional(),
+  groupId: z.number().optional(),
   priority: z.number(),
+}).refine(entry => entry.modelDbId !== undefined || entry.groupId !== undefined, {
+  message: 'modelDbId or groupId is required',
 }));
 
 // Update fallback chain (full replace)
@@ -184,13 +279,17 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const update = db.prepare(`
-    UPDATE fallback_config SET priority = ? WHERE model_db_id = ?
-  `);
+  const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+  const updateModel = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
+  const updateGroup = db.prepare('UPDATE fallback_config SET priority = ? WHERE group_id = ?');
 
   const updateAll = db.transaction(() => {
     for (const entry of parsed.data) {
-      update.run(entry.priority, entry.modelDbId);
+      if (groupingEnabled && entry.groupId !== undefined) {
+        updateGroup.run(entry.priority, entry.groupId);
+      } else if (entry.modelDbId !== undefined) {
+        updateModel.run(entry.priority, entry.modelDbId);
+      }
     }
   });
   updateAll();

@@ -416,6 +416,41 @@ describe('Migration idempotency', () => {
     expect(gemma.enabled).toBe(0);
   });
 
+  it('manual benchmark override pins Nemotron 3 Ultra at 86 for models and group routing', () => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    const db = initDb(':memory:');
+
+    const rows = db.prepare(`
+      SELECT platform, model_id, benchmark_score, intelligence_rank, size_label
+        FROM models
+       WHERE canonical_model_key LIKE '%nemotron-3-ultra%'
+       ORDER BY platform, model_id
+    `).all() as Array<{
+      platform: string;
+      model_id: string;
+      benchmark_score: number;
+      intelligence_rank: number;
+      size_label: string;
+    }>;
+
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    expect(rows.every(r => r.benchmark_score === 86)).toBe(true);
+    expect(rows.every(r => r.intelligence_rank === 15)).toBe(true);
+    expect(rows.every(r => r.size_label === 'Frontier')).toBe(true);
+
+    const group = db.prepare(`
+      SELECT benchmark_score, intelligence_rank, size_label
+        FROM model_groups
+       WHERE group_key = 'nemotron-3-ultra-550b-a55b'
+    `).get() as { benchmark_score: number; intelligence_rank: number; size_label: string };
+
+    expect(group).toEqual({
+      benchmark_score: 86,
+      intelligence_rank: 15,
+      size_label: 'Frontier',
+    });
+  });
+
   it('V25: dead OpenCode Zen free promos (nemotron-3-super-free, minimax-m3-free) are disabled', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     const db = initDb(':memory:');

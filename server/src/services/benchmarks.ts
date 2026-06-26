@@ -6,6 +6,7 @@ import {
   recomputeBenchmarkComposite,
   backfillCanonicalKeys,
   loadSourceWeights,
+  applyManualBenchmarkOverrides,
 } from '../db/benchmark-scores.js';
 
 export interface BenchmarkScore {
@@ -117,6 +118,8 @@ export class BenchmarkService {
         const weights = loadSourceWeights();
         recomputeBenchmarkComposite(db, allAffectedIds, weights);
       }
+
+      totalUpdated += applyManualBenchmarkOverrides(db);
 
       console.log(`[Benchmarks] Total: ${totalUpdated} models updated, ${allAffectedIds.size} composites recomputed`);
       return { updated: totalUpdated, errors };
