@@ -105,7 +105,7 @@ export async function fetchBenchGeckoScores(
       AND (bg_score IS NULL OR bg_score != ?)
   `);
 
-  const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+  const findIds = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
 
   let updated = 0;
   const tx = db.transaction(() => {
@@ -119,8 +119,8 @@ export async function fetchBenchGeckoScores(
       const result = upsert.run(score, now, canonicalKey, score);
       if (result.changes > 0) {
         updated += result.changes;
-        const row = findId.get(canonicalKey) as { id: number } | undefined;
-        if (row) affectedIds.add(row.id);
+        const rows = findIds.all(canonicalKey) as { id: number }[];
+        for (const r of rows) affectedIds.add(r.id);
       }
     }
   });

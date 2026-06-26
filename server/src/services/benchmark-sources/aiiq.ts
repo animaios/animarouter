@@ -118,13 +118,15 @@ export async function fetchAIIQScores(
       AND (aiiq_score IS NULL OR aiiq_score != ?)
   `);
 
-  const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+  const findIds = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
 
   let updated = 0;
   const tx = db.transaction(() => {
     for (const m of models) {
       const modelId = m.id || m.slug || m.name || '';
-      const score = Number(m.score ?? m.avg_score ?? m.ranking ?? 0);
+      // Use AI IQ score directly; normalize from ~[55, 135] range into [0, 100]
+      let score = Number(m.iq ?? 0);
+      if (score > 100) score = 100; // cap AI IQ above 100
       if (!modelId || score <= 0 || score > 100) continue;
 
       const canonicalKey = canonicalizeModelId(modelId);
@@ -132,8 +134,8 @@ export async function fetchAIIQScores(
       const result = upsert.run(score, now, canonicalKey, score);
       if (result.changes > 0) {
         updated += result.changes;
-        const row = findId.get(canonicalKey) as { id: number } | undefined;
-        if (row) affectedIds.add(row.id);
+        const rows = findIds.all(canonicalKey) as { id: number }[];
+        for (const r of rows) affectedIds.add(r.id);
       }
     }
   });

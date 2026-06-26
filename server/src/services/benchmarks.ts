@@ -12,7 +12,7 @@ export interface BenchmarkScore {
   modelId: string;
   platform: string;
   score: number;
-  source: 'AA' | 'BenchGecko' | 'AIIQ';
+  source: 'AA' | 'BenchGecko' | 'AIIQ' | 'Composite';
   lastUpdated: Date;
   confidence?: number; // per-source confidence: 1.0 live, 0.6 hardcoded fallback
   // Per-source breakdown
@@ -152,7 +152,7 @@ export class BenchmarkService {
       modelId: row.modelId,
       platform: row.platform,
       score: row.score,
-      source: 'AA' as const,
+      source: 'Composite' as const,
       lastUpdated: row.lastUpdated ? new Date(row.lastUpdated) : new Date(),
       aaScore: row.aaScore,
       bgScore: row.bgScore,
@@ -177,7 +177,7 @@ export class BenchmarkService {
       modelId: row.modelId,
       platform,
       score: row.score,
-      source: 'AA' as const,
+      source: 'Composite' as const,
       lastUpdated: row.lastUpdated ? new Date(row.lastUpdated) : new Date(),
       aaScore: row.aaScore,
       bgScore: row.bgScore,
