@@ -63,12 +63,6 @@ interface ChainRow {
    * Intelligence Index. NULL = no published score. When available, this is a
    * much better cross-provider intelligence signal than size_label + rank. */
   benchmark_score: number | null;
-  /** NIM speed/reliability metrics — Phase 1: SELECTed and LOGGED, never blended.
-   *  Per spec R5.1: nim_throughput_tps, nim_avg_response_ms, nim_uptime_pct.
-   */
-  nim_throughput_tps: number | null;
-  nim_avg_response_ms: number | null;
-  nim_uptime_pct: number | null;
 }
 
 export interface RouteResult {
@@ -343,8 +337,7 @@ export function refreshStatsCache(db: Database, force = false): void {
 const TIER_VALUE: Record<string, number> = { Frontier: 4, Large: 3, Medium: 2, Small: 1 };
 function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benchmarkScore: number | null): number {
   // NOTE: benchmark_score must ONLY be populated from intelligence sources
-  // (AA Intelligence Index, SWE-rebench). NIM speed/reliability scores are
-  // explicitly excluded from this column — they go into nim_throughput_tps etc.
+  // (AA Intelligence Index — sole benchmark source after SWE-rebench/NIMStats purge).
   //
   // When benchmark_score is available, it's used directly — it's empirically
   // grounded and directly comparable across providers.
@@ -436,17 +429,6 @@ function scoreChainEntry(
   const degradationFactor = getDegradationFactor(entry.model_db_id);
   const boost = getBoost(entry.model_db_id);
 
-  // Phase 1: log NIM metrics if available, but do NOT blend into routing scores
-  if (entry.nim_throughput_tps != null || entry.nim_avg_response_ms != null || entry.nim_uptime_pct != null) {
-    console.log(
-      `[Router] NIM metrics available: model=${entry.platform}/${entry.model_id}`,
-      `tps=${entry.nim_throughput_tps ?? 'N/A'}`,
-      `ttfb=${entry.nim_avg_response_ms ?? 'N/A'}ms`,
-      `uptime=${entry.nim_uptime_pct ?? 'N/A'}%`,
-      `(not blended — Phase 1)`,
-    );
-  }
-
   const baseScore = combineScore({ reliability, speed, intelligence, latency, degradationFactor }, weights);
   const score = baseScore * boost;
   return { axes: { reliability, speed, intelligence, latency }, degradationFactor, boost, score };
@@ -526,8 +508,7 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
              m.speed_rank, m.size_label,
              m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
              m.supports_tools, m.context_window, m.max_output_tokens, m.key_id,
-             m.benchmark_score,
-             m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct
+             m.benchmark_score
       FROM fallback_config fc
       JOIN models m ON m.id = fc.model_db_id
     `).all() as ChainRow[];
@@ -801,8 +782,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
            m.platform, m.model_id, m.display_name, m.intelligence_rank, m.speed_rank,
            m.size_label,
            m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
-           m.supports_tools, m.benchmark_score, m.context_window, m.max_output_tokens,
-           m.nim_throughput_tps, m.nim_avg_response_ms, m.nim_uptime_pct
+           m.supports_tools, m.benchmark_score, m.context_window, m.max_output_tokens
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE m.enabled = 1
