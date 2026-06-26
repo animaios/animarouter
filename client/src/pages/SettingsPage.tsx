@@ -12,6 +12,77 @@ import {
   type FeatureSetting,
 } from '@/lib/api'
 
+const GROUP_ORDER = [
+  'Retry & Failover',
+  'Rate Limiting',
+  'Sessions',
+  'Resilience',
+  'Scoring',
+  'Analytics & Data',
+  'Degradation',
+] as const
+
+const SETTING_ORDER: Record<string, readonly string[]> = {
+  Scoring: [
+    'routing_reliability_threshold_pct',
+    'routing_fastness_threshold_pct',
+    'routing_intelligence_threshold_pct',
+    'scoring_window_days',
+    'scoring_decay_half_life_days',
+    'scoring_cache_ttl_sec',
+  ],
+  'Retry & Failover': [
+    'global_retry_limit',
+    'transient_cooldown_sec',
+    'payment_cooldown_hours',
+    'forbidden_cooldown_hours',
+  ],
+  'Rate Limiting': ['proxy_rate_limit_rpm'],
+  Sessions: [
+    'key_affinity_enabled',
+    'sticky_session_enabled',
+    'sticky_session_ttl_min',
+    'context_handoff_mode',
+    'session_ttl_min',
+  ],
+  Resilience: [
+    'provider_fastfail_enabled',
+    'provider_fastfail_threshold',
+    'heartbeat_enabled',
+    'heartbeat_interval_min',
+    'heartbeat_timeout_ms',
+    'heartbeat_concurrency',
+    'heartbeat_exhausted_recheck_sec',
+    'heartbeat_exhausted_max_rechecks',
+    'heartbeat_activity_window_min',
+    'heartbeat_stagger_ms',
+  ],
+  'Analytics & Data': ['analytics_retention_days', 'analytics_max_rows'],
+  Degradation: [
+    'degrade_success_recovery',
+    'degrade_max_penalty',
+    'degrade_critical_threshold',
+    'degrade_minor_half_life_min',
+    'degrade_major_half_life_min',
+    'degrade_critical_half_life_min',
+    'degrade_minor_weight',
+    'degrade_major_weight',
+    'degrade_critical_weight',
+    'degrade_compound_factor',
+    'degrade_damp_strength',
+    'degrade_boost_min',
+    'degrade_boost_max',
+  ],
+}
+
+const GROUP_RANK = new Map(GROUP_ORDER.map((group, index) => [group, index]))
+
+function rankSetting(group: string, key: string): number {
+  const order = SETTING_ORDER[group]
+  const index = order?.indexOf(key) ?? -1
+  return index === -1 ? Number.MAX_SAFE_INTEGER : index
+}
+
 export default function SettingsPage() {
   const { data, refetch, isLoading, error } = useQuery({
     queryKey: ['settings', 'features'],
@@ -52,16 +123,27 @@ export default function SettingsPage() {
     })
   }, [changedKeys, data])
 
-  // Group settings by `group` field
+  // Group settings by `group` field, ordered from common controls to advanced tuning.
   const groups = useMemo(() => {
-    if (!data?.settings) return {}
-    return data.settings.reduce(
+    if (!data?.settings) return []
+    const grouped = data.settings.reduce(
       (acc, s) => {
         (acc[s.group] ??= []).push(s)
         return acc
       },
       {} as Record<string, FeatureSetting[]>,
     )
+
+    return Object.entries(grouped)
+      .map(([group, settings]) => [
+        group,
+        [...settings].sort((a, b) => rankSetting(group, a.key) - rankSetting(group, b.key)),
+      ] as const)
+      .sort(
+        ([a], [b]) =>
+          (GROUP_RANK.get(a) ?? Number.MAX_SAFE_INTEGER) -
+          (GROUP_RANK.get(b) ?? Number.MAX_SAFE_INTEGER),
+      )
   }, [data])
 
   function handleChange(key: string, value: boolean | number | string) {
@@ -110,7 +192,7 @@ export default function SettingsPage() {
       )}
 
       <div className="space-y-6">
-        {Object.entries(groups).map(([group, settings]) => (
+        {groups.map(([group, settings]) => (
           <SettingsSection
             key={group}
             title={group}

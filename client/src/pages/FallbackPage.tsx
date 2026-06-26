@@ -52,6 +52,7 @@ interface FallbackEntry {
   supportsVision: boolean
   supportsTools: boolean
   keyCount: number
+  boost: number
   // Real performance metrics
   actualTokPerSec?: number
   actualAvgTtfbMs?: number | null
@@ -92,6 +93,8 @@ interface RoutingData {
   thresholdFallbackActive: boolean
   scores: (RoutingScore & { platform: string; modelId: string; displayName: string; enabled: boolean })[]
 }
+
+type BoostResponse = { modelDbId: number; boost: number }
 
 // A merged row: fallback-chain metadata + live bandit scores.
 type Row = FallbackEntry & Partial<RoutingScore>
@@ -596,9 +599,15 @@ export default function FallbackPage() {
   const boostMutation = useMutation({
     mutationFn: ({ modelDbId, boost }: { modelDbId: number; boost: number }) =>
       boost === 1
-        ? apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
-        : apiFetch(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
-    onSuccess: () => {
+        ? apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
+        : apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
+    onSuccess: ({ modelDbId, boost }) => {
+      setLocalEntries(current =>
+        current
+          ? current.map(entry => entry.modelDbId === modelDbId ? { ...entry, boost } : entry)
+          : current,
+      )
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
     },
   })
@@ -609,6 +618,7 @@ export default function FallbackPage() {
   const allEntries = localEntries ?? entries
   // Merge fallback metadata with live scores, keyed by model.
   const scoreById = new Map((routing?.scores ?? []).map(s => [s.modelDbId, s]))
+  const boostById = new Map(allEntries.map(e => [e.modelDbId, e.boost ?? 1]))
   const configured = allEntries.filter(e => e.keyCount > 0)
   const unconfiguredPlatforms = [...new Set(allEntries.filter(e => e.keyCount === 0).map(e => e.platform))]
 
@@ -689,7 +699,7 @@ export default function FallbackPage() {
   }
 
   function handleBoost(modelDbId: number, direction: 'up' | 'down') {
-    const currentBoost = scoreById.get(modelDbId)?.boost ?? 1
+    const currentBoost = boostById.get(modelDbId) ?? scoreById.get(modelDbId)?.boost ?? 1
     let nextBoost: number
     if (direction === 'up') {
       nextBoost = currentBoost > 1.01 ? 1 : 2   // toggle: active → reset, inactive → 2.0
