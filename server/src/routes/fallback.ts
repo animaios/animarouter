@@ -123,10 +123,10 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit,
            m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
-           m.auto_disabled_at, m.enabled as model_enabled
+           m.enabled as model_enabled
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
-    WHERE m.enabled = 1 OR m.auto_disabled_at IS NOT NULL
+    WHERE m.enabled = 1
     ORDER BY fc.priority ASC
   `).all() as any[];
 
@@ -166,7 +166,6 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       supportsVision: r.supports_vision === 1,
       supportsTools: r.supports_tools === 1,
       keyCount: keyCountMap.get(r.platform) ?? 0,
-      autoDisabledAt: r.auto_disabled_at ?? null,
     };
   }));
 });
@@ -191,13 +190,13 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
   `);
 
   const updateModelEnabled = db.prepare(`
-    UPDATE models SET enabled = ?, auto_disabled_at = CASE WHEN ? = 1 THEN NULL ELSE auto_disabled_at END WHERE id = ?
+    UPDATE models SET enabled = ? WHERE id = ?
   `);
 
   const updateAll = db.transaction(() => {
     for (const entry of parsed.data) {
       update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
-      updateModelEnabled.run(entry.enabled ? 1 : 0, entry.enabled ? 1 : 0, entry.modelDbId);
+      updateModelEnabled.run(entry.enabled ? 1 : 0, entry.modelDbId);
     }
   });
   updateAll();

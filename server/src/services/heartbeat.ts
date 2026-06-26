@@ -102,9 +102,6 @@ function readConfig() {
   return { enabled: _enabled, intervalMs: _intervalMs!, activityWindowMs: _activityWindowMs!, pingTimeoutMs: _pingTimeoutMs!, staggerMs: _staggerMs! };
 }
 
-function getAutoDisableThresholdPct(): number {
-  return getFeatureSetting('heartbeat_auto_disable_pct') as number;
-}
 
 /** Reset the cached config (used in tests and after settings change). */
 export function resetHeartbeatConfig(): void {
@@ -317,29 +314,6 @@ async function runCycle(skipGate = false): Promise<number> {
       }
     }));
 
-    // ── Auto-disable evaluation ──
-    // After all pings complete, evaluate each pinged model's key health.
-    // If ≥ threshold % of keys are unhealthy, disable the model.
-    for (const key of pingedModels) {
-      const parts = key.split(':');
-      const platform = parts[0];
-      const modelDbIdStr = parts[1];
-      const modelId = parts.slice(2).join(':'); // model IDs may contain colons (e.g. qwen3-coder:480b)
-      const modelDbId = parseInt(modelDbIdStr, 10);
-      const result = evaluateAutoDisable(db, modelDbId, platform, modelId);
-      if (result?.disabled) {
-        publish({
-          type: 'heartbeat.auto_disable',
-          provider: result.platform,
-          model: result.modelId,
-          modelDbId: result.modelDbId,
-          totalKeys: result.totalKeys,
-          unhealthyKeys: result.unhealthyKeys,
-          threshold: getAutoDisableThresholdPct(),
-          at: Date.now(),
-        });
-      }
-    }
     return pingTasks.length;
   } finally {
     cycleInProgress = false;
@@ -440,58 +414,6 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
       at: Date.now(),
     });
   }
-}
-
-// ── Auto-disable evaluation ──────────────────────────────────────────────
-
-interface AutoDisableResult {
-  modelDbId: number;
-  platform: string;
-  modelId: string;
-  totalKeys: number;
-  unhealthyKeys: number;
-  disabled: boolean;
-}
-
-function evaluateAutoDisable(
-  db: ReturnType<typeof getDb>,
-  modelDbId: number,
-  platform: string,
-  modelId: string,
-): AutoDisableResult | null {
-  const threshold = getAutoDisableThresholdPct();
-  if (threshold === 0) return null; // Feature disabled by configuration
-  const allKeys = db.prepare(
-    "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
-  ).all(platform) as Array<{ id: number }>;
-
-  const total = allKeys.length;
-  if (total === 0) return null;
-
-  let unhealthy = 0;
-  for (const k of allKeys) {
-    const health = keyHealthMap.get(k.id);
-    if (health && !health.healthy) unhealthy++;
-    else if (!health) unhealthy++; // Cold key = assumed unhealthy
-  }
-
-  const pct = (unhealthy / total) * 100;
-  if (pct < threshold) return null;
-
-  const info = db.prepare(
-    "SELECT enabled FROM models WHERE id = ?"
-  ).get(modelDbId) as { enabled: number } | undefined;
-
-  if (!info || info.enabled === 0) {
-    return { modelDbId, platform, modelId, totalKeys: total, unhealthyKeys: unhealthy, disabled: false };
-  }
-
-  // Disable the model and mark it as auto-disabled
-  db.prepare(
-    "UPDATE models SET enabled = 0, auto_disabled_at = datetime('now') WHERE id = ?"
-  ).run(modelDbId);
-
-  return { modelDbId, platform, modelId, totalKeys: total, unhealthyKeys: unhealthy, disabled: true };
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

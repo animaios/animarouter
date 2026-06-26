@@ -129,20 +129,6 @@ export const REGISTRY: FeatureSettingDef[] = [
     group: 'Resilience',
     parentToggle: 'heartbeat_enabled',
   },
-  {
-    key: 'heartbeat_auto_disable_pct',
-    label: 'Auto-Disable Unhealthy Key %',
-    description:
-      'When ≥ this percentage of a model\'s API keys are unhealthy (heartbeat pings failing or 429-evicted), the model is automatically disabled. Set to 0 to disable auto-disable entirely; set to 100 to disable only when all keys fail; set to 1 for aggressive single-key triggering.',
-    type: 'number',
-    default: 0,
-    min: 0,
-    max: 100,
-    envVar: 'HEARTBEAT_AUTO_DISABLE_PCT',
-    effect: 'live',
-    group: 'Resilience',
-    parentToggle: 'heartbeat_enabled',
-  },
   // ── Sessions ──
   {
     key: 'sticky_session_enabled',

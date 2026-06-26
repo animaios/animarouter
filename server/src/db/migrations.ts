@@ -244,7 +244,6 @@ function createTables(db: Database.Database) {
   ensureBenchmarkSourceWeightsTable(db);
   ensureDegradationTable(db);
   ensureDegradationBoostColumn(db);
-  ensureModelsAutoDisabledAt(db);
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
@@ -426,14 +425,6 @@ function ensureCustomProvidersStickySessionsColumn(db: Database.Database) {
   const cols = db.prepare("PRAGMA table_info('custom_providers')").all() as Array<{ name: string }>;
   if (!cols.some(c => c.name === 'sticky_sessions_enabled')) {
     db.prepare('ALTER TABLE custom_providers ADD COLUMN sticky_sessions_enabled INTEGER NOT NULL DEFAULT 0').run();
-  }
-}
-
-/** ── Heartbeat auto-disable: timestamp column ─────────────────────────── */
-function ensureModelsAutoDisabledAt(db: Database.Database) {
-  const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
-  if (!columns.some(col => col.name === 'auto_disabled_at')) {
-    db.prepare("ALTER TABLE models ADD COLUMN auto_disabled_at DATETIME DEFAULT NULL").run();
   }
 }
 

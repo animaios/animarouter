@@ -52,7 +52,6 @@ interface FallbackEntry {
   supportsVision: boolean
   supportsTools: boolean
   keyCount: number
-  autoDisabledAt?: string | null
   // Real performance metrics
   actualTokPerSec?: number
   actualAvgTtfbMs?: number | null
@@ -435,14 +434,7 @@ function RowContent({
               {eligibilityChip}
             </span>
           )}
-          {row.autoDisabledAt && (
-            <span
-              title={`Auto-disabled at ${row.autoDisabledAt}`}
-              className="text-[10px] rounded-full px-1.5 py-0.5 bg-amber-600/15 text-amber-700 dark:bg-amber-400/15 dark:text-amber-400"
-            >
-              🤖 auto
-            </span>
-          )}
+
         </div>
         <div className="text-[11px] text-muted-foreground/70 tabular-nums mt-0.5">
           {row.rpmLimit ? `${row.rpmLimit} rpm` : ''}
