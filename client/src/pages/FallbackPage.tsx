@@ -17,7 +17,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { AlertTriangle, Archive, ChevronDown, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { AlertTriangle, Archive, ChevronDown, RotateCcw, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 
 import { Button } from '@/components/ui/button'
@@ -645,6 +645,20 @@ export default function FallbackPage() {
     },
   })
 
+  const unarchiveModelMutation = useMutation({
+    mutationFn: (modelDbId: number) =>
+      apiFetch(`/api/custom-models/${modelDbId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: true }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+      queryClient.invalidateQueries({ queryKey: ['models'] })
+    },
+  })
+
   const strategy: RoutingStrategy = routing?.strategy ?? 'balanced'
   const isManual = strategy === 'priority'
 
@@ -746,6 +760,11 @@ export default function FallbackPage() {
   function handleArchive(row: Row) {
     if (!confirm(`Archive model '${row.platform}/${row.modelId}'? It will be removed from routing.`)) return
     archiveModelMutation.mutate(row.modelDbId)
+  }
+
+  function handleUnarchive(model: Model) {
+    if (!confirm(`Unarchive model '${model.modelId}'? It will be added back to routing.`)) return
+    unarchiveModelMutation.mutate(model.id)
   }
 
   const hasChanges = localEntries !== null || pendingModelEdits.size > 0
@@ -1044,7 +1063,18 @@ export default function FallbackPage() {
                   {archivedModels.map(model => (
                     <div key={model.id} className="flex items-center gap-3 px-4 py-2 text-xs">
                       <code className="font-mono text-muted-foreground">{model.modelId}</code>
-                      <span className="text-muted-foreground">{model.displayName}</span>
+                      <span className="flex-1 text-muted-foreground">{model.displayName}</span>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="gap-1 text-muted-foreground hover:text-foreground"
+                        onClick={() => handleUnarchive(model)}
+                        disabled={unarchiveModelMutation.isPending || localEntries !== null}
+                        title={localEntries !== null ? 'Save or discard reorder changes before unarchiving' : 'Unarchive model'}
+                      >
+                        <RotateCcw className="size-3" />
+                        Unarchive
+                      </Button>
                     </div>
                   ))}
                 </div>

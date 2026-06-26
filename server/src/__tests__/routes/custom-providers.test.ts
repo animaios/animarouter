@@ -265,6 +265,30 @@ describe('Custom providers (#230)', () => {
     expect((getDb().prepare('SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id = ?').get(created.id) as any).n).toBe(0);
   });
 
+  it('PATCH /api/custom-models/:id unarchives the model and restores its fallback entry', async () => {
+    await request(app, 'POST', '/api/custom-providers', {
+      slug: 'restorable', displayName: 'Restore', baseUrl: 'http://restore.example.com/v1',
+    });
+    const { body: created } = await request(app, 'POST', '/api/custom-providers/restorable/models', {
+      modelId: 'back', displayName: 'Back',
+    });
+
+    expect((getDb().prepare('SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id = ?').get(created.id) as any).n).toBe(1);
+
+    const archived = await request(app, 'DELETE', `/api/custom-models/${created.id}`);
+    expect(archived.status).toBe(200);
+    expect((getDb().prepare('SELECT COUNT(*) AS n FROM fallback_config WHERE model_db_id = ?').get(created.id) as any).n).toBe(0);
+
+    const restored = await request(app, 'PATCH', `/api/custom-models/${created.id}`, { enabled: true });
+    expect(restored.status).toBe(200);
+
+    const model = getDb().prepare('SELECT enabled FROM models WHERE id = ?').get(created.id) as { enabled: number };
+    expect(model.enabled).toBe(1);
+    const fallback = getDb().prepare('SELECT enabled, priority FROM fallback_config WHERE model_db_id = ?').get(created.id) as { enabled: number; priority: number };
+    expect(fallback.enabled).toBe(1);
+    expect(fallback.priority).toBeGreaterThan(0);
+  });
+
   // ── Built-in provider model operations ──────────────────────────────
 
   it('POST /api/custom-providers/:slug/models accepts a built-in provider slug', async () => {
