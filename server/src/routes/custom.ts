@@ -678,7 +678,6 @@ customRouter.patch('/api/custom-models/:id', (req: Request, res: Response) => {
   if (d.enabled !== undefined) {
     updates.push('enabled = ?');
     values.push(d.enabled ? 1 : 0);
-
   }
 
   if (updates.length === 0) {

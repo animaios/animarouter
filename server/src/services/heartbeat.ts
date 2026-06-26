@@ -254,15 +254,10 @@ async function runCycle(skipGate = false): Promise<number> {
     }> = [];
 
     const seenKeys = new Set<number>();
-    const pingedModels = new Set<string>(); // "platform:modelDbId:modelId" dedup
     for (const model of models) {
       const keys = db.prepare(
         "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
       ).all(model.platform) as any[];
-
-      if (keys.length > 0) {
-        pingedModels.add(`${model.platform}:${model.model_db_id}:${model.model_id}`);
-      }
 
       for (const key of keys) {
         // Ping each key only once per cycle even if it appears for multiple models
