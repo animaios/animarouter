@@ -1,0 +1,3 @@
+[submodule "freellmproxy"]
+	path = freellmproxy
+	url = https://github.com/tashfeenahmed/freellmapi
