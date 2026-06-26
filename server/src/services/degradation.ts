@@ -472,14 +472,14 @@ export function flushDirtyStates(): Array<{ modelDbId: number; state: Degradatio
 }
 
 /**
- * Evicts entries with lazy-decayed penalty < 0.01. Returns evicted modelDbIds.
+ * Evicts entries that have decayed back to fully neutral state. Returns evicted modelDbIds.
  */
 export function evictGhostStates(): number[] {
   const evicted: number[] = [];
   for (const [modelDbId, state] of degradationStates) {
     const elapsed = Date.now() - state.lastHitAt;
     const decayed = applyDecay(state.penalty, elapsed, state.halfLifeMs);
-    if (decayed < 0.01) {
+    if (decayed < 0.01 && state.boost === 1.0) {
       degradationStates.delete(modelDbId);
       evicted.push(modelDbId);
     }
