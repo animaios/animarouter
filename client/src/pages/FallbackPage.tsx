@@ -17,7 +17,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { AlertTriangle, ChevronDown, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { AlertTriangle, Archive, ChevronDown, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 
 import { Button } from '@/components/ui/button'
@@ -30,6 +30,7 @@ import { FloatingBar } from '@/components/floating-bar'
 import { ModelsTabs } from '@/components/models-tabs'
 import { Tooltip } from '@/components/tooltip'
 import { ModelSearchBox, matchesModelQuery } from '@/components/model-search-box'
+import type { Model } from '../../../shared/types'
 
 interface FallbackEntry {
   modelDbId: number
@@ -379,6 +380,7 @@ function RowContent({
   draggable,
   dragHandle,
   onEdit,
+  onArchive,
   onBoost,
   showEligibilityChip = true,
 }: {
@@ -387,6 +389,7 @@ function RowContent({
   draggable: boolean
   dragHandle?: ReactNode
   onEdit: (row: Row) => void
+  onArchive: (row: Row) => void
   onBoost: (modelDbId: number, direction: 'up' | 'down') => void
   showEligibilityChip?: boolean
 }) {
@@ -494,6 +497,14 @@ function RowContent({
           >
             <Pencil className="size-3.5" />
           </button>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onArchive(row); }}
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors"
+            title="Archive model"
+          >
+            <Archive className="size-3.5" />
+          </button>
         </div>
       </td>
     </>
@@ -521,7 +532,7 @@ function ThumbsButton({ direction, active, onClick }: {
   )
 }
 
-function SortableRow({ row, rank, onEdit, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onEdit: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
+function SortableRow({ row, rank, onEdit, onArchive, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onEdit: (row: Row) => void; onArchive: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: row.modelDbId })
   const handle = (
     <button
@@ -543,7 +554,7 @@ function SortableRow({ row, rank, onEdit, onBoost, showEligibilityChip = true }:
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`border-b last:border-0 bg-card group ${isDragging ? 'opacity-50' : ''}`}
     >
-      <RowContent row={row} rank={rank} draggable dragHandle={handle} onEdit={onEdit} onBoost={onBoost} showEligibilityChip={showEligibilityChip} />
+      <RowContent row={row} rank={rank} draggable dragHandle={handle} onEdit={onEdit} onArchive={onArchive} onBoost={onBoost} showEligibilityChip={showEligibilityChip} />
     </tr>
   )
 }
@@ -579,6 +590,11 @@ export default function FallbackPage() {
     refetchInterval: 15_000,
   })
 
+  const { data: models = [] } = useQuery<Model[]>({
+    queryKey: ['models'],
+    queryFn: () => apiFetch('/api/models'),
+  })
+
   const saveMutation = useMutation({
     mutationFn: (data: { modelDbId: number; priority: number }[]) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
@@ -609,6 +625,23 @@ export default function FallbackPage() {
       )
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+    },
+  })
+
+  const archiveModelMutation = useMutation({
+    mutationFn: (modelDbId: number) => apiFetch(`/api/custom-models/${modelDbId}`, { method: 'DELETE' }),
+    onSuccess: (_data, modelDbId) => {
+      setPendingModelEdits(prev => {
+        if (!prev.has(modelDbId)) return prev
+        const next = new Map(prev)
+        next.delete(modelDbId)
+        return next
+      })
+      setLocalEntries(current => current?.filter(entry => entry.modelDbId !== modelDbId) ?? current)
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+      queryClient.invalidateQueries({ queryKey: ['models'] })
     },
   })
 
@@ -649,6 +682,7 @@ export default function FallbackPage() {
     ...entriesWithPerformance.find(p => p.modelDbId === e.modelDbId),
     ...e
   }))
+  const archivedModels = models.filter(model => !model.enabled)
   // The unfiltered set is what drag-reorder operates on. If we let drag
   // fire on a filtered slice, `setLocalEntries` would persist that *slice*
   // and silently drop the rows the user hadn't seen. So when a query is
@@ -707,6 +741,11 @@ export default function FallbackPage() {
       nextBoost = currentBoost < 0.99 ? 1 : 0.5  // toggle: active → reset, inactive → 0.5
     }
     boostMutation.mutate({ modelDbId, boost: nextBoost })
+  }
+
+  function handleArchive(row: Row) {
+    if (!confirm(`Archive model '${row.platform}/${row.modelId}'? It will be removed from routing.`)) return
+    archiveModelMutation.mutate(row.modelDbId)
   }
 
   const hasChanges = localEntries !== null || pendingModelEdits.size > 0
@@ -855,7 +894,7 @@ export default function FallbackPage() {
         {/* Unified routing / fallback table */}
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : ordered.length === 0 && query === '' ? (
+        ) : ordered.length === 0 && query === '' && archivedModels.length === 0 ? (
           <div className="rounded-3xl border border-dashed p-8 text-center">
             <p className="text-sm text-muted-foreground">
               No models available. Add API keys on the <a href="/keys" className="underline text-foreground">Keys page</a> first.
@@ -882,7 +921,9 @@ export default function FallbackPage() {
             {ordered.length === 0 ? (
               <div className="rounded-2xl border border-dashed p-8 text-center">
                 <p className="text-sm text-muted-foreground">
-                  No models match <code className="rounded-md bg-muted px-1.5 py-0.5 font-mono">{query}</code>.
+                  {query === ''
+                    ? 'No active models available.'
+                    : <>No models match <code className="rounded-md bg-muted px-1.5 py-0.5 font-mono">{query}</code>.</>}
                 </p>
               </div>
             ) : (
@@ -927,7 +968,7 @@ export default function FallbackPage() {
                           <SortableContext items={activeRows.map(e => e.modelDbId)} strategy={verticalListSortingStrategy}>
                             <tbody>
                               {activeRows.map((row, i) => (
-                                <SortableRow key={row.modelDbId} row={row} rank={i + 1} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                                <SortableRow key={row.modelDbId} row={row} rank={i + 1} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
                               ))}
                             </tbody>
                           </SortableContext>
@@ -941,7 +982,7 @@ export default function FallbackPage() {
                         <tbody>
                           {activeRows.map((row, i) => (
                             <tr key={row.modelDbId} className="border-b last:border-0 group">
-                              <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
+                              <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
                             </tr>
                           ))}
                         </tbody>
@@ -968,7 +1009,7 @@ export default function FallbackPage() {
                         <tbody className="bg-card/50">
                           {filteredRows.map((row) => (
                             <tr key={row.modelDbId} className="border-b last:border-0 group opacity-[0.55]">
-                              <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onBoost={handleBoost} />
+                              <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} />
                             </tr>
                           ))}
                         </tbody>
@@ -990,7 +1031,24 @@ export default function FallbackPage() {
                 {unconfiguredPlatforms.length > 0 && (
                   <p className="text-xs text-muted-foreground">Hidden (no keys): {unconfiguredPlatforms.join(', ')}</p>
                 )}
+
               </>
+            )}
+            {archivedModels.length > 0 && (
+              <details className="group border rounded-xl overflow-hidden">
+                <summary className="px-4 py-2.5 text-xs text-muted-foreground cursor-pointer bg-muted/30 hover:bg-muted/50 transition-colors list-none flex items-center justify-between">
+                  <span>Archived models ({archivedModels.length})</span>
+                  <ChevronDown className="size-3.5 group-open:rotate-180 transition-transform" />
+                </summary>
+                <div className="border-t divide-y bg-card/50">
+                  {archivedModels.map(model => (
+                    <div key={model.id} className="flex items-center gap-3 px-4 py-2 text-xs">
+                      <code className="font-mono text-muted-foreground">{model.modelId}</code>
+                      <span className="text-muted-foreground">{model.displayName}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
             )}
           </section>
         )}
