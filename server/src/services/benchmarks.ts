@@ -1,7 +1,8 @@
 import { getDb } from '../db/index.js';
+import { fetchAAScores } from '../db/benchmark-scores.js';
+import { fetchBenchGeckoScores } from './benchmark-sources/benchgecko.js';
+import { fetchAIIQScores } from './benchmark-sources/aiiq.js';
 import {
-  fetchAAScores,
-  canonicalizeModelId,
   recomputeBenchmarkComposite,
   backfillCanonicalKeys,
   loadSourceWeights,
@@ -11,11 +12,13 @@ export interface BenchmarkScore {
   modelId: string;
   platform: string;
   score: number;
-  source: 'AA';
+  source: 'AA' | 'BenchGecko' | 'AIIQ';
   lastUpdated: Date;
   confidence?: number; // per-source confidence: 1.0 live, 0.6 hardcoded fallback
   // Per-source breakdown
   aaScore?: number | null;
+  bgScore?: number | null;
+  aiiqScore?: number | null;
 }
 
 export class BenchmarkService {
@@ -40,8 +43,7 @@ export class BenchmarkService {
 
   /**
    * Update all benchmark scores from all sources in parallel.
-   * Currently only AA (Artificial Analysis) is fetched live via API.
-   * SWE-rebench HTML scraper and NIMStats were purged — API-only sources only.
+   * AA (Artificial Analysis), BenchGecko, and AI IQ are fetched live via API.
    *
    * Uses Promise.allSettled() — partial failures don't block other sources.
    * After all sources complete, recomputes benchmark_score composites
@@ -77,6 +79,26 @@ export class BenchmarkService {
             throw new Error('AA: ' + result.errors.join(', '));
           }
           return { name: 'AA', updated: result.updated, affectedIds: result.affectedIds };
+        })(),
+
+        // BenchGecko source
+        (async () => {
+          console.log('[Benchmarks] Fetching BenchGecko scores...');
+          const result = await fetchBenchGeckoScores(db);
+          if (result.errors.length > 0) {
+            throw new Error('BenchGecko: ' + result.errors.join(', '));
+          }
+          return { name: 'BenchGecko', updated: result.updated, affectedIds: result.affectedIds };
+        })(),
+
+        // AI IQ source
+        (async () => {
+          console.log('[Benchmarks] Fetching AI IQ scores...');
+          const result = await fetchAIIQScores(db);
+          if (result.errors.length > 0) {
+            throw new Error('AIIQ: ' + result.errors.join(', '));
+          }
+          return { name: 'AIIQ', updated: result.updated, affectedIds: result.affectedIds };
         })(),
       ]);
 
@@ -118,7 +140,9 @@ export class BenchmarkService {
     const rows = db.prepare(`
       SELECT model_id as modelId, platform, benchmark_score as score,
              last_benchmark_update as lastUpdated,
-             aa_score as aaScore
+             aa_score as aaScore,
+             bg_score as bgScore,
+             aiiq_score as aiiqScore
       FROM models
       WHERE benchmark_score IS NOT NULL
       ORDER BY benchmark_score DESC
@@ -131,6 +155,8 @@ export class BenchmarkService {
       source: 'AA' as const,
       lastUpdated: row.lastUpdated ? new Date(row.lastUpdated) : new Date(),
       aaScore: row.aaScore,
+      bgScore: row.bgScore,
+      aiiqScore: row.aiiqScore,
     }));
   }
 
@@ -139,7 +165,9 @@ export class BenchmarkService {
     const rows = db.prepare(`
       SELECT model_id as modelId, benchmark_score as score,
              last_benchmark_update as lastUpdated,
-             aa_score as aaScore
+             aa_score as aaScore,
+             bg_score as bgScore,
+             aiiq_score as aiiqScore
       FROM models
       WHERE platform = ? AND benchmark_score IS NOT NULL
       ORDER BY benchmark_score DESC
@@ -152,6 +180,8 @@ export class BenchmarkService {
       source: 'AA' as const,
       lastUpdated: row.lastUpdated ? new Date(row.lastUpdated) : new Date(),
       aaScore: row.aaScore,
+      bgScore: row.bgScore,
+      aiiqScore: row.aiiqScore,
     }));
   }
 }
