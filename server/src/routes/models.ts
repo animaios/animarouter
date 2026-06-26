@@ -3,7 +3,14 @@ import type { Request, Response } from 'express';
 import { getDb, getSetting } from '../db/index.js';
 import { hasProvider, getAllProviders } from '../providers/index.js';
 import { syncModelsFromProvider } from './custom.js';
-import { invalidateAliasCache, propagateGroupProperties, reconcileGroups } from '../db/model-groups.js';
+import {
+  invalidateAliasCache,
+  normalizeGroupAlias,
+  normalizeGroupKey,
+  propagateGroupProperties,
+  reconcileGroups,
+  syncFallbackConfigGroupIds,
+} from '../db/model-groups.js';
 
 export const modelsRouter = Router();
 
@@ -11,9 +18,11 @@ export const modelsRouter = Router();
 modelsRouter.get('/', (_req: Request, res: Response) => {
   const db = getDb();
   const models = db.prepare(`
-    SELECT m.*, fc.priority, fc.enabled as fallback_enabled
+    SELECT m.*, fc.priority, fc.enabled as fallback_enabled,
+           mg.group_key, mg.display_name as group_display_name
     FROM models m
     LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+    LEFT JOIN model_groups mg ON mg.id = m.group_id
     ORDER BY COALESCE(fc.priority, m.benchmark_score, m.intelligence_rank) ASC
   `).all() as any[];
 
@@ -48,6 +57,9 @@ modelsRouter.get('/', (_req: Request, res: Response) => {
     supportsTools: m.supports_tools === 1,
     priority: m.priority,
     fallbackEnabled: m.fallback_enabled === 1,
+    groupId: m.group_id,
+    groupKey: m.group_key,
+    groupDisplayName: m.group_display_name,
     hasProvider: hasProvider(m.platform),
     keyCount: keyCountMap.get(m.platform) ?? 0,
   }));
@@ -139,44 +151,46 @@ modelsRouter.get('/groups', (_req: Request, res: Response) => {
 // POST /api/models/groups/aliases — create an alias
 modelsRouter.post('/groups/aliases', (req: Request, res: Response) => {
   const { alias, groupKey } = req.body as { alias?: string; groupKey?: string };
-  if (!alias || !groupKey) {
+  if (!alias?.trim() || !groupKey?.trim()) {
     res.status(400).json({ error: 'alias and groupKey are required' });
     return;
   }
 
   const db = getDb();
+  const normalizedAlias = normalizeGroupAlias(alias);
+  const normalizedGroupKey = normalizeGroupKey(groupKey);
+
   // Verify the target group exists
-  const group = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get(groupKey) as { id: number } | undefined;
+  const group = db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get(normalizedGroupKey) as { id: number } | undefined;
   if (!group) {
-    res.status(404).json({ error: `Group "${groupKey}" not found` });
+    res.status(404).json({ error: `Group "${normalizedGroupKey}" not found` });
     return;
   }
 
-  try {
-    db.prepare('INSERT INTO model_group_aliases (alias, group_key) VALUES (?, ?)').run(alias, groupKey);
-  } catch (err: any) {
-    if (err.message?.includes('UNIQUE')) {
-      res.status(409).json({ error: `Alias "${alias}" already exists` });
-      return;
-    }
-    throw err;
-  }
+  const write = db.prepare(`
+    INSERT INTO model_group_aliases (alias, group_key)
+    VALUES (?, ?)
+    ON CONFLICT(alias) DO UPDATE SET group_key = excluded.group_key
+    WHERE model_group_aliases.group_key != excluded.group_key
+  `).run(normalizedAlias, normalizedGroupKey);
 
   invalidateAliasCache();
-  reconcileGroups(db);
-  res.status(201).json({ alias, groupKey });
+  const result = write.changes > 0 ? reconcileGroups(db) : { groupsCreated: 0, modelsReassigned: 0 };
+  if (write.changes > 0) syncFallbackConfigGroupIds(db);
+  res.status(write.changes > 0 ? 201 : 200).json({ alias: normalizedAlias, groupKey: normalizedGroupKey, ...result });
 });
 
 // DELETE /api/models/groups/aliases/:alias — delete an alias
 modelsRouter.delete('/groups/aliases/:alias', (req: Request, res: Response) => {
   const db = getDb();
-  const result = db.prepare('DELETE FROM model_group_aliases WHERE alias = ?').run(req.params.alias);
+  const result = db.prepare('DELETE FROM model_group_aliases WHERE alias = ?').run(normalizeGroupAlias(req.params.alias));
   if (result.changes === 0) {
     res.status(404).json({ error: 'Alias not found' });
     return;
   }
   invalidateAliasCache();
   reconcileGroups(db);
+  syncFallbackConfigGroupIds(db);
   res.json({ success: true });
 });
 

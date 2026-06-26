@@ -9,6 +9,7 @@ import {
   propagateAllGroupProperties,
   reconcileGroups,
   ensureModelInGroup,
+  seedDefaultModelGroupAliases,
 } from '../../db/model-groups.js';
 import { initDb, getDb, setSetting } from '../../db/index.js';
 
@@ -93,6 +94,18 @@ describe('alias cache', () => {
     invalidateAliasCache();
     const cache3 = getAliasCache(db);
     expect(cache3.get('late-alias')).toBe('late-group');
+  });
+
+  it('seeds default aliases for OpenCode Zen provider variants', () => {
+    db.prepare('DELETE FROM model_group_aliases').run();
+
+    const inserted = seedDefaultModelGroupAliases(db);
+    const cache = loadAliasCache(db);
+
+    expect(inserted).toBeGreaterThanOrEqual(3);
+    expect(cache.get('deepseek-v4-flash-free')).toBe('deepseek-v4-flash');
+    expect(cache.get('nemotron-3-ultra-free')).toBe('nemotron-3-ultra-550b-a55b');
+    expect(cache.get('nemotron-3-ultra-550b-a55b:free')).toBe('nemotron-3-ultra-550b-a55b');
   });
 });
 

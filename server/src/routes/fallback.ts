@@ -122,9 +122,11 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label, m.rpm_limit, m.rpd_limit,
            m.tpm_limit, m.tpd_limit,
-           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools
+           m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
+           m.group_id, mg.group_key, mg.display_name as group_display_name
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
+    LEFT JOIN model_groups mg ON mg.id = m.group_id
     WHERE fc.enabled = 1 AND m.enabled = 1
     ORDER BY fc.priority ASC
   `).all() as any[];
@@ -165,6 +167,9 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
       maxOutputTokens: r.max_output_tokens,
       supportsVision: r.supports_vision === 1,
       supportsTools: r.supports_tools === 1,
+      groupId: r.group_id,
+      groupKey: r.group_key,
+      groupDisplayName: r.group_display_name,
       keyCount: keyCountMap.get(r.platform) ?? 0,
     };
   }));
