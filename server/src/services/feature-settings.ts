@@ -232,6 +232,19 @@ export const REGISTRY: FeatureSettingDef[] = [
     group: 'Sessions',
   },
 
+  // ── Models ──
+  {
+    key: 'model_grouping_enabled',
+    label: 'Model Grouping',
+    description:
+      'Treat provider variants of the same underlying model as one routing group. The router chooses the best healthy provider inside the selected group.',
+    type: 'boolean',
+    default: false,
+    envVar: 'MODEL_GROUPING_ENABLED',
+    effect: 'live',
+    group: 'Models',
+  },
+
   // ── Retry & Failover ──
   {
     key: 'global_retry_limit',

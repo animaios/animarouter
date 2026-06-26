@@ -18,19 +18,21 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { AlertTriangle, Archive, ChevronDown, RotateCcw, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { AlertTriangle, Archive, ChevronDown, GitMerge, RotateCcw, SlidersHorizontal, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
 import { FloatingBar } from '@/components/floating-bar'
 import { ModelsTabs } from '@/components/models-tabs'
 import { Tooltip } from '@/components/tooltip'
 import { ModelSearchBox, matchesModelQuery } from '@/components/model-search-box'
+import { addToast } from '@/lib/toast'
 import type { Model } from '../../../shared/types'
 
 interface FallbackEntry {
@@ -53,6 +55,9 @@ interface FallbackEntry {
   maxOutputTokens: number | null
   supportsVision: boolean
   supportsTools: boolean
+  groupId?: number | null
+  groupKey?: string | null
+  groupDisplayName?: string | null
   keyCount: number
   boost: number
   // Real performance metrics
@@ -97,6 +102,16 @@ interface RoutingData {
 }
 
 type BoostResponse = { modelDbId: number; boost: number }
+
+interface ModelGroup {
+  id: number
+  groupKey: string
+  displayName: string
+  modelCount: number
+  enabled: boolean
+}
+
+const UNGROUPED_GROUP_KEY = '__ungrouped__'
 
 // A merged row: fallback-chain metadata + live bandit scores.
 type Row = FallbackEntry & Partial<RoutingScore>
@@ -252,11 +267,17 @@ function AxisBar({ value, color }: { value: number | undefined; color: string })
 // ── One row of the unified table ────────────────────────────────────────────
 function EditModelModal({
   model,
+  groups,
+  assigningGroup,
   onClose,
+  onAssignGroup,
   onQueueEdit,
 }: {
   model: Row
+  groups: ModelGroup[]
+  assigningGroup: boolean
   onClose: () => void
+  onAssignGroup: (model: Row, groupKey: string) => void
   onQueueEdit: (modelDbId: number, body: Record<string, unknown>) => void
 }) {
   const [displayName, setDisplayName] = useState(model.displayName)
@@ -271,6 +292,11 @@ function EditModelModal({
   const [rpdLimit, setRpdLimit] = useState(model.rpdLimit ?? null)
   const [tpmLimit, setTpmLimit] = useState(model.tpmLimit ?? null)
   const [tpdLimit, setTpdLimit] = useState(model.tpdLimit ?? null)
+  const [selectedGroupKey, setSelectedGroupKey] = useState(model.groupKey ?? UNGROUPED_GROUP_KEY)
+
+  const currentGroupKey = model.groupKey ?? UNGROUPED_GROUP_KEY
+  const groupChanged = selectedGroupKey !== currentGroupKey
+  const availableGroups = groups.filter(group => group.enabled || group.groupKey === model.groupKey)
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -314,6 +340,42 @@ function EditModelModal({
           <div className="space-y-1.5">
             <Label className="text-xs">Display name</Label>
             <Input value={displayName} onChange={e => setDisplayName(e.target.value)} />
+          </div>
+          <div className="space-y-2 rounded-xl border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <Label className="text-xs">Model group</Label>
+              <span className="truncate text-xs text-muted-foreground">
+                {model.groupDisplayName ?? model.groupKey ?? 'Ungrouped'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Select value={selectedGroupKey} onValueChange={(value) => setSelectedGroupKey(value ?? '')}>
+                <SelectTrigger className="w-full min-w-0">
+                  <SelectValue placeholder="Select group" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={UNGROUPED_GROUP_KEY}>Ungrouped</SelectItem>
+                  {availableGroups.map(group => (
+                    <SelectItem key={group.id} value={group.groupKey}>
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="truncate">{group.displayName}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">{group.modelCount}</span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                size="sm"
+                className="shrink-0 gap-1.5"
+                disabled={!groupChanged || assigningGroup}
+                onClick={() => onAssignGroup(model, selectedGroupKey)}
+              >
+                <GitMerge className="size-3.5" />
+                {assigningGroup ? 'Applying...' : 'Apply'}
+              </Button>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -406,6 +468,14 @@ function RowContent({
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-sm">{row.displayName}</span>
           <span className="text-xs text-muted-foreground">{row.platform}</span>
+          {row.groupKey && (
+            <span
+              title={row.groupKey}
+              className="text-[10px] rounded-full px-1.5 py-0.5 border border-muted-foreground/25 text-muted-foreground bg-muted/30"
+            >
+              {row.groupDisplayName ?? row.groupKey}
+            </span>
+          )}
           {row.supportsVision && (
             <span
               title="Accepts image input"
@@ -596,6 +666,11 @@ export default function FallbackPage() {
     queryFn: () => apiFetch('/api/models'),
   })
 
+  const { data: modelGroups = [] } = useQuery<ModelGroup[]>({
+    queryKey: ['models', 'groups'],
+    queryFn: () => apiFetch('/api/models/groups'),
+  })
+
   const saveMutation = useMutation({
     mutationFn: (data: { modelDbId: number; priority: number }[]) =>
       apiFetch('/api/fallback', { method: 'PUT', body: JSON.stringify(data) }),
@@ -657,6 +732,28 @@ export default function FallbackPage() {
       queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
+    },
+  })
+
+  const assignGroupMutation = useMutation({
+    mutationFn: ({ alias, groupKey }: { alias: string; groupKey: string }) =>
+      groupKey === UNGROUPED_GROUP_KEY
+        ? apiFetch(`/api/models/groups/aliases/${encodeURIComponent(alias)}`, { method: 'DELETE' })
+        : apiFetch('/api/models/groups/aliases', {
+            method: 'POST',
+            body: JSON.stringify({ alias, groupKey }),
+          }),
+    onSuccess: () => {
+      setEditingModel(null)
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+      queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['models', 'groups'] })
+      addToast({ kind: 'success', title: 'Model group updated' })
+    },
+    onError: (err: Error) => {
+      addToast({ kind: 'warning', title: 'Group update failed', description: err.message })
     },
   })
 
@@ -764,6 +861,10 @@ export default function FallbackPage() {
 
   function handleUnarchive(model: Model) {
     unarchiveModelMutation.mutate(model.id)
+  }
+
+  function handleAssignGroup(row: Row, groupKey: string) {
+    assignGroupMutation.mutate({ alias: row.modelId, groupKey })
   }
 
   const hasChanges = localEntries !== null || pendingModelEdits.size > 0
@@ -998,13 +1099,13 @@ export default function FallbackPage() {
                     <div className="rounded-2xl border overflow-x-auto">
                       <table className="w-full text-sm">
                         {tableHead}
-                        {activeRows.map((row, i) => (
-                          <motion.tbody key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }}>
-                            <tr className="border-b last:border-0 group">
+                        <tbody>
+                          {activeRows.map((row, i) => (
+                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group">
                               <RowContent row={row} rank={i + 1} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} showEligibilityChip={!isFailOpen} />
-                            </tr>
-                          </motion.tbody>
-                        ))}
+                            </motion.tr>
+                          ))}
+                        </tbody>
                       </table>
                     </div>
                   )
@@ -1025,13 +1126,13 @@ export default function FallbackPage() {
                     </summary>
                     <div className="border-t overflow-x-auto">
                       <table className="w-full text-sm">
-                        {filteredRows.map((row) => (
-                          <motion.tbody key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="bg-card/50">
-                            <tr className="border-b last:border-0 group opacity-[0.55]">
+                        <tbody>
+                          {filteredRows.map((row) => (
+                            <motion.tr key={row.modelDbId} layout="position" layoutId={`model-${row.modelDbId}`} transition={{ type: 'spring', stiffness: 350, damping: 30 }} className="border-b last:border-0 group bg-card/50 opacity-[0.55]">
                               <RowContent row={row} rank={row.priority} draggable={false} onEdit={setEditingModel} onArchive={handleArchive} onBoost={handleBoost} />
-                            </tr>
-                          </motion.tbody>
-                        ))}
+                            </motion.tr>
+                          ))}
+                        </tbody>
                       </table>
                     </div>
                   </details>
@@ -1086,7 +1187,10 @@ export default function FallbackPage() {
         {editingModel && (
           <EditModelModal
             model={editingModel}
+            groups={modelGroups}
+            assigningGroup={assignGroupMutation.isPending}
             onClose={() => setEditingModel(null)}
+            onAssignGroup={handleAssignGroup}
             onQueueEdit={(id, body) => setPendingModelEdits(prev => { const next = new Map(prev); next.set(id, body); return next })}
           />
         )}

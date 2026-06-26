@@ -7,6 +7,12 @@ import { canonicalizeModelId, backfillCanonicalKeys } from './benchmark-scores.j
 
 let aliasCache: Map<string, string> | null = null;
 
+export const DEFAULT_MODEL_GROUP_ALIASES: Array<{ alias: string; groupKey: string }> = [
+  { alias: 'deepseek-v4-flash-free', groupKey: 'deepseek-v4-flash' },
+  { alias: 'nemotron-3-ultra-free', groupKey: 'nvidia/nemotron-3-ultra-550b-a55b' },
+  { alias: 'nvidia/nemotron-3-ultra-550b-a55b:free', groupKey: 'nvidia/nemotron-3-ultra-550b-a55b' },
+];
+
 export function getAliasCache(db: Database.Database): Map<string, string> {
   if (!aliasCache) aliasCache = loadAliasCache(db);
   return aliasCache;
@@ -24,6 +30,78 @@ export function loadAliasCache(db: Database.Database): Map<string, string> {
     map.set(row.alias, row.group_key);
   }
   return map;
+}
+
+export function normalizeGroupAlias(alias: string): string {
+  return canonicalizeModelId(alias.trim());
+}
+
+export function normalizeGroupKey(groupKey: string): string {
+  return canonicalizeModelId(groupKey.trim());
+}
+
+export function seedDefaultModelGroupAliases(db: Database.Database): number {
+  const insert = db.prepare('INSERT OR IGNORE INTO model_group_aliases (alias, group_key) VALUES (?, ?)');
+  let inserted = 0;
+
+  const tx = db.transaction(() => {
+    for (const item of DEFAULT_MODEL_GROUP_ALIASES) {
+      const result = insert.run(normalizeGroupAlias(item.alias), normalizeGroupKey(item.groupKey));
+      inserted += result.changes;
+    }
+  });
+  tx();
+
+  return inserted;
+}
+
+export function syncFallbackConfigGroupIds(db: Database.Database): void {
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE fallback_config
+         SET group_id = NULL
+       WHERE group_id IS NOT NULL
+         AND id NOT IN (
+           SELECT f.id
+             FROM fallback_config f
+             JOIN models m ON m.id = f.model_db_id
+            WHERE m.group_id IS NOT NULL
+              AND f.group_id = m.group_id
+              AND f.id = (
+                SELECT f2.id
+                  FROM fallback_config f2
+                  JOIN models m2 ON m2.id = f2.model_db_id
+                 WHERE m2.group_id = m.group_id
+                 ORDER BY f2.priority ASC, f2.id ASC
+                 LIMIT 1
+              )
+         )
+    `).run();
+
+    db.prepare(`
+      UPDATE fallback_config
+         SET group_id = (
+           SELECT m.group_id
+             FROM models m
+            WHERE m.id = fallback_config.model_db_id
+         )
+       WHERE id IN (
+         SELECT f.id
+           FROM fallback_config f
+           JOIN models m ON m.id = f.model_db_id
+          WHERE m.group_id IS NOT NULL
+            AND f.id = (
+              SELECT f2.id
+                FROM fallback_config f2
+                JOIN models m2 ON m2.id = f2.model_db_id
+               WHERE m2.group_id = m.group_id
+               ORDER BY f2.priority ASC, f2.id ASC
+               LIMIT 1
+            )
+       )
+    `).run();
+  });
+  tx();
 }
 
 // ─── GROUP KEY RESOLUTION ────────────────────────────────────────────────

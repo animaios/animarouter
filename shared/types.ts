@@ -133,6 +133,9 @@ export interface Model {
   enabled: boolean;
   supportsVision: boolean;
   supportsTools: boolean;
+  groupId?: number | null;
+  groupKey?: string | null;
+  groupDisplayName?: string | null;
 }
 
 export interface ModelListRow {
