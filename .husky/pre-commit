@@ -1,5 +1,5 @@
 # Only format staged files
-staged_files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|json)$')
+staged_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.json')
 if [ -n "$staged_files" ]; then
   npx biome check --write $staged_files
 fi

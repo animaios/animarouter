@@ -183,10 +183,10 @@ function pingWeightedShuffle(keys: KeyRow[], modelId: string): KeyRow[] {
 
   const scored = keys.map((key) => {
     const health = getKeyHealth(key.id, modelId);
-    const latency = health?.lastPingLatencyMs ?? 2000; // unknown keys get 2s default
+    const latency = Math.max(0, health?.lastPingLatencyMs ?? 2000); // unknown keys get 2s default, clamp to >= 0
     const weight = 1 / (latency + BASELINE_LATENCY_MS);
     // Exponential noise: -ln(U) / weight. Higher weight → smaller score → picked earlier.
-    const noise = -Math.log(1 - Math.random() + 1e-15);
+    const noise = -Math.log(Math.random() || 1e-15);
     const score = noise / weight;
     return { key, score };
   });
