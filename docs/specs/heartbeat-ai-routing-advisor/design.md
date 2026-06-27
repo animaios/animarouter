@@ -5,7 +5,7 @@
 The advisory system operates at **two levels**:
 
 1. **Heartbeat-level advisory** (existing v1 design) — each heartbeat ping carries operational telemetry, the model's response is parsed for routing adjustments.
-2. **Request-level Rabbit Shake AI routing strategy** (v2 expansion) — when the Rabbit/AI routing strategy is active and the request qualifies, the router executes a 3-step sequential multi-model pipeline instead of a single model call, injecting divergent reasoning to break logic loops.
+2. **Request-level Rabbit routing strategy** (v2 expansion) — when the Rabbit routing strategy is active and the request qualifies, the router executes a 3-step sequential multi-model pipeline instead of a single model call, injecting divergent reasoning to break logic loops.
 
 Both levels share the same **Context Bridge & Sanitization** layer, which prevents token collisions and context corruption when crossing provider boundaries.
 
@@ -35,7 +35,7 @@ The heartbeat advisor runs passively during health checks. The Rabbit Shake osci
 │                                                              │
 │  Normal path: single model → response                       │
 │                                                              │
-│  ★ New: Rabbit Shake AI strategy path (when eligible):      │
+│  ★ New: Rabbit strategy path (when eligible):               │
 │    1. [Foundation] Smartest-weighted model → base           │
 │       ↓ Context Bridge (sanitize + handoff)                 │
 │    2. [Injection] Divergent eligible model → critique       │
@@ -57,22 +57,22 @@ The heartbeat advisor runs passively during health checks. The Rabbit Shake osci
 | `providers/google.ts` (`sanitizeForGemini`) | Already strips provider-specific schema artifacts. We generalize this pattern for all providers. |
 | `providers/base.ts` (`readSseStream`) | Stream parsing already normalizes OpenAI-wire SSE into a common format. The oscillator builds on this for intermediate-step streaming. |
 
-### 1.3 Rabbit Shake as a Routing Strategy (AI Mode)
+### 1.3 Rabbit Shake as a Routing Strategy
 
-Rabbit Shake should be exposed as a first-class routing strategy, labeled **AI mode** in operator-facing controls. It is distinct from the existing single-call strategies:
+Rabbit Shake should be exposed as a first-class routing strategy, labeled **Rabbit** in operator-facing controls. It is distinct from the existing single-call strategies:
 
 | Strategy | Request behavior |
 |---|---|
 | `priority` | Manual order, single-model routing |
 | `balanced` / `smartest` / `fastest` / `reliable` / `custom` | Weighted single-model routing |
-| `ai` / Rabbit Shake | Smartest-weight foundation selection plus optional 3-step oscillator for eligible reasoning prompts |
+| `rabbit` / Rabbit | Smartest-weight foundation selection plus optional 3-step oscillator for eligible reasoning prompts |
 
-AI mode must reuse the same route eligibility filters as normal routing: enabled model, matching capabilities, available key, health/degradation state, budget limits, and request constraints. It should not use a static provider/model pair.
+Rabbit mode must reuse the same route eligibility filters as normal routing: enabled model, matching capabilities, available key, health/degradation state, budget limits, and request constraints. It should not use a static provider/model pair.
 
-Foundation candidates are ordered with the existing **Smartest** preset unless the operator explicitly configures custom AI weights:
+Foundation candidates are ordered with the existing **Smartest** preset unless the operator explicitly configures custom Rabbit weights:
 
 ```typescript
-const RABBIT_AI_DEFAULT_WEIGHTS: RoutingWeights = {
+const RABBIT_DEFAULT_WEIGHTS: RoutingWeights = {
   intelligence: 0.45,
   reliability: 0.30,
   latency: 0.15,
@@ -82,7 +82,7 @@ const RABBIT_AI_DEFAULT_WEIGHTS: RoutingWeights = {
 
 Those weights produce the ordered foundation candidate list. Step 1 tries candidates in that order until one succeeds or the list is exhausted. The injection model is selected after the foundation succeeds, using the same eligible pool but preferring a different provider or tier so it can add a genuinely different reasoning angle.
 
-If the request is not oscillator-eligible, if load shedding is active, or if all Step 1 foundation candidates fail, AI mode must fall back to normal best-eligible single-model routing using the same Smartest-weight ordering.
+If the request is not oscillator-eligible, if load shedding is active, or if all Step 1 foundation candidates fail, Rabbit mode must fall back to normal best-eligible single-model routing using the same Smartest-weight ordering.
 
 ### 1.4 Key Insight: The Budget Trick (unchanged from v1)
 
@@ -153,7 +153,7 @@ interface AdvisoryPayload {
   routing: {
     strategy: string;
     customWeights?: Record<string, number>;
-    aiWeights?: Record<string, number>;
+    rabbitWeights?: Record<string, number>;
   };
 
   // ─── ★ NEW: Oscillator metrics ─────────────────────────────
@@ -217,7 +217,7 @@ interface OscillatorConfig {
 
   /**
    * How to select the foundation model (Step 1 & 3):
-   * - 'auto' (default): eligible models ordered by Rabbit AI / Smartest weights
+   * - 'auto' (default): eligible models ordered by Rabbit / Smartest weights
    * - 'top_rank': the model with intelligence_rank = 1 (if available)
    * - model_db_id: explicit model DB ID override
    *
@@ -242,8 +242,8 @@ interface OscillatorConfig {
    */
   injectionSelection: 'divergent' | 'top_rank' | 'different_tier' | number;
 
-  /** Optional AI-mode weights. Defaults to the existing Smartest preset. */
-  aiWeights?: RoutingWeights;
+  /** Optional Rabbit-mode weights. Defaults to the existing Smartest preset. */
+  rabbitWeights?: RoutingWeights;
 
   /** Minimum intelligence gap required between foundation and injection models */
   minIntelligenceGap: number;  // default: 10 (composite score difference)
@@ -509,7 +509,7 @@ function buildContextBridge(params: {
   function resolveFoundationCandidates(config: OscillatorConfig): ChainRow[] {
     const scores = getRoutingScores({
       strategy: 'smartest',
-      weights: config.aiWeights ?? RABBIT_AI_DEFAULT_WEIGHTS,
+      weights: config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS,
     });
     const eligible = scores.scores
       .filter(s => s.enabled && s.modelDbId)
@@ -532,7 +532,7 @@ function buildContextBridge(params: {
 
       case 'auto':
       default:
-        // Highest Rabbit AI / Smartest-weight routing score first, then lower-ranked failovers.
+        // Highest Rabbit / Smartest-weight routing score first, then lower-ranked failovers.
         return eligible;
     }
   }
@@ -590,12 +590,12 @@ function buildContextBridge(params: {
   ### 3.3 Rabbit Shake Oscillator — Request Pipeline
 
 The oscillator is triggered **instead of** a normal single-model request when all conditions are met:
-1. The active routing strategy is `ai` / Rabbit Shake, and oscillator execution is enabled for AI mode
+1. The active routing strategy is `rabbit`, and oscillator execution is enabled for Rabbit mode
 2. The request is auto-routed (no pinned model)
 3. The prompt is classified as "complex reasoning" (heuristic: total message length > 500 chars OR contains code blocks OR has multi-turn assistant messages)
 4. Current concurrent request count is below `loadShedThreshold`
 
-The oscillator is model-agnostic. It resolves an ordered foundation candidate list from the enabled routing pool, using Rabbit AI / Smartest weights plus health, capability, and current routing eligibility. The injection model is then selected relative to the foundation candidate, preferring a high-intelligence divergent provider or tier. If the first foundation candidate fails before Step 1 succeeds, the router should try the next foundation candidate and re-resolve the injection model for that candidate.
+The oscillator is model-agnostic. It resolves an ordered foundation candidate list from the enabled routing pool, using Rabbit / Smartest weights plus health, capability, and current routing eligibility. The injection model is then selected relative to the foundation candidate, preferring a high-intelligence divergent provider or tier. If the first foundation candidate fails before Step 1 succeeds, the router should try the next foundation candidate and re-resolve the injection model for that candidate.
 
 ```typescript
 // server/src/services/rabbit-shake.ts
@@ -628,7 +628,7 @@ async function executeOscillator(params: {
   const start = Date.now();
   const bridgeStats: ContextBridgeResult[] = [];
 
-  // ─── Step 1: Foundation (top Rabbit AI / Smartest-weight candidate) ─
+  // ─── Step 1: Foundation (top Rabbit / Smartest-weight candidate) ─
   let foundationText = '';
   let foundationProvider = '';
   let foundationModelDbId = 0;
@@ -968,36 +968,36 @@ If the advisor is disabled or the response can't be parsed:
 },
 ```
 
-### 4.2 Rabbit Shake AI Routing Settings (NEW)
+### 4.2 Rabbit Routing Settings (NEW)
 
 ```typescript
 {
   key: 'routing_strategy',
   label: 'Routing Strategy',
-  description: 'Add "ai" / Rabbit Shake as a selectable strategy. AI mode uses Smartest weights for normal routing and enters the 3-step oscillator for eligible complex reasoning prompts.',
+  description: 'Add "rabbit" as a selectable strategy shown in the UI as Rabbit. Rabbit uses Smartest weights for normal routing and enters the 3-step oscillator for eligible complex reasoning prompts.',
   type: 'string',
-  enum: ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom', 'ai'],
+  enum: ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom', 'rabbit'],
   default: 'balanced',
   envVar: 'ROUTING_STRATEGY', effect: 'live', group: 'Routing',
 },
 {
-  key: 'rabbit_ai_enabled',
-  label: 'Rabbit Shake AI Mode',
-  description: 'Enable the Rabbit Shake AI routing strategy. AI mode uses Smartest-weight model ordering, then runs the 3-step multi-model oscillator for eligible complex reasoning prompts.',
+  key: 'rabbit_enabled',
+  label: 'Rabbit',
+  description: 'Enable the Rabbit routing strategy. Rabbit uses Smartest-weight model ordering, then runs the 3-step multi-model oscillator for eligible complex reasoning prompts.',
   type: 'boolean', default: false,
-  envVar: 'RABBIT_AI_ENABLED', effect: 'live', group: 'Routing',
+  envVar: 'RABBIT_ENABLED', effect: 'live', group: 'Routing',
 },
 {
-  key: 'rabbit_ai_weights',
-  label: 'Rabbit AI Weights',
-  description: 'Optional AI-mode weight override. Defaults to Smartest: intelligence 45%, reliability 30%, latency 15%, speed 10%.',
+  key: 'rabbit_weights',
+  label: 'Rabbit Weights',
+  description: 'Optional Rabbit weight override. Defaults to Smartest: intelligence 45%, reliability 30%, latency 15%, speed 10%.',
   type: 'json', default: null,
-  envVar: 'RABBIT_AI_WEIGHTS', effect: 'live', group: 'Routing',
+  envVar: 'RABBIT_WEIGHTS', effect: 'live', group: 'Routing',
 },
 {
   key: 'oscillator_foundation_selection',
   label: 'Oscillator Foundation Selection',
-  description: 'How to select foundation candidates (Steps 1 & 3). \'auto\' = ordered by Rabbit AI / Smartest-weight score; \'top_rank\' = intelligence_rank=1 first; or explicit model DB ID. If the first candidate fails Step 1, try the next eligible candidate.',
+  description: 'How to select foundation candidates (Steps 1 & 3). \'auto\' = ordered by Rabbit / Smartest-weight score; \'top_rank\' = intelligence_rank=1 first; or explicit model DB ID. If the first candidate fails Step 1, try the next eligible candidate.',
   type: 'string', default: 'auto',
   enum: ['auto', 'top_rank'],
   envVar: 'OSCILLATOR_FOUNDATION_SELECTION', effect: 'restart', group: 'Resilience',
@@ -1125,13 +1125,13 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 | `buildAdvisoryPayload` | Correct aggregation, no secret leakage, payload size |
 | Advisory prompt | Well-formed, system + user messages |
 | Response parsing | JSON, compact format, malformed → graceful fallback |
-| `applyAdvice` | Score boost/penalty caps, cooldown factors, Rabbit AI mode / oscillator controls |
+| `applyAdvice` | Score boost/penalty caps, cooldown factors, Rabbit strategy / oscillator controls |
 | **`sanitizeForCrossProvider`** | **Each provider's token patterns, structural block removal, generic `<\|...\|>` fallback** |
 | **`buildContextBridge`** | **Standard handoff path, oscillator handoff with [Thought Context], no artifact leakage** |
 | `detectMeow` | Structural tag leakage, script fragmentation, repeated chars, false positives on normal text |
 | **`executeOscillator`** | **Happy path (3 steps complete), Step 1 candidate failure → next candidate, all Step 1 candidates fail → normal path, Step 2 timeout → selected-foundation fallback, Step 3 meow → selected-foundation fallback** |
 | **Load shedding** | **Threshold enforcement, automatic re-enable below threshold** |
-| Integration | Advisor enabled → parsed → applied; oscillator enabled → 3-step → events published |
+| Integration | Advisor enabled → parsed → applied; Rabbit strategy active → eligible request enters 3-step oscillator → events published |
 
 ---
 

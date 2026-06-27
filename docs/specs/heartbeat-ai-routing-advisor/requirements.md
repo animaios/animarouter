@@ -25,17 +25,17 @@ Meanwhile, the heartbeat pings are *wasted tokens* — they send `max_tokens: 5`
 ## Rabbit Shake User Story
 
 **As an** AI Platform Engineer,
-**I want to** expose Rabbit Shake as an AI routing strategy that runs a model-agnostic, context-sanitizing, sequential pipeline using Smartest-weight model selection,
+**I want to** expose Rabbit Shake as a **Rabbit** routing strategy that runs a model-agnostic, context-sanitizing, sequential pipeline using Smartest-weight model selection,
 **So that** we can inject alternative reasoning into complex prompts to break logic loops ("Rabbit Shake") without causing token collisions, context corruption ("meowing"), or cascading latency timeouts.
 
-Rabbit Shake is not a hardcoded GLM/Nemotron feature and not a hidden provider fallback. It is a first-class routing strategy, exposed as **AI mode**, that selects models from the enabled routing pool using the same scoring axes as normal routing. Its default foundation ordering is based on the existing **Smartest** preset weights: intelligence 45%, reliability 30%, latency 15%, speed 10%. The injection model is selected as a divergent eligible model relative to the foundation that actually succeeded.
+Rabbit Shake is not a hardcoded GLM/Nemotron feature and not a hidden provider fallback. It is a first-class routing strategy, exposed in the UI as **Rabbit**, that selects models from the enabled routing pool using the same scoring axes as normal routing. Its default foundation ordering is based on the existing **Smartest** preset weights: intelligence 45%, reliability 30%, latency 15%, speed 10%. The injection model is selected as a divergent eligible model relative to the foundation that actually succeeded.
 
 In one installation, the selected foundation and injection models might be GLM and Nemotron; in another, they might be any two enabled models from the routing pool. Selection is driven by current routing eligibility, Smartest-weight score, model capability, provider health, key availability, and load-shed state.
 
 ### Rabbit Shake Acceptance Criteria
 
-1. **AI Routing Strategy Mode**
-   - Given the operator selects the Rabbit Shake / AI routing strategy,
+1. **Rabbit Routing Strategy Mode**
+   - Given the operator selects the **Rabbit** routing strategy,
    - When a request is eligible for auto-routing,
    - Then the router must use Smartest-weight scoring to select the foundation candidate list instead of using a fixed model pair.
    - And when the request is not eligible for the oscillator, the router must continue through the normal best-eligible single-model path using the same Smartest-weight ordering.
@@ -47,7 +47,7 @@ In one installation, the selected foundation and injection models might be GLM a
 
 3. **Sequential Oscillator**
    - Given a user initiates a complex reasoning prompt,
-   - When Rabbit Shake AI mode is active and the request is oscillator-eligible,
+   - When the Rabbit strategy is active and the request is oscillator-eligible,
    - Then the router must execute a sequential 3-step pattern:
      - Step 1 (Foundation): select the top eligible foundation model from the enabled routing pool using Smartest weights and generate base logic.
      - Step 2 (Injection): select a divergent eligible model from the pool, pass cleaned foundation context, and require an alternative perspective limited to the configured sentence count (default: exactly 2 sentences).
@@ -76,7 +76,7 @@ In one installation, the selected foundation and injection models might be GLM a
 - **Privacy-safe** — the advisory payload must NOT include raw API keys, user messages, or any PII. Only aggregate statistics and error categories.
 - **Low-latency** — advisory parsing must not delay the health-check result. The ping timeout still governs.
 - **Incrementally adoptable** — a feature flag to enable/disable the advisor; the system degrades gracefully if a provider's model doesn't follow the advisory format.
-- **Rabbit Shake AI mode** — Rabbit Shake must be selectable as a routing strategy / AI mode, not only as a hidden feature flag.
+- **Rabbit UI strategy** — Rabbit Shake must be selectable as a routing strategy labeled **Rabbit** in the UI, not only as a hidden feature flag.
 - **Model-agnostic Smartest selection** — Rabbit Shake must select models dynamically from the enabled routing pool using Smartest-weight scoring. No provider or model ID is special-cased.
 
 ## Non-Goals
