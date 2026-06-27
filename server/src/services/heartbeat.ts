@@ -17,6 +17,14 @@ import { buildProviderFor } from "../providers/index.js";
 import { classifyError, recordFailure, recordSuccess } from "./degradation.js";
 import { publishDeduped as publish } from "./events.js";
 import { getFeatureSetting } from "./feature-settings.js";
+import {
+  applyAdvice,
+  buildAdvisoryMessages,
+  buildAdvisoryPayload,
+  getAdvisorMaxOutputTokens,
+  isAdvisorEnabled,
+  parseAdviceResponse,
+} from "./heartbeat-advisor.js";
 
 // ──────────────────────────────────────────────────────────────────────
 // Per-key-per-model health state
@@ -826,15 +834,93 @@ async function pingKey(
 
   const start = Date.now();
   try {
-    await withTimeout(
+    const advisorEnabled = isAdvisorEnabled();
+    let advisoryMessages: ReturnType<typeof buildAdvisoryMessages> | null =
+      null;
+    if (advisorEnabled) {
+      try {
+        const advisoryPayload = buildAdvisoryPayload({
+          platform,
+          modelDbId,
+          modelId,
+          keyId: keyRow.id,
+          keyHealth: keyHealthMap,
+        });
+        advisoryMessages = buildAdvisoryMessages(advisoryPayload);
+      } catch (advisorErr: any) {
+        publish({
+          type: "heartbeat.advisor_failed",
+          provider: platform,
+          model: modelId,
+          keyId: keyRow.id,
+          reason: (advisorErr?.message ?? "advisor payload failed").slice(
+            0,
+            120,
+          ),
+          at: Date.now(),
+        });
+      }
+    }
+    const response = await withTimeout(
       provider.chatCompletion(
         decryptedKey,
-        [{ role: "user", content: "hi" }],
+        advisoryMessages?.messages ?? [{ role: "user", content: "hi" }],
         modelId,
-        { max_tokens: 5, temperature: 0 },
+        {
+          max_tokens: advisoryMessages ? getAdvisorMaxOutputTokens() : 5,
+          temperature: 0,
+        },
       ),
       pingTimeoutMs,
     );
+
+    if (advisoryMessages) {
+      try {
+        const advice = parseAdviceResponse(extractCompletionText(response));
+        publish({
+          type: "heartbeat.advisor_parsed",
+          provider: platform,
+          model: modelId,
+          keyId: keyRow.id,
+          confidence: advice.confidence,
+          selfScore: advice.selfScore,
+          cooldownHint: advice.cooldownHint,
+          recheckSooner: advice.recheckSooner,
+          at: Date.now(),
+        });
+
+        const { recheckSec } = readConfig();
+        const results = applyAdvice({
+          advice,
+          modelDbId,
+          platform,
+          modelId,
+          keyId: keyRow.id,
+          normalRecheckDelayMs: recheckSec * 1000,
+          scheduleRecheck,
+        });
+        for (const result of results) {
+          publish({
+            type: "heartbeat.advisor_applied",
+            provider: platform,
+            model: modelId,
+            keyId: keyRow.id,
+            applied: result.applied,
+            magnitude: result.magnitude,
+            at: Date.now(),
+          });
+        }
+      } catch (advisorErr: any) {
+        publish({
+          type: "heartbeat.advisor_failed",
+          provider: platform,
+          model: modelId,
+          keyId: keyRow.id,
+          reason: (advisorErr?.message ?? "advisor parse failed").slice(0, 120),
+          at: Date.now(),
+        });
+      }
+    }
 
     // Success — mark key+model healthy and reduce model-level degradation
     const latencyMs = Date.now() - start;
@@ -952,4 +1038,21 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractCompletionText(response: any): string {
+  const content = response?.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && "text" in part) {
+          return String((part as { text?: unknown }).text ?? "");
+        }
+        return "";
+      })
+      .join("");
+  }
+  return "";
 }
