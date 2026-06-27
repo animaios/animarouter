@@ -635,10 +635,9 @@ export const REGISTRY: FeatureSettingDef[] = [
     key: "oscillator_foundation_selection",
     label: "Foundation Selection",
     description:
-      "How Rabbit chooses Step 1 and Step 3 foundation candidates. Auto orders eligible models by Rabbit / Smartest-weight score; top rank tries intelligence rank 1 first.",
+      "How Rabbit chooses Step 1 and Step 3 foundation candidates. Auto orders eligible models by Rabbit / Smartest-weight score; top rank tries intelligence rank 1 first. Can also be a numeric model ID override.",
     type: "string",
     default: "auto",
-    options: ["auto", "top_rank"],
     envVar: "OSCILLATOR_FOUNDATION_SELECTION",
     effect: "live",
     group: "Routing",
@@ -648,10 +647,9 @@ export const REGISTRY: FeatureSettingDef[] = [
     key: "oscillator_injection_selection",
     label: "Injection Selection",
     description:
-      "How Rabbit chooses the Step 2 injection model. Divergent prefers a high-intelligence model on a different provider from the selected foundation.",
+      "How Rabbit chooses the Step 2 injection model. Divergent prefers a high-intelligence model on a different provider from the selected foundation. Can also be a numeric model ID override.",
     type: "string",
     default: "divergent",
-    options: ["divergent", "top_rank", "different_tier"],
     envVar: "OSCILLATOR_INJECTION_SELECTION",
     effect: "live",
     group: "Routing",
@@ -732,7 +730,7 @@ export const REGISTRY: FeatureSettingDef[] = [
 /** Returns parsed number if valid (not NaN, within min/max bounds), otherwise undefined. */
 function parseNumber(raw: string, def: FeatureSettingDef): number | undefined {
   const parsed = parseFloat(raw);
-  if (isNaN(parsed)) return undefined;
+  if (Number.isNaN(parsed)) return undefined;
   if (def.min !== undefined && parsed < def.min) return undefined;
   if (def.max !== undefined && parsed > def.max) return undefined;
   return parsed;
@@ -757,7 +755,8 @@ function resolveSetting(def: FeatureSettingDef): boolean | number | string {
   }
 
   if (def.envVar && process.env[def.envVar] !== undefined) {
-    const raw = process.env[def.envVar]!;
+    const raw = process.env[def.envVar];
+    if (raw === undefined) return def.default;
     if (def.type === "boolean") return raw === "true";
     if (def.type === "number") {
       const parsed = parseNumber(raw, def);
@@ -825,7 +824,7 @@ export function saveFeatureSettings(
       errors.push(`${key}: expected boolean, got ${typeof value}`);
     }
     if (def.type === "number") {
-      if (typeof value !== "number" || isNaN(value)) {
+      if (typeof value !== "number" || Number.isNaN(value)) {
         errors.push(`${key}: expected number`);
       } else if (def.min !== undefined && value < def.min) {
         errors.push(`${key}: must be ≥ ${def.min}`);

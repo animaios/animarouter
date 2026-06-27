@@ -1,9 +1,6 @@
 import { getDb } from "../db/index.js";
 import { getFeatureSetting } from "./feature-settings.js";
-import {
-  getRoutingScores,
-  type RoutingScore,
-} from "./router.js";
+import { getRoutingScores, type RoutingScore } from "./router.js";
 import {
   BANDIT_PRESETS,
   combineScore,
@@ -42,7 +39,7 @@ export interface RabbitCandidate extends RoutingScore {
 
 export interface RabbitEligibilityInput {
   strategy: RoutingStrategy;
-  promptText?: string;
+  promptText?: string | null;
   pinnedModelDbId?: number | null;
   loadShedActive?: boolean;
   config?: OscillatorConfig;
@@ -50,7 +47,12 @@ export interface RabbitEligibilityInput {
 
 export interface MeowDetectionResult {
   detected: boolean;
-  reason?: "custom_pattern" | "structural_tag" | "repeated_character" | "replacement_character" | "script_fragmentation";
+  reason?:
+    | "custom_pattern"
+    | "structural_tag"
+    | "repeated_character"
+    | "replacement_character"
+    | "script_fragmentation";
   pattern?: string;
 }
 
@@ -82,7 +84,9 @@ function normalizeWeights(weights: RoutingWeights): RoutingWeights | undefined {
   };
 }
 
-export function parseRabbitWeights(raw: string | undefined): RoutingWeights | undefined {
+export function parseRabbitWeights(
+  raw: string | undefined,
+): RoutingWeights | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
   try {
@@ -138,7 +142,9 @@ export function getOscillatorConfig(): OscillatorConfig {
       ["divergent", "top_rank", "different_tier"] as const,
       "divergent",
     ),
-    rabbitWeights: parseRabbitWeights(getFeatureSetting("rabbit_weights") as string),
+    rabbitWeights: parseRabbitWeights(
+      getFeatureSetting("rabbit_weights") as string,
+    ),
     minIntelligenceGap: getFeatureSetting(
       "oscillator_min_intelligence_gap",
     ) as number,
@@ -154,15 +160,17 @@ export function getOscillatorConfig(): OscillatorConfig {
   };
 }
 
-export function isComplexReasoningPrompt(promptText = ""): boolean {
-  const text = promptText.trim();
+export function isComplexReasoningPrompt(promptText?: string | null): boolean {
+  const text = (promptText ?? "").trim();
   if (text.length >= 180) return true;
   return /\b(reason|analyze|debug|prove|derive|compare|tradeoff|architecture|plan|why)\b/i.test(
     text,
   );
 }
 
-export function isRabbitOscillatorEligible(input: RabbitEligibilityInput): boolean {
+export function isRabbitOscillatorEligible(
+  input: RabbitEligibilityInput,
+): boolean {
   const config = input.config ?? getOscillatorConfig();
   return (
     input.strategy === "rabbit" &&
@@ -196,11 +204,12 @@ function scriptOf(char: string): string | null {
 }
 
 function hasScriptFragmentation(text: string): boolean {
+  const sample = text.length > 1000 ? text.slice(0, 1000) : text;
   let previous: string | null = null;
   let switches = 0;
   const counts = new Map<string, number>();
 
-  for (const char of text) {
+  for (const char of sample) {
     const script = scriptOf(char);
     if (!script) continue;
     counts.set(script, (counts.get(script) ?? 0) + 1);
@@ -248,10 +257,9 @@ export function detectMeow(
   return { detected: false };
 }
 
-function metadataByModelId(modelDbIds: number[]): Map<number, Omit<
-  RabbitCandidate,
-  keyof RoutingScore | "rabbitScore"
->> {
+function metadataByModelId(
+  modelDbIds: number[],
+): Map<number, Omit<RabbitCandidate, keyof RoutingScore | "rabbitScore">> {
   if (modelDbIds.length === 0) return new Map();
   const db = getDb();
   const placeholders = modelDbIds.map(() => "?").join(", ");
@@ -302,7 +310,9 @@ export function getRabbitCandidates(
   const routing = getRoutingScores();
   const normalizedWeights = normalizeWeights(weights) ?? RABBIT_DEFAULT_WEIGHTS;
   const keyPlatforms = platformsWithEnabledKeys();
-  const metadata = metadataByModelId(routing.scores.map((score) => score.modelDbId));
+  const metadata = metadataByModelId(
+    routing.scores.map((score) => score.modelDbId),
+  );
 
   return routing.scores
     .flatMap((score) => {
@@ -332,7 +342,9 @@ function orderWithExplicitFirst(
   candidates: RabbitCandidate[],
   modelDbId: number,
 ): RabbitCandidate[] {
-  const preferred = candidates.find((candidate) => candidate.modelDbId === modelDbId);
+  const preferred = candidates.find(
+    (candidate) => candidate.modelDbId === modelDbId,
+  );
   if (!preferred) return candidates;
   return [
     preferred,
@@ -342,7 +354,9 @@ function orderWithExplicitFirst(
 
 export function resolveFoundationCandidates(
   config: OscillatorConfig = getOscillatorConfig(),
-  candidates: RabbitCandidate[] = getRabbitCandidates(config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS),
+  candidates: RabbitCandidate[] = getRabbitCandidates(
+    config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS,
+  ),
 ): RabbitCandidate[] {
   if (typeof config.foundationSelection === "number") {
     return orderWithExplicitFirst(candidates, config.foundationSelection);
@@ -362,18 +376,30 @@ function intelligenceGapOk(
   candidate: RabbitCandidate,
   minGap: number,
 ): boolean {
-  return Math.abs(foundation.intelligence - candidate.intelligence) * 100 >= minGap;
+  return (
+    Math.abs(foundation.intelligence - candidate.intelligence) * 100 >= minGap
+  );
 }
 
 export function resolveInjectionModel(
   config: OscillatorConfig,
   foundationModelDbId: number,
-  candidates: RabbitCandidate[] = getRabbitCandidates(config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS),
+  candidates: RabbitCandidate[] = getRabbitCandidates(
+    config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS,
+  ),
 ): RabbitCandidate | undefined {
   const foundation = candidates.find(
     (candidate) => candidate.modelDbId === foundationModelDbId,
   );
   if (!foundation) return undefined;
+
+  if (typeof config.injectionSelection === "number") {
+    return candidates.find(
+      (candidate) =>
+        candidate.modelDbId === config.injectionSelection &&
+        candidate.modelDbId !== foundation.modelDbId,
+    );
+  }
 
   const eligible = candidates.filter(
     (candidate) =>
@@ -381,12 +407,6 @@ export function resolveInjectionModel(
       intelligenceGapOk(foundation, candidate, config.minIntelligenceGap),
   );
   if (eligible.length === 0) return undefined;
-
-  if (typeof config.injectionSelection === "number") {
-    return eligible.find(
-      (candidate) => candidate.modelDbId === config.injectionSelection,
-    );
-  }
 
   if (config.injectionSelection === "top_rank") {
     return [...eligible].sort(
@@ -398,8 +418,9 @@ export function resolveInjectionModel(
 
   if (config.injectionSelection === "different_tier") {
     return (
-      eligible.find((candidate) => candidate.sizeLabel !== foundation.sizeLabel) ??
-      eligible[0]
+      eligible.find(
+        (candidate) => candidate.sizeLabel !== foundation.sizeLabel,
+      ) ?? eligible[0]
     );
   }
 
