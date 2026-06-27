@@ -151,8 +151,10 @@ export function getAllKeyHealth(): Map<string, KeyHealth> {
   return new Map(keyHealthMap);
 }
 
-/** Schedule a proactive re-ping of an exhausted key+model after a configured delay.
+/** Schedule a re-ping of a key+model after a configured delay.
  *  No-op if a recheck timer is already pending or in-flight for this key+model.
+ *  By default recovered healthy keys are skipped; advisor-triggered checks can
+ *  opt into allowHealthy for proactive confirmation pings.
  *  If a prior cycle's in-flight check is stale (key marked unhealthy again),
  *  the new schedule supersedes it — the stale fireRecheck will detect this
  *  via the generation counter and exit without scheduling a next attempt. */
@@ -160,8 +162,10 @@ function scheduleRecheck(
   keyId: number,
   modelId: string,
   customDelayMs?: number,
+  options?: { allowHealthy?: boolean },
 ): void {
   const key = healthKey(keyId, modelId);
+  const allowHealthy = options?.allowHealthy === true;
   // FR-3: No duplicate timers — also blocks while a fireRecheck is in-flight
   const existing = recheckTimers.get(key);
   if (existing) {
@@ -171,6 +175,7 @@ function scheduleRecheck(
       // a next attempt. We start a fresh cycle from attempt 1.
       existing.generation = ++recheckGeneration;
       existing.attempt = 1;
+      existing.allowHealthy = allowHealthy;
       // Clear the old timer (already fired if in-flight, but be safe)
       if (existing.timerRef) clearTimeout(existing.timerRef);
       const { recheckSec } = readConfig();
@@ -189,6 +194,7 @@ function scheduleRecheck(
     if (customDelayMs !== undefined) {
       existing.generation = ++recheckGeneration;
       existing.attempt = 1;
+      existing.allowHealthy = allowHealthy;
       if (existing.timerRef) clearTimeout(existing.timerRef);
       existing.timerRef = setTimeout(() => {
         fireRecheck(keyId, modelId, 1).catch((err) => {
@@ -223,7 +229,16 @@ function scheduleRecheck(
     generation,
     timerRef,
     inFlight: false,
+    allowHealthy,
   });
+}
+
+function scheduleAdvisorRecheck(
+  keyId: number,
+  modelId: string,
+  delayMs: number,
+): void {
+  scheduleRecheck(keyId, modelId, delayMs, { allowHealthy: true });
 }
 
 /** Fire a recheck ping for an exhausted key+model. Called when a recheck timer fires.
@@ -250,8 +265,9 @@ async function fireRecheck(
   entry.timerRef = null; // Timer already fired
 
   const health = keyHealthMap.get(key);
-  // Key already recovered — clean up and done
-  if (!health || health.healthy) {
+  // Key already recovered — clean up and done, unless this is an
+  // advisor-requested proactive confirmation recheck for a healthy key.
+  if (!health || (health.healthy && !entry.allowHealthy)) {
     recheckTimers.delete(key);
     return;
   }
@@ -259,8 +275,13 @@ async function fireRecheck(
   const { recheckSec, maxRechecks, pingTimeoutMs } = readConfig();
   const minRecencyMs = (recheckSec * 1000) / 2;
 
-  // FR-4: Skip if this key+model was pinged very recently
-  if (Date.now() - health.lastPingAt < minRecencyMs) {
+  // FR-4: Skip if this key+model was pinged very recently. Advisor-requested
+  // healthy rechecks are intentionally scheduled sooner, so they bypass this.
+  const isAdvisorHealthyRecheck = entry.allowHealthy && health.healthy;
+  if (
+    !isAdvisorHealthyRecheck &&
+    Date.now() - health.lastPingAt < minRecencyMs
+  ) {
     // Only schedule next if we still own the slot
     const currentEntry = recheckTimers.get(key);
     if (currentEntry && currentEntry.generation === myGeneration) {
@@ -284,11 +305,13 @@ async function fireRecheck(
 
   // Use the specific modelId for recheck (not highest-priority fallback)
   const model = db
-    .prepare(`
+    .prepare(
+      `
     SELECT m.id AS model_db_id, m.model_id
     FROM models m
     WHERE m.model_id = ? AND m.enabled = 1 AND m.platform = ?
-  `)
+  `,
+    )
     .get(modelId, keyRow.platform) as
     | { model_db_id: number; model_id: string }
     | undefined;
@@ -483,6 +506,9 @@ interface RecheckState {
   /** True while fireRecheck is awaiting pingKey(). Prevents the async gap
    *  from allowing scheduleRecheck() to create a duplicate timer. */
   inFlight: boolean;
+  /** Allows advisor-requested recheckSooner pings to run even when the
+   *  key is currently healthy. Exhausted-key rechecks keep the legacy guard. */
+  allowHealthy?: boolean;
 }
 
 const recheckTimers = new Map<string, RecheckState>();
@@ -584,11 +610,13 @@ export async function pokeKey(
   if (modelId) {
     // Use the specified model
     const row = db
-      .prepare(`
+      .prepare(
+        `
       SELECT m.id AS model_db_id, m.model_id
       FROM models m
       WHERE m.model_id = ? AND m.enabled = 1 AND m.platform = ?
-    `)
+    `,
+      )
       .get(modelId, keyRow.platform) as
       | { model_db_id: number; model_id: string }
       | undefined;
@@ -596,14 +624,16 @@ export async function pokeKey(
   } else {
     // Get the highest-priority model for this key's platform
     model = db
-      .prepare(`
+      .prepare(
+        `
       SELECT m.id AS model_db_id, m.model_id
       FROM fallback_config fc
       JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
       WHERE fc.enabled = 1 AND m.platform = ?
       ORDER BY fc.priority ASC
       LIMIT 1
-    `)
+    `,
+      )
       .get(keyRow.platform) as
       | { model_db_id: number; model_id: string }
       | undefined;
@@ -652,12 +682,14 @@ async function runCycle(skipGate = false): Promise<number> {
     // Get all currently enabled models from the fallback chain
     const db = getDb();
     const activeModels = db
-      .prepare(`
+      .prepare(
+        `
           SELECT m.platform, m.id AS model_db_id, m.model_id
           FROM fallback_config fc
           JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
           WHERE fc.enabled = 1
-        `)
+        `,
+      )
       .all() as Array<{
       platform: string;
       model_db_id: number;
@@ -700,14 +732,16 @@ async function runCycle(skipGate = false): Promise<number> {
     // randomly be pinged with a restricted model on some cycles (causing
     // 403/404 failures) and a standard model on others.
     const models = db
-      .prepare(`
+      .prepare(
+        `
           SELECT m.platform, m.id AS model_db_id, m.model_id, MIN(fc.priority) AS priority
           FROM fallback_config fc
           JOIN models m ON m.id = fc.model_db_id AND m.enabled = 1
           WHERE fc.enabled = 1
           GROUP BY m.platform, m.id, m.model_id
           ORDER BY priority ASC
-        `)
+        `,
+      )
       .all() as Array<{
       platform: string;
       model_db_id: number;
@@ -897,7 +931,7 @@ async function pingKey(
           modelId,
           keyId: keyRow.id,
           normalRecheckDelayMs: recheckSec * 1000,
-          scheduleRecheck,
+          scheduleRecheck: scheduleAdvisorRecheck,
         });
         for (const result of results) {
           publish({

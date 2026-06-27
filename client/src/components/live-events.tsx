@@ -351,8 +351,9 @@ export function LiveEvents() {
   const activeRef = useRef(new Set<string>());
   const nextLineIdRef = useRef(1);
   const addLine = useCallback((entry: LogEntry) => {
+    const lineId = nextLineIdRef.current++;
     setLines((prev) => {
-      const next = [...prev, { ...entry, lineId: nextLineIdRef.current++ }];
+      const next = [...prev, { ...entry, lineId }];
       return next.length > MAX_LOG_LINES
         ? next.slice(next.length - MAX_LOG_LINES)
         : next;

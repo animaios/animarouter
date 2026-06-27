@@ -1547,6 +1547,54 @@ describe("Provider Health Heartbeat", () => {
       expect(appliedEvents.some((e) => e.applied === "score_boost")).toBe(true);
     });
 
+    it("honors recheckSooner advice for a healthy key", async () => {
+      setupProvider();
+      setSetting("heartbeat_advisor_enabled", "true");
+      setSetting("heartbeat_advisor_max_output_tokens", "8");
+      chatCompletion
+        .mockResolvedValueOnce({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content:
+                  '{"confidence":7,"selfScore":0,"cooldownHint":0,"recheckSooner":true}',
+              },
+            },
+          ],
+          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+        })
+        .mockResolvedValueOnce({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content:
+                  '{"confidence":7,"selfScore":0,"cooldownHint":0,"recheckSooner":false}',
+              },
+            },
+          ],
+          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+        });
+
+      await pokeAllKeys();
+      expect(chatCompletion).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(45_000 + 100);
+
+      expect(chatCompletion).toHaveBeenCalledTimes(2);
+      const recheckEvents = publishedEvents.filter(
+        (e) => e.type === "heartbeat.recheck",
+      );
+      expect(recheckEvents).toHaveLength(1);
+      expect(recheckEvents[0]).toMatchObject({
+        provider: "testprov",
+        model: "test-model",
+        success: true,
+        attempt: 1,
+      });
+    });
+
     it("keeps the legacy hi ping and emits no advisor events when disabled", async () => {
       setupProvider();
       setSetting("heartbeat_advisor_enabled", "false");
