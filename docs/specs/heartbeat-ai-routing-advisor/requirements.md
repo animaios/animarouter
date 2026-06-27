@@ -25,38 +25,46 @@ Meanwhile, the heartbeat pings are *wasted tokens* — they send `max_tokens: 5`
 ## Rabbit Shake User Story
 
 **As an** AI Platform Engineer,
-**I want to** implement a model-agnostic, context-sanitizing, sequential routing pipeline for the highest-intelligence eligible model and a divergent injection model,
+**I want to** expose Rabbit Shake as an AI routing strategy that runs a model-agnostic, context-sanitizing, sequential pipeline using Smartest-weight model selection,
 **So that** we can inject alternative reasoning into complex prompts to break logic loops ("Rabbit Shake") without causing token collisions, context corruption ("meowing"), or cascading latency timeouts.
 
-The implementation must not hardcode any specific model family or provider. In one installation, the selected foundation and injection models might be GLM and Nemotron; in another, they might be any two enabled models from the routing pool. Selection is driven by current routing eligibility, intelligence scores, health, model capability, provider availability, and load-shed state.
+Rabbit Shake is not a hardcoded GLM/Nemotron feature and not a hidden provider fallback. It is a first-class routing strategy, exposed as **AI mode**, that selects models from the enabled routing pool using the same scoring axes as normal routing. Its default foundation ordering is based on the existing **Smartest** preset weights: intelligence 45%, reliability 30%, latency 15%, speed 10%. The injection model is selected as a divergent eligible model relative to the foundation that actually succeeded.
+
+In one installation, the selected foundation and injection models might be GLM and Nemotron; in another, they might be any two enabled models from the routing pool. Selection is driven by current routing eligibility, Smartest-weight score, model capability, provider health, key availability, and load-shed state.
 
 ### Rabbit Shake Acceptance Criteria
 
-1. **Context Bridge & Sanitization**
+1. **AI Routing Strategy Mode**
+   - Given the operator selects the Rabbit Shake / AI routing strategy,
+   - When a request is eligible for auto-routing,
+   - Then the router must use Smartest-weight scoring to select the foundation candidate list instead of using a fixed model pair.
+   - And when the request is not eligible for the oscillator, the router must continue through the normal best-eligible single-model path using the same Smartest-weight ordering.
+
+2. **Context Bridge & Sanitization**
    - Given the foundation model generates a response,
    - When its output is routed to a different injection model,
    - Then the router must intercept and strip model-specific special tokens, system markers, and structural artifacts, converting them into clean, standardized plain text such as `[Thought Context: ...]`.
 
-2. **Sequential Oscillator**
+3. **Sequential Oscillator**
    - Given a user initiates a complex reasoning prompt,
-   - When the oscillator is enabled and the request is eligible,
+   - When Rabbit Shake AI mode is active and the request is oscillator-eligible,
    - Then the router must execute a sequential 3-step pattern:
-     - Step 1 (Foundation): select the top eligible foundation model from the enabled routing pool and generate base logic.
+     - Step 1 (Foundation): select the top eligible foundation model from the enabled routing pool using Smartest weights and generate base logic.
      - Step 2 (Injection): select a divergent eligible model from the pool, pass cleaned foundation context, and require an alternative perspective limited to the configured sentence count (default: exactly 2 sentences).
      - Step 3 (Anchor): return to the same foundation model from Step 1 for final synthesis.
 
-3. **Dynamic Foundation Fallback**
+4. **Dynamic Foundation Fallback**
    - Given the top foundation model is unavailable, unhealthy, times out, or fails the Step 1 call,
    - When another eligible high-intelligence model exists,
    - Then the router should select the next eligible foundation candidate and retry the oscillator selection path, rather than hard-failing on the original top model.
 
-4. **Dynamic Load-Shedding**
+5. **Dynamic Load-Shedding**
    - Given live concurrent traffic is above the configured load-shed threshold (default: 21),
    - When a complex reasoning request arrives,
-   - Then the router must bypass the oscillator and route through the normal single-model path using the best currently eligible model.
+   - Then the router must bypass the oscillator and route through the normal single-model path using the best currently eligible Smartest-weight model.
    - When traffic falls below the threshold, oscillator eligibility should resume automatically without manual intervention.
 
-5. **Stability & Anti-Meow Validation**
+6. **Stability & Anti-Meow Validation**
    - Given the router is actively mixing foundation and injection models,
    - When analyzing the final output,
    - Then the combined response must preserve logical coherence and must not expose raw structural tags, provider control tokens, abrupt style fragmentation, or gibberish.
@@ -68,7 +76,8 @@ The implementation must not hardcode any specific model family or provider. In o
 - **Privacy-safe** — the advisory payload must NOT include raw API keys, user messages, or any PII. Only aggregate statistics and error categories.
 - **Low-latency** — advisory parsing must not delay the health-check result. The ping timeout still governs.
 - **Incrementally adoptable** — a feature flag to enable/disable the advisor; the system degrades gracefully if a provider's model doesn't follow the advisory format.
-- **Model-agnostic oscillator** — Rabbit Shake must select models dynamically from the enabled routing pool. No provider or model ID is special-cased.
+- **Rabbit Shake AI mode** — Rabbit Shake must be selectable as a routing strategy / AI mode, not only as a hidden feature flag.
+- **Model-agnostic Smartest selection** — Rabbit Shake must select models dynamically from the enabled routing pool using Smartest-weight scoring. No provider or model ID is special-cased.
 
 ## Non-Goals
 

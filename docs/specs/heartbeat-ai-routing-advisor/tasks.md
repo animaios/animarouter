@@ -58,30 +58,33 @@
 - [ ] **T8.4** Unit tests for `sanitizeForCrossProvider` — each provider's tokens, structural blocks, generic `<|...|>` fallback
 - [ ] **T8.5** Unit tests for `buildContextBridge` — standard handoff, oscillator handoff, no artifact leakage
 
-## Phase 9: Rabbit Shake Oscillator Core
+## Phase 9: Rabbit Shake AI Routing Strategy
 
-- [ ] **T9.1** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and feature flag `oscillator_enabled`
-- [ ] **T9.2** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by highest composite, `top_rank` = rank=1 first, numeric override first)
-- [ ] **T9.3** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
-- [ ] **T9.4** Implement `executeOscillator()` — 3-step pipeline: Foundation → Context Bridge → Injection → Context Bridge → Anchor
-- [ ] **T9.5** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal path; Step 2/3 fail → return selected Foundation)
-- [ ] **T9.6** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
-- [ ] **T9.7** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator
-- [ ] **T9.8** Unit tests for `resolveFoundationCandidates`, `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
-- [ ] **T9.9** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
+- [ ] **T9.1** Add `ai` / Rabbit Shake to the routing strategy model (`RoutingStrategy`, validation, API schema, dashboard strategy selector)
+- [ ] **T9.2** Add `rabbit_ai_enabled` and optional `rabbit_ai_weights` settings. Default AI-mode weights must match the existing Smartest preset: intelligence 45%, reliability 30%, latency 15%, speed 10%
+- [ ] **T9.3** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and AI-mode eligibility helpers
+- [ ] **T9.4** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by Rabbit AI / Smartest-weight score, `top_rank` = rank=1 first, numeric override first)
+- [ ] **T9.5** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
+- [ ] **T9.6** Implement `executeOscillator()` — 3-step pipeline: Foundation → Context Bridge → Injection → Context Bridge → Anchor
+- [ ] **T9.7** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal Smartest-weight single-model path; Step 2/3 fail → return selected Foundation)
+- [ ] **T9.8** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
+- [ ] **T9.9** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator; when load-shed, continue with normal Rabbit AI / Smartest-weight single-model routing
+- [ ] **T9.10** Unit tests for AI strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
+- [ ] **T9.11** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
 
 ## Phase 10: Oscillator Integration
 
-- [ ] **T10.1** Wire oscillator into `proxy.ts` request handler — check eligibility, call `executeOscillator`, fall back to normal path on failure/meow
-- [ ] **T10.2** Add oscillator metrics logging to `logOscillatorResult()` for heartbeat advisor payload
-- [ ] **T10.3** Add `oscillator_results` SQLite table + `logOscillatorResult()` persistence
-- [ ] **T10.4** Implement `collectOscillatorStats(windowMs)` for advisory payload (§10.2)
-- [ ] **T10.5** Add oscillator feature settings (T9.1 config keys) to DB seed + `feature-settings.ts`
-- [ ] **T10.6** Add oscillator SSE events (`oscillator.started`, `.step_complete`, `.complete`, `.failed`, `.load_shed`, `.meow_detected`)
+- [ ] **T10.1** Wire AI strategy into `proxy.ts` request handler — when routing strategy is `ai`, use Rabbit AI / Smartest-weight ordering and call `executeOscillator` only for eligible complex reasoning requests
+- [ ] **T10.2** Ensure non-eligible AI-mode requests, pinned-model requests, load-shed requests, and all-Step-1-failed requests fall back to normal best-eligible Smartest-weight single-model routing
+- [ ] **T10.3** Add oscillator metrics logging to `logOscillatorResult()` for heartbeat advisor payload
+- [ ] **T10.4** Add `oscillator_results` SQLite table + `logOscillatorResult()` persistence
+- [ ] **T10.5** Implement `collectOscillatorStats(windowMs)` for advisory payload (§10.2)
+- [ ] **T10.6** Add Rabbit AI / oscillator feature settings (T9 config keys) to DB seed + `feature-settings.ts`
+- [ ] **T10.7** Add oscillator SSE events (`oscillator.started`, `.step_complete`, `.complete`, `.failed`, `.load_shed`, `.meow_detected`)
 
 ## Phase 11: Advisor ↔ Oscillator Feedback Loop
 
 - [ ] **T11.1** Extend `RoutingAdvice` with `oscillatorHint`, `injectionModel`, `injectionBrevity` fields
 - [ ] **T11.2** Update `applyAdvice()` to handle `oscillatorHint` (enable/disable with confidence thresholds) and `injectionModel` suggestions
 - [ ] **T11.3** Update advisory system prompt to include oscillator control fields
-- [ ] **T11.4** Integration test: advisor recommends oscillator toggle → `oscillator_enabled` override applied → verified on next cycle
+- [ ] **T11.4** Integration test: advisor recommends Rabbit AI / oscillator control change → `rabbit_ai_enabled` or oscillator eligibility override applied → verified on next cycle
