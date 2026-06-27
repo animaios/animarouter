@@ -1,26 +1,43 @@
-import crypto from 'crypto';
-import { getDb, getSetting, setSetting } from '../db/index.js';
-import { getFeatureSetting } from './feature-settings.js';
-import { publish } from './events.js';
-import { buildProviderFor } from '../providers/index.js';
-import { decrypt } from '../lib/crypto.js';
+import type { Database } from "better-sqlite3";
+import crypto from "crypto";
+import { getDb, getSetting, setSetting } from "../db/index.js";
+import { decrypt } from "../lib/crypto.js";
+import type { BaseProvider } from "../providers/base.js";
+import { buildProviderFor } from "../providers/index.js";
+import {
+  getAllStatesView,
+  getBoost,
+  getDegradationFactor,
+  getPenalty,
+  initDegradation,
+} from "./degradation.js";
+import { publish } from "./events.js";
+import { getFeatureSetting } from "./feature-settings.js";
 // Rate-limit pre-checks removed — routing relies on heartbeat-based health
 // detection instead of predictive quota tracking. See PR: heartbeat per-key.
 // recordRequest/recordTokens still track usage for analytics purposes.
-import { isKeyHealthy, isHeartbeatEnabled } from './heartbeat.js';
-import { isExhausted } from './key-exhaustion.js';
+import { getKeyHealth, isHeartbeatEnabled, isKeyHealthy } from "./heartbeat.js";
+import { isExhausted } from "./key-exhaustion.js";
 import {
-  BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
-  reliabilityPosterior, expectedReliability, sampleBeta,
-  speedScore, heavyWeightedSpeedScore, speedCompositeFromRank, intelligenceScore, combineScore,
-  latencyCompositeFromSize, heavyWeightedLatencyScore,
-} from './scoring.js';
+  type TransportId,
+  transportIdFromUseProxy,
+} from "./proxy-transport.js";
 import {
-  getDegradationFactor, getPenalty, getAllStatesView, initDegradation, getBoost,
-} from './degradation.js';
-import type { BaseProvider } from '../providers/base.js';
-import type { Database } from 'better-sqlite3';
-import { transportIdFromUseProxy, type TransportId } from './proxy-transport.js';
+  BANDIT_PRESETS,
+  combineScore,
+  DEFAULT_STRATEGY,
+  expectedReliability,
+  heavyWeightedLatencyScore,
+  heavyWeightedSpeedScore,
+  intelligenceScore,
+  latencyCompositeFromSize,
+  type RoutingStrategy,
+  type RoutingWeights,
+  reliabilityPosterior,
+  sampleBeta,
+  speedCompositeFromRank,
+  speedScore,
+} from "./scoring.js";
 
 interface KeyRow {
   id: number;
@@ -144,16 +161,54 @@ function rotateArray<T>(arr: T[], offset: number): T[] {
   return [...arr.slice(shift), ...arr.slice(0, shift)];
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Ping-weighted key shuffle
+// When heartbeat is enabled, healthy keys are shuffled with probability
+// proportional to inverse latency so faster keys are picked more often,
+// while still giving slower keys a chance (Boltzmann exploration).
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shuffle keys by perceived ping latency with weighted randomness.
+ * Keys with lower latency get higher probability of appearing first.
+ * Uses exponential noise / weight ordering (equivalent to sampling without
+ * replacement from a categorical distribution with weights ∝ 1/(latency+baseline)).
+ */
+function pingWeightedShuffle(keys: KeyRow[], modelId: string): KeyRow[] {
+  if (keys.length <= 1) return keys;
+
+  // Baseline latency (ms) added to weight denominator so unknown/slow keys
+  // still get nonzero weight. Tuned to ~100ms — roughly network RTT floor.
+  const BASELINE_LATENCY_MS = 100;
+
+  const scored = keys.map((key) => {
+    const health = getKeyHealth(key.id, modelId);
+    const latency = Math.max(0, health?.lastPingLatencyMs ?? 2000); // unknown keys get 2s default, clamp to >= 0
+    const weight = 1 / (latency + BASELINE_LATENCY_MS);
+    // Exponential noise: -ln(U) / weight. Higher weight → smaller score → picked earlier.
+    const noise = -Math.log(Math.random() || 1e-15);
+    const score = noise / weight;
+    return { key, score };
+  });
+
+  scored.sort((a, b) => a.score - b.score);
+  return scored.map((s) => s.key);
+}
+
 // ── Parallel request gating ──
 // Per-provider (platform slug) in-flight counter. The limit is provider-level
 // so that the total concurrency across all models of one custom provider never
 // exceeds maxParallelRequests. Built-in providers are implicitly unlimited.
-const providerInFlight = new Map<string, { count: number; limit: number | null }>();
+const providerInFlight = new Map<
+  string,
+  { count: number; limit: number | null }
+>();
 
 /** Try to reserve one in-flight slot for the given platform slug.
  *  Returns true if the slot was reserved, false if the provider is at capacity. */
 function tryReserveSlot(platform: string, maxParallel: number | null): boolean {
-  if (maxParallel === null || maxParallel === undefined || maxParallel <= 0) return true;
+  if (maxParallel === null || maxParallel === undefined || maxParallel <= 0)
+    return true;
   let entry = providerInFlight.get(platform);
   if (!entry) {
     entry = { count: 0, limit: maxParallel };
@@ -187,26 +242,42 @@ function ensureDegradationInit() {
  * Get current penalties for all models (for the API/dashboard).
  * Backward-compatible wrapper around getAllStatesView().
  */
-export function getAllPenalties(): Array<{ modelDbId: number; count: number; penalty: number }> {
+export function getAllPenalties(): Array<{
+  modelDbId: number;
+  count: number;
+  penalty: number;
+}> {
   const states = getAllStatesView();
-  const result: Array<{ modelDbId: number; count: number; penalty: number }> = [];
+  const result: Array<{ modelDbId: number; count: number; penalty: number }> =
+    [];
   for (const [modelDbId, state] of states) {
     if (state.penalty > 0) {
-      result.push({ modelDbId, count: state.consecutiveHits, penalty: state.penalty });
+      result.push({
+        modelDbId,
+        count: state.consecutiveHits,
+        penalty: state.penalty,
+      });
     }
   }
   return result.sort((a, b) => b.penalty - a.penalty);
 }
 
 // ── Routing strategy (persisted) ────────────────────────────────────────────
-const STRATEGY_KEY = 'routing_strategy';
-const CUSTOM_WEIGHTS_KEY = 'routing_custom_weights';
-const VALID_STRATEGIES: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable', 'custom'];
+const STRATEGY_KEY = "routing_strategy";
+const CUSTOM_WEIGHTS_KEY = "routing_custom_weights";
+const VALID_STRATEGIES: RoutingStrategy[] = [
+  "priority",
+  "balanced",
+  "smartest",
+  "fastest",
+  "reliable",
+  "custom",
+];
 
 export function getRoutingStrategy(): RoutingStrategy {
   ensureDegradationInit();
   const raw = getSetting(STRATEGY_KEY);
-  return (raw && VALID_STRATEGIES.includes(raw as RoutingStrategy))
+  return raw && VALID_STRATEGIES.includes(raw as RoutingStrategy)
     ? (raw as RoutingStrategy)
     : DEFAULT_STRATEGY;
 }
@@ -231,59 +302,72 @@ export function getCustomWeights(): RoutingWeights {
       const reliability = w.reliability ?? 0;
       const speed = w.speed ?? 0;
       const intelligence = w.intelligence ?? 0;
-      const latency = w.latency ?? 0.20;  // default for old 3-axis stored weights
+      const latency = w.latency ?? 0.2; // default for old 3-axis stored weights
       if (
-        [reliability, speed, intelligence, latency].every(v => Number.isFinite(v) && v >= 0) &&
+        [reliability, speed, intelligence, latency].every(
+          (v) => Number.isFinite(v) && v >= 0,
+        ) &&
         reliability + speed + intelligence + latency > 0
       ) {
         return { reliability, speed, intelligence, latency };
       }
-    } catch { /* corrupt setting → fall through to default */ }
+    } catch {
+      /* corrupt setting → fall through to default */
+    }
   }
   return { ...BANDIT_PRESETS.balanced };
 }
 
 export function setCustomWeights(weights: RoutingWeights): void {
   const { reliability, speed, intelligence, latency } = weights;
-  if (![reliability, speed, intelligence, latency].every(v => Number.isFinite(v) && v >= 0)) {
-    throw new Error('Custom weights must be non-negative numbers');
+  if (
+    ![reliability, speed, intelligence, latency].every(
+      (v) => Number.isFinite(v) && v >= 0,
+    )
+  ) {
+    throw new Error("Custom weights must be non-negative numbers");
   }
   const sum = reliability + speed + intelligence + latency;
   if (sum <= 0) {
-    throw new Error('Custom weights must not all be zero');
+    throw new Error("Custom weights must not all be zero");
   }
-  setSetting(CUSTOM_WEIGHTS_KEY, JSON.stringify({
-    reliability: reliability / sum,
-    speed: speed / sum,
-    intelligence: intelligence / sum,
-    latency: latency / sum,
-  }));
+  setSetting(
+    CUSTOM_WEIGHTS_KEY,
+    JSON.stringify({
+      reliability: reliability / sum,
+      speed: speed / sum,
+      intelligence: intelligence / sum,
+      latency: latency / sum,
+    }),
+  );
 }
 
 function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
-  if (strategy === 'priority') return null;
-  if (strategy === 'custom') return getCustomWeights();
+  if (strategy === "priority") return null;
+  if (strategy === "custom") return getCustomWeights();
   return BANDIT_PRESETS[strategy];
 }
 
 // ── Analytics stats cache (decay-weighted) ──────────────────────────────────
 // Constants now backed by feature settings (scoring_window_days, scoring_decay_half_life_days, scoring_cache_ttl_sec).
 function getScoringWindowMs(): number {
-  return (getFeatureSetting('scoring_window_days') as number) * 24 * 60 * 60 * 1000;
+  return (
+    (getFeatureSetting("scoring_window_days") as number) * 24 * 60 * 60 * 1000
+  );
 }
 
 function getScoringHalfLifeDays(): number {
-  return getFeatureSetting('scoring_decay_half_life_days') as number;
+  return getFeatureSetting("scoring_decay_half_life_days") as number;
 }
 
 function getScoringCacheTtlMs(): number {
-  return (getFeatureSetting('scoring_cache_ttl_sec') as number) * 1000;
+  return (getFeatureSetting("scoring_cache_ttl_sec") as number) * 1000;
 }
 
 interface ModelStats {
-  successes: number;   // decay-weighted pseudo-count
-  failures: number;    // decay-weighted pseudo-count
-  tokPerSec: number;   // from successful requests only (0 = no data)
+  successes: number; // decay-weighted pseudo-count
+  failures: number; // decay-weighted pseudo-count
+  tokPerSec: number; // from successful requests only (0 = no data)
   avgTtfbMs: number | null; // null = no first-byte timing yet
 }
 
@@ -291,17 +375,23 @@ let statsCache: Map<string, ModelStats> | null = null;
 let statsCacheTime = 0;
 
 function decayWeight(ageDays: number): number {
-  return Math.pow(0.5, Math.max(0, ageDays) / getScoringHalfLifeDays());
+  return 0.5 ** (Math.max(0, ageDays) / getScoringHalfLifeDays());
 }
 
 export function refreshStatsCache(db: Database, force = false): void {
-  if (!force && statsCache && Date.now() - statsCacheTime < getScoringCacheTtlMs()) return;
+  if (
+    !force &&
+    statsCache &&
+    Date.now() - statsCacheTime < getScoringCacheTtlMs()
+  )
+    return;
 
   // Clear the temporary table
-  db.prepare('DELETE FROM model_stats_temp').run();
+  db.prepare("DELETE FROM model_stats_temp").run();
 
   const since = new Date(Date.now() - getScoringWindowMs()).toISOString();
-  const buckets = db.prepare(`
+  const buckets = db
+    .prepare(`
     SELECT platform, model_id,
       CAST((julianday('now') - julianday(created_at)) AS INTEGER) AS age_days,
       COUNT(*) AS total,
@@ -313,19 +403,42 @@ export function refreshStatsCache(db: Database, force = false): void {
     FROM requests
     WHERE created_at >= ?
     GROUP BY platform, model_id, age_days
-  `).all(since) as Array<{
-    platform: string; model_id: string; age_days: number; total: number; successes: number;
-    succ_out: number; succ_lat: number; succ_ttfb_sum: number; succ_ttfb_cnt: number;
+  `)
+    .all(since) as Array<{
+    platform: string;
+    model_id: string;
+    age_days: number;
+    total: number;
+    successes: number;
+    succ_out: number;
+    succ_lat: number;
+    succ_ttfb_sum: number;
+    succ_ttfb_cnt: number;
   }>;
 
   // Accumulate decay-weighted sums per model.
-  const acc = new Map<string, {
-    wSucc: number; wFail: number; wOut: number; wLat: number; wTtfbSum: number; wTtfbCnt: number;
-  }>();
+  const acc = new Map<
+    string,
+    {
+      wSucc: number;
+      wFail: number;
+      wOut: number;
+      wLat: number;
+      wTtfbSum: number;
+      wTtfbCnt: number;
+    }
+  >();
   for (const b of buckets) {
     const key = `${b.platform}:${b.model_id}`;
     const w = decayWeight(b.age_days);
-    const a = acc.get(key) ?? { wSucc: 0, wFail: 0, wOut: 0, wLat: 0, wTtfbSum: 0, wTtfbCnt: 0 };
+    const a = acc.get(key) ?? {
+      wSucc: 0,
+      wFail: 0,
+      wOut: 0,
+      wLat: 0,
+      wTtfbSum: 0,
+      wTtfbCnt: 0,
+    };
     a.wSucc += w * b.successes;
     a.wFail += w * (b.total - b.successes);
     a.wOut += w * b.succ_out;
@@ -343,7 +456,7 @@ export function refreshStatsCache(db: Database, force = false): void {
   `);
 
   for (const [key, a] of acc) {
-    const [platform, model_id] = key.split(':');
+    const [platform, model_id] = key.split(":");
     const tokPerSec = a.wLat > 0 ? (a.wOut * 1000) / a.wLat : 0;
     const avgTtfbMs = a.wTtfbCnt > 0 ? a.wTtfbSum / a.wTtfbCnt : null;
 
@@ -353,13 +466,17 @@ export function refreshStatsCache(db: Database, force = false): void {
       Math.round(a.wSucc),
       Math.round(a.wFail),
       tokPerSec,
-      avgTtfbMs
+      avgTtfbMs,
     );
   }
 
   // Also update the in-memory cache for existing functionality
   const next = new Map<string, ModelStats>();
-  const statsRows = db.prepare('SELECT platform, model_id, successes, failures, tokPerSec, avgTtfbMs FROM model_stats_temp').all();
+  const statsRows = db
+    .prepare(
+      "SELECT platform, model_id, successes, failures, tokPerSec, avgTtfbMs FROM model_stats_temp",
+    )
+    .all();
   for (const row of statsRows as any[]) {
     next.set(`${row.platform}:${row.model_id}`, {
       successes: row.successes,
@@ -382,8 +499,17 @@ export function refreshStatsCache(db: Database, force = false): void {
 // signal because it's derived from actual benchmark performance rather than
 // manual tier labels. The score [0, 100] is scaled to tier*1000 range so it
 // composes cleanly with the existing min-max normalization.
-const TIER_VALUE: Record<string, number> = { Frontier: 4, Large: 3, Medium: 2, Small: 1 };
-function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benchmarkScore: number | null): number {
+const TIER_VALUE: Record<string, number> = {
+  Frontier: 4,
+  Large: 3,
+  Medium: 2,
+  Small: 1,
+};
+function intelligenceComposite(
+  sizeLabel: string,
+  intelligenceRank: number,
+  benchmarkScore: number | null,
+): number {
   // NOTE: benchmark_score must ONLY be populated from intelligence sources
   // (AA Intelligence Index — sole benchmark source after SWE-rebench/NIMStats purge).
   //
@@ -411,7 +537,12 @@ function intelligenceComposite(sizeLabel: string, intelligenceRank: number, benc
 // Per-model axis values + the final score. `sampled` chooses Thompson sampling
 // (for routing) vs. the expected value (for a stable dashboard display).
 interface ScoredEntry {
-  axes: { reliability: number; speed: number; intelligence: number; latency: number };
+  axes: {
+    reliability: number;
+    speed: number;
+    intelligence: number;
+    latency: number;
+  };
   degradationFactor: number;
   boost: number;
   score: number;
@@ -443,10 +574,14 @@ function scoreChainEntry(
   // Compute a default speed score from the manual speed_rank so we have a
   // fallback when no real perf data exists yet. Uses the same min-max
   // normalisation pattern as intelligenceScore.
-  const speedComposite = speedCompositeFromRank(entry.speed_rank, entry.size_label);
-  const defaultSpeed = speedMax > speedMin
-    ? (speedComposite - speedMin) / (speedMax - speedMin)
-    : 1; // single model or all equal → neutral-high
+  const speedComposite = speedCompositeFromRank(
+    entry.speed_rank,
+    entry.size_label,
+  );
+  const defaultSpeed =
+    speedMax > speedMin
+      ? (speedComposite - speedMin) / (speedMax - speedMin)
+      : 1; // single model or all equal → neutral-high
 
   // Heavy-weight the real measured tok/sec over the manual default.
   // When we have no data → pure default. Lots of data → 95 % real.
@@ -459,9 +594,10 @@ function scoreChainEntry(
 
   // Latency axis: TTFB, blended with manual size-based prior.
   const latencyComposite = latencyCompositeFromSize(entry.size_label);
-  const defaultLatency = latencyMax > latencyMin
-    ? (latencyComposite - latencyMin) / (latencyMax - latencyMin)
-    : 1;
+  const defaultLatency =
+    latencyMax > latencyMin
+      ? (latencyComposite - latencyMin) / (latencyMax - latencyMin)
+      : 1;
 
   const latency = heavyWeightedLatencyScore(
     stats?.avgTtfbMs ?? null,
@@ -470,16 +606,30 @@ function scoreChainEntry(
   );
 
   const intelligence = intelligenceScore(
-    intelligenceComposite(entry.size_label, entry.intelligence_rank, entry.benchmark_score), intelMin, intelMax,
+    intelligenceComposite(
+      entry.size_label,
+      entry.intelligence_rank,
+      entry.benchmark_score,
+    ),
+    intelMin,
+    intelMax,
   );
 
   // budget system removed — headroom is no longer a factor
   const degradationFactor = getDegradationFactor(entry.model_db_id);
   const boost = getBoost(entry.model_db_id);
 
-  const baseScore = combineScore({ reliability, speed, intelligence, latency }, weights);
+  const baseScore = combineScore(
+    { reliability, speed, intelligence, latency },
+    weights,
+  );
   const score = baseScore * degradationFactor * boost;
-  return { axes: { reliability, speed, intelligence, latency }, degradationFactor, boost, score };
+  return {
+    axes: { reliability, speed, intelligence, latency },
+    degradationFactor,
+    boost,
+    score,
+  };
 }
 
 /**
@@ -493,31 +643,56 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
   if (!weights) {
     // Legacy priority mode: base priority + 429 penalty, ascending.
     return chain
-      .map(e => ({ e, eff: e.priority + getPenalty(e.model_db_id) }))
+      .map((e) => ({ e, eff: e.priority + getPenalty(e.model_db_id) }))
       .sort((a, b) => a.eff - b.eff || a.e.priority - b.e.priority)
-      .map(x => x.e);
+      .map((x) => x.e);
   }
 
   // Intelligence composites for min-max normalization
-  const intelComposites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score));
+  const intelComposites = chain.map((e) =>
+    intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score),
+  );
   const intelMin = intelComposites.length ? Math.min(...intelComposites) : 0;
   const intelMax = intelComposites.length ? Math.max(...intelComposites) : 0;
 
   // Speed composites for min-max normalization
-  const speedComposites = chain.map(e => speedCompositeFromRank(e.speed_rank, e.size_label));
+  const speedComposites = chain.map((e) =>
+    speedCompositeFromRank(e.speed_rank, e.size_label),
+  );
   const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
   const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
   // Latency composites for min-max normalization
-  const latencyComposites = chain.map(e => latencyCompositeFromSize(e.size_label));
-  const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
-  const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+  const latencyComposites = chain.map((e) =>
+    latencyCompositeFromSize(e.size_label),
+  );
+  const latencyMin = latencyComposites.length
+    ? Math.min(...latencyComposites)
+    : 0;
+  const latencyMax = latencyComposites.length
+    ? Math.max(...latencyComposites)
+    : 0;
 
-  return chain
-    .map(e => ({ e, s: scoreChainEntry(e, weights, intelMin, intelMax, speedMin, speedMax, latencyMin, latencyMax, true).score }))
-    // Higher score first; manual priority breaks ties so the chain still matters.
-    .sort((a, b) => b.s - a.s || a.e.priority - b.e.priority)
-    .map(x => x.e);
+  return (
+    chain
+      .map((e) => ({
+        e,
+        s: scoreChainEntry(
+          e,
+          weights,
+          intelMin,
+          intelMax,
+          speedMin,
+          speedMax,
+          latencyMin,
+          latencyMax,
+          true,
+        ).score,
+      }))
+      // Higher score first; manual priority breaks ties so the chain still matters.
+      .sort((a, b) => b.s - a.s || a.e.priority - b.e.priority)
+      .map((x) => x.e)
+  );
 }
 
 // –– Group-aware ordering –––––––––––––––––––––––––––––––––––––––––––––––
@@ -536,12 +711,20 @@ function orderGroupChain(
   latencyMax = 0,
   sampled = false,
 ): GroupChainRow[] {
-  if (strategy === 'priority') return chain;
-  const groupComposites = chain.map(g =>
-    intelligenceComposite(g.size_label, g.intelligence_rank ?? 0, g.benchmark_score)
+  if (strategy === "priority") return chain;
+  const groupComposites = chain.map((g) =>
+    intelligenceComposite(
+      g.size_label,
+      g.intelligence_rank ?? 0,
+      g.benchmark_score,
+    ),
   );
-  const groupIntelMin = groupComposites.length ? Math.min(...groupComposites) : 0;
-  const groupIntelMax = groupComposites.length ? Math.max(...groupComposites) : 0;
+  const groupIntelMin = groupComposites.length
+    ? Math.min(...groupComposites)
+    : 0;
+  const groupIntelMax = groupComposites.length
+    ? Math.max(...groupComposites)
+    : 0;
 
   return [...chain].sort((a, b) => {
     const aScore = groupRepresentativeScore(
@@ -585,17 +768,35 @@ function groupRepresentativeScore(
   sampled: boolean,
 ): number {
   const intelligence = intelligenceScore(
-    intelligenceComposite(group.size_label, group.intelligence_rank ?? 0, group.benchmark_score),
+    intelligenceComposite(
+      group.size_label,
+      group.intelligence_rank ?? 0,
+      group.benchmark_score,
+    ),
     groupIntelMin,
     groupIntelMax,
   );
-  const bestProviderSubScore = providers.length > 0
-    ? Math.max(...providers.map(provider =>
-        providerSubScore(provider, weights, speedMin, speedMax, latencyMin, latencyMax, sampled).subScore
-      ))
-    : 0;
+  const bestProviderSubScore =
+    providers.length > 0
+      ? Math.max(
+          ...providers.map(
+            (provider) =>
+              providerSubScore(
+                provider,
+                weights,
+                speedMin,
+                speedMax,
+                latencyMin,
+                latencyMax,
+                sampled,
+              ).subScore,
+          ),
+        )
+      : 0;
   const providerWeight = weights.reliability + weights.speed + weights.latency;
-  return (weights.intelligence * intelligence) + (providerWeight * bestProviderSubScore);
+  return (
+    weights.intelligence * intelligence + providerWeight * bestProviderSubScore
+  );
 }
 
 /** Compute a sub-score for a provider within a group.
@@ -604,15 +805,26 @@ function groupRepresentativeScore(
 function providerSubScore(
   provider: ProviderRow,
   weights: RoutingWeights,
-  speedMin: number, speedMax: number,
-  latencyMin: number, latencyMax: number,
+  speedMin: number,
+  speedMax: number,
+  latencyMin: number,
+  latencyMax: number,
   sampled: boolean,
-): { subScore: number; axes: { reliability: number; speed: number; latency: number } } {
+): {
+  subScore: number;
+  axes: { reliability: number; speed: number; latency: number };
+} {
   // Re-normalise without intelligence
   const remaining = weights.speed + weights.reliability + weights.latency;
-  const subWeights: RoutingWeights = remaining > 0
-    ? { speed: weights.speed / remaining, reliability: weights.reliability / remaining, intelligence: 0, latency: weights.latency / remaining }
-    : { speed: 1/3, reliability: 1/3, intelligence: 0, latency: 1/3 };
+  const subWeights: RoutingWeights =
+    remaining > 0
+      ? {
+          speed: weights.speed / remaining,
+          reliability: weights.reliability / remaining,
+          intelligence: 0,
+          latency: weights.latency / remaining,
+        }
+      : { speed: 1 / 3, reliability: 1 / 3, intelligence: 0, latency: 1 / 3 };
 
   const stats = statsCache?.get(`${provider.platform}:${provider.model_id}`);
   const successes = stats?.successes ?? 0;
@@ -626,19 +838,32 @@ function providerSubScore(
     reliability = expectedReliability(successes, failures);
   }
 
-  const speedComposite = speedCompositeFromRank(provider.speed_rank, provider.size_label);
-  const speed = speedMax > speedMin
-    ? (speedComposite - speedMin) / (speedMax - speedMin)
-    : 1;
+  const speedComposite = speedCompositeFromRank(
+    provider.speed_rank,
+    provider.size_label,
+  );
+  const speed =
+    speedMax > speedMin
+      ? (speedComposite - speedMin) / (speedMax - speedMin)
+      : 1;
 
   const totalRequests = Math.round(successes + failures);
-  const speedVal = heavyWeightedSpeedScore(stats?.tokPerSec ?? 0, totalRequests, speed);
+  const speedVal = heavyWeightedSpeedScore(
+    stats?.tokPerSec ?? 0,
+    totalRequests,
+    speed,
+  );
 
   const latencyComposite = latencyCompositeFromSize(provider.size_label);
-  const defaultLatency = latencyMax > latencyMin
-    ? (latencyComposite - latencyMin) / (latencyMax - latencyMin)
-    : 1;
-  const latency = heavyWeightedLatencyScore(stats?.avgTtfbMs ?? null, totalRequests, defaultLatency);
+  const defaultLatency =
+    latencyMax > latencyMin
+      ? (latencyComposite - latencyMin) / (latencyMax - latencyMin)
+      : 1;
+  const latency = heavyWeightedLatencyScore(
+    stats?.avgTtfbMs ?? null,
+    totalRequests,
+    defaultLatency,
+  );
 
   const degradationFactor = getDegradationFactor(provider.model_db_id);
   const boost = getBoost(provider.model_db_id);
@@ -678,23 +903,34 @@ export interface RouteOptions {
 }
 
 function pinnedModelExhaustedError(): Error {
-  const err = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-  err.code = 'PINNED_MODEL_EXHAUSTED';
+  const err = new Error(
+    "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
+  ) as any;
+  err.code = "PINNED_MODEL_EXHAUSTED";
   err.status = 429;
   return err;
 }
 
-export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, preferredModelDbId?: number, requireVision = false, requireTools = false, skipModels?: Set<number>, options?: RouteOptions): RouteResult {
+export function routeRequest(
+  estimatedTokens = 1000,
+  skipKeys?: Set<string>,
+  preferredModelDbId?: number,
+  requireVision = false,
+  requireTools = false,
+  skipModels?: Set<number>,
+  options?: RouteOptions,
+): RouteResult {
   const db = getDb();
 
   const strategy = getRoutingStrategy();
-  if (strategy !== 'priority') refreshStatsCache(db);
+  if (strategy !== "priority") refreshStatsCache(db);
 
   // –– GROUP-AWARE ROUTING –––––––––––––––––––––––––––––––––––––––––––––––––
-  const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+  const groupingEnabled = getSetting("model_grouping_enabled") === "true";
   if (groupingEnabled) {
     // Query the group chain: fallback_config JOIN model_groups
-    const groupChain = db.prepare(`
+    const groupChain = db
+      .prepare(`
       SELECT fc.group_id, fc.priority, fc.enabled,
              mg.group_key, mg.display_name, mg.benchmark_score,
              mg.intelligence_rank, mg.size_label, mg.context_window,
@@ -702,16 +938,18 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       FROM fallback_config fc
       JOIN model_groups mg ON mg.id = fc.group_id
       WHERE fc.enabled = 1 AND mg.enabled = 1
-    `).all() as GroupChainRow[];
+    `)
+      .all() as GroupChainRow[];
 
     // Pre-compute normalization ranges for provider sub-scoring
     // Load providers once and group them in memory to avoid N+1 queries on the
     // API hot path.
-    const allGroupIds = groupChain.map(g => g.group_id);
+    const allGroupIds = groupChain.map((g) => g.group_id);
     let allProviders: ProviderRow[] = [];
     if (allGroupIds.length > 0) {
-      const placeholders = allGroupIds.map(() => '?').join(', ');
-      allProviders = db.prepare(`
+      const placeholders = allGroupIds.map(() => "?").join(", ");
+      allProviders = db
+        .prepare(`
         SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
                m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
                m.key_id, m.enabled, m.supports_vision, m.supports_tools,
@@ -719,7 +957,8 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
                m.max_output_tokens
         FROM models m
         WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
-      `).all(...allGroupIds) as ProviderRow[];
+      `)
+        .all(...allGroupIds) as ProviderRow[];
     }
     const providersByGroup = new Map<number, ProviderRow[]>();
     for (const provider of allProviders) {
@@ -729,16 +968,34 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     }
 
     // Compute min/max for speed/latency normalization across all providers
-    const speedComposites = allProviders.map(p => speedCompositeFromRank(p.speed_rank, p.size_label));
+    const speedComposites = allProviders.map((p) =>
+      speedCompositeFromRank(p.speed_rank, p.size_label),
+    );
     const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
     const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
-    const latencyComposites = allProviders.map(p => latencyCompositeFromSize(p.size_label));
-    const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
-    const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+    const latencyComposites = allProviders.map((p) =>
+      latencyCompositeFromSize(p.size_label),
+    );
+    const latencyMin = latencyComposites.length
+      ? Math.min(...latencyComposites)
+      : 0;
+    const latencyMax = latencyComposites.length
+      ? Math.max(...latencyComposites)
+      : 0;
 
     const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-    const sortedGroupChain = orderGroupChain(groupChain, strategy, providersByGroup, weights, speedMin, speedMax, latencyMin, latencyMax, true);
+    const sortedGroupChain = orderGroupChain(
+      groupChain,
+      strategy,
+      providersByGroup,
+      weights,
+      speedMin,
+      speedMax,
+      latencyMin,
+      latencyMax,
+      true,
+    );
     const pinMode = options?.pinMode ?? false;
 
     // Sticky/group pinning: move the preferred group to the front. Explicit
@@ -747,13 +1004,15 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     let preferredGroupId = options?.preferredGroupId;
     if (preferredGroupId == null && preferredModelDbId) {
       // Find which group contains the preferred model
-      const prefGroupRow = db.prepare(
-        'SELECT group_id FROM models WHERE id = ?'
-      ).get(preferredModelDbId) as { group_id: number | null } | undefined;
+      const prefGroupRow = db
+        .prepare("SELECT group_id FROM models WHERE id = ?")
+        .get(preferredModelDbId) as { group_id: number | null } | undefined;
       preferredGroupId = prefGroupRow?.group_id ?? undefined;
     }
     if (preferredGroupId != null) {
-      const idx = sortedGroupChain.findIndex(g => g.group_id === preferredGroupId);
+      const idx = sortedGroupChain.findIndex(
+        (g) => g.group_id === preferredGroupId,
+      );
       if (idx > 0) {
         const [preferred] = sortedGroupChain.splice(idx, 1);
         sortedGroupChain.unshift(preferred);
@@ -761,15 +1020,17 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         throw pinnedModelExhaustedError();
       }
     }
-    const routeGroupChain = pinMode && preferredGroupId != null
-      ? sortedGroupChain.filter(g => g.group_id === preferredGroupId)
-      : sortedGroupChain;
+    const routeGroupChain =
+      pinMode && preferredGroupId != null
+        ? sortedGroupChain.filter((g) => g.group_id === preferredGroupId)
+        : sortedGroupChain;
     if (pinMode && preferredGroupId != null && routeGroupChain.length === 0) {
       throw pinnedModelExhaustedError();
     }
 
     for (const group of routeGroupChain) {
-      const isPreferredGroup = preferredGroupId != null && group.group_id === preferredGroupId;
+      const isPreferredGroup =
+        preferredGroupId != null && group.group_id === preferredGroupId;
       // Filter by vision/tools/context at the GROUP level
       if (requireVision && !group.supports_vision) {
         if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
@@ -779,7 +1040,10 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
         continue;
       }
-      if (group.context_window != null && estimatedTokens > group.context_window) {
+      if (
+        group.context_window != null &&
+        estimatedTokens > group.context_window
+      ) {
         if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
         continue;
       }
@@ -794,11 +1058,21 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // Score and sort providers within this group
       const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
       const providersScored = providers
-        .map(p => {
-          const { subScore, axes } = providerSubScore(p, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, true);
+        .map((p) => {
+          const { subScore, axes } = providerSubScore(
+            p,
+            weightsForSub,
+            speedMin,
+            speedMax,
+            latencyMin,
+            latencyMax,
+            true,
+          );
           return { p, subScore, axes };
         })
-        .sort((a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank);
+        .sort(
+          (a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank,
+        );
 
       for (const { p: provider } of providersScored) {
         // Models the caller has ruled out for this request
@@ -808,9 +1082,11 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
         const prov = buildProviderFor(provider.platform);
         if (!prov) continue;
 
-        const keys = db.prepare(
-          "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
-        ).all(provider.platform) as KeyRow[];
+        const keys = db
+          .prepare(
+            "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
+          )
+          .all(provider.platform) as KeyRow[];
 
         if (keys.length === 0) {
           continue;
@@ -818,46 +1094,68 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
         // Key health filtering
         const heartbeatEnabled = isHeartbeatEnabled();
-        const healthyKeys = keys.filter(k => isKeyHealthy(k.id, provider.model_id));
+        const healthyKeys = keys.filter((k) =>
+          isKeyHealthy(k.id, provider.model_id),
+        );
 
         if (heartbeatEnabled && healthyKeys.length === 0) {
           continue;
         }
 
-        const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id, provider.model_id));
+        const unhealthyKeys = heartbeatEnabled
+          ? []
+          : keys.filter((k) => !isKeyHealthy(k.id, provider.model_id));
 
         // Key ordering
         const rrKey = `${provider.platform}:${provider.model_id}`;
-        const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
+        const keyAffinityEnabled = getFeatureSetting(
+          "key_affinity_enabled",
+        ) as boolean;
         let providerStickyEnabled = false;
         if (!keyAffinityEnabled) {
-          const stickyRow = db.prepare(
-            'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
-          ).get(provider.platform) as { sticky_sessions_enabled: number } | undefined;
+          const stickyRow = db
+            .prepare(
+              "SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?",
+            )
+            .get(provider.platform) as
+            | { sticky_sessions_enabled: number }
+            | undefined;
           providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
         }
-        const useKeyAffinity = (keyAffinityEnabled || (providerStickyEnabled && options?.stickySessionKey))
-          && options?.stickySessionKey;
+        const useKeyAffinity =
+          (keyAffinityEnabled ||
+            (providerStickyEnabled && options?.stickySessionKey)) &&
+          options?.stickySessionKey;
 
         let keyOrder: KeyRow[];
         let idx: number;
         let rrIdx = 0;
         if (useKeyAffinity) {
           keyOrder = [...healthyKeys, ...unhealthyKeys];
-          const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
+          const hash = crypto
+            .createHash("sha1")
+            .update(options!.stickySessionKey!)
+            .digest();
           const hashInt = hash.readUInt32BE(0);
           idx = hashInt % keyOrder.length;
         } else {
           rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+          // When heartbeat is enabled, shuffle healthy keys by ping latency
+          // with weighted randomness so faster keys get more traffic
+          const orderedHealthyKeys = heartbeatEnabled
+            ? pingWeightedShuffle(healthyKeys, provider.model_id)
+            : rotateArray(healthyKeys, rrIdx);
           keyOrder = [
-            ...rotateArray(healthyKeys, rrIdx),
+            ...orderedHealthyKeys,
             ...rotateArray(unhealthyKeys, rrIdx),
           ];
           idx = 0;
         }
 
         for (let attempt = 0; attempt < keyOrder.length; attempt++) {
-          const actualIdx = useKeyAffinity ? (idx + attempt) % keyOrder.length : attempt;
+          const actualIdx = useKeyAffinity
+            ? (idx + attempt) % keyOrder.length
+            : attempt;
           const key = keyOrder[actualIdx];
 
           const skipId = `${provider.platform}:${provider.model_id}:${key.id}`;
@@ -865,9 +1163,13 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
           if (isExhausted(key.id, provider.model_id)) continue;
 
           // Parallel request gating
-          const cp = db.prepare(
-            'SELECT max_parallel_requests FROM custom_providers WHERE slug = ?'
-          ).get(provider.platform) as { max_parallel_requests: number | null } | undefined;
+          const cp = db
+            .prepare(
+              "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
+            )
+            .get(provider.platform) as
+            | { max_parallel_requests: number | null }
+            | undefined;
           const maxPar = cp?.max_parallel_requests ?? null;
           if (!tryReserveSlot(provider.platform, maxPar)) continue;
 
@@ -875,7 +1177,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
           try {
             decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
           } catch {
-            db.prepare("UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?").run(key.id);
+            db.prepare(
+              "UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?",
+            ).run(key.id);
             releaseSlot(provider.platform);
             continue;
           }
@@ -883,10 +1187,12 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
           const release = () => releaseSlot(provider.platform);
 
           if (useKeyAffinity) {
-            console.log(`[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`);
+            console.log(
+              `[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`,
+            );
             publish({
-              type: 'routing.key_affinity_selected',
-              id: '',
+              type: "routing.key_affinity_selected",
+              id: "",
               sessionKey: options!.stickySessionKey!.slice(0, 8),
               keyId: key.id,
               model: provider.model_id,
@@ -924,14 +1230,17 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     }
 
     // All groups exhausted
-    const err = new Error('All models exhausted. Add more API keys or check provider status.') as any;
+    const err = new Error(
+      "All models exhausted. Add more API keys or check provider status.",
+    ) as any;
     err.status = 429;
     throw err;
   }
 
   // –– FLAT CHAIN (LEGACY) –––––––––––––––––––––––––––––––––––––––––––––––––––
   // Get the enabled fallback chain joined with the fields the scorer needs.
-  const chain = db.prepare(`
+  const chain = db
+    .prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank,
            m.speed_rank, m.size_label,
@@ -941,13 +1250,16 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE fc.enabled = 1 AND m.enabled = 1
-  `).all() as ChainRow[];
+  `)
+    .all() as ChainRow[];
 
   const sortedChain = orderChain(chain, strategy);
 
   // Sticky session: move preferred model to front of chain
   if (preferredModelDbId) {
-    const idx = sortedChain.findIndex(e => e.model_db_id === preferredModelDbId);
+    const idx = sortedChain.findIndex(
+      (e) => e.model_db_id === preferredModelDbId,
+    );
     if (idx > 0) {
       const [preferred] = sortedChain.splice(idx, 1);
       sortedChain.unshift(preferred);
@@ -983,7 +1295,8 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // failed model is put on cooldown — so this is a fast-path, not the only
     // guard. If every model is too small, the loop falls through and the caller
     // gets the normal "all models exhausted" error rather than a wasted sweep.
-    if (entry.context_window != null && estimatedTokens > entry.context_window) continue;
+    if (entry.context_window != null && estimatedTokens > entry.context_window)
+      continue;
 
     // Same guard for a model with a small per-minute token budget: a single
     // request that alone exceeds tpm_limit can never fit one minute of quota and
@@ -998,14 +1311,22 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     const provider = buildProviderFor(entry.platform);
     if (!provider) continue;
     // Get enabled keys that have not already failed validation or decryption.
-    const keys = db.prepare(
-      "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')"
-    ).all(entry.platform) as KeyRow[];
+    const keys = db
+      .prepare(
+        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
+      )
+      .all(entry.platform) as KeyRow[];
 
     if (keys.length === 0) {
-      if (pinMode && preferredModelDbId && entry.model_db_id === preferredModelDbId) {
-        const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-        pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+      if (
+        pinMode &&
+        preferredModelDbId &&
+        entry.model_db_id === preferredModelDbId
+      ) {
+        const pinErr = new Error(
+          "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
+        ) as any;
+        pinErr.code = "PINNED_MODEL_EXHAUSTED";
         pinErr.status = 429;
         throw pinErr;
       }
@@ -1022,18 +1343,24 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
     // Try all keys for this model before giving up on it.
     const rrKey = `${entry.platform}:${entry.model_id}`;
-    const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
+    const keyAffinityEnabled = getFeatureSetting(
+      "key_affinity_enabled",
+    ) as boolean;
     // Backward compat: when global key affinity is off, fall back to per-provider
     // sticky_sessions_enabled column for custom providers.
     let providerStickyEnabled = false;
     if (!keyAffinityEnabled) {
-      const stickyRow = db.prepare(
-        'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
-      ).get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
+      const stickyRow = db
+        .prepare(
+          "SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?",
+        )
+        .get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
       providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
     }
-    const useKeyAffinity = (keyAffinityEnabled || (providerStickyEnabled && options?.stickySessionKey))
-      && options?.stickySessionKey; // Only use affinity if we have a valid session key
+    const useKeyAffinity =
+      (keyAffinityEnabled ||
+        (providerStickyEnabled && options?.stickySessionKey)) &&
+      options?.stickySessionKey; // Only use affinity if we have a valid session key
 
     // ── Key health filtering ──
     // When the heartbeat is enabled, only keys that have been prewarmed
@@ -1042,14 +1369,20 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // excluded — they must first pass a heartbeat cycle to prove health.
     // When heartbeat is disabled, all keys are usable (backward compat).
     const heartbeatEnabled = isHeartbeatEnabled();
-    const healthyKeys = keys.filter(k => isKeyHealthy(k.id, entry.model_id));
+    const healthyKeys = keys.filter((k) => isKeyHealthy(k.id, entry.model_id));
 
     if (heartbeatEnabled && healthyKeys.length === 0) {
       // No prewarmed healthy keys for this model — skip to the next model.
       // In pin mode, throw immediately instead of falling through silently.
-      if (pinMode && preferredModelDbId && entry.model_db_id === preferredModelDbId) {
-        const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-        pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+      if (
+        pinMode &&
+        preferredModelDbId &&
+        entry.model_db_id === preferredModelDbId
+      ) {
+        const pinErr = new Error(
+          "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
+        ) as any;
+        pinErr.code = "PINNED_MODEL_EXHAUSTED";
         pinErr.status = 429;
         throw pinErr;
       }
@@ -1059,7 +1392,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // Split keys by health status so healthy keys are ALWAYS tried first,
     // regardless of round-robin offset. Apply round-robin within each group
     // independently to maintain fair distribution while respecting health.
-    const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id, entry.model_id));
+    const unhealthyKeys = heartbeatEnabled
+      ? []
+      : keys.filter((k) => !isKeyHealthy(k.id, entry.model_id));
 
     // Build the key ordering array and starting index.
     // For key affinity: concatenate healthy+unhealthy and hash into it.
@@ -1071,20 +1406,27 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     let rrIdx = 0; // For round-robin increment tracking
     if (useKeyAffinity) {
       keyOrder = [...healthyKeys, ...unhealthyKeys];
-      const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
+      const hash = crypto
+        .createHash("sha1")
+        .update(options!.stickySessionKey!)
+        .digest();
       const hashInt = hash.readUInt32BE(0);
       idx = hashInt % keyOrder.length;
     } else {
       rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-      keyOrder = [
-        ...rotateArray(healthyKeys, rrIdx),
-        ...rotateArray(unhealthyKeys, rrIdx),
-      ];
+      // When heartbeat is enabled, shuffle healthy keys by ping latency
+      // with weighted randomness so faster keys get more traffic
+      const orderedHealthyKeys = heartbeatEnabled
+        ? pingWeightedShuffle(healthyKeys, entry.model_id)
+        : rotateArray(healthyKeys, rrIdx);
+      keyOrder = [...orderedHealthyKeys, ...rotateArray(unhealthyKeys, rrIdx)];
       idx = 0; // start from beginning — healthy-first guaranteed by construction
     }
 
     for (let attempt = 0; attempt < keyOrder.length; attempt++) {
-      const actualIdx = useKeyAffinity ? (idx + attempt) % keyOrder.length : attempt;
+      const actualIdx = useKeyAffinity
+        ? (idx + attempt) % keyOrder.length
+        : attempt;
       const key = keyOrder[actualIdx];
 
       const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
@@ -1099,7 +1441,6 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       // tracking. The proxy's retry loop + cooldown-on-failure handles any
       // actual 429s that slip through.
 
-
       // provider was already resolved above; if it came back undefined (e.g.
       // a custom provider row was deleted), we already continued.
 
@@ -1110,9 +1451,13 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
       // ── Parallel request gating (provider-level) ──
       // Check if this provider has a concurrency cap and try to reserve a slot.
-      const cp = db.prepare(
-        'SELECT max_parallel_requests FROM custom_providers WHERE slug = ?'
-      ).get(entry.platform) as { max_parallel_requests: number | null } | undefined;
+      const cp = db
+        .prepare(
+          "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
+        )
+        .get(entry.platform) as
+        | { max_parallel_requests: number | null }
+        | undefined;
       const maxPar = cp?.max_parallel_requests ?? null;
       if (!tryReserveSlot(entry.platform, maxPar)) continue; // at capacity, try next model
       let decryptedKey: string;
@@ -1121,8 +1466,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       } catch {
         // Decrypt failure is permanent — disable the key so it's never
         // selected again (Fix 1 includes status='error' in routing).
-        db.prepare("UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?")
-          .run(key.id);
+        db.prepare(
+          "UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?",
+        ).run(key.id);
         releaseSlot(entry.platform);
         continue;
       }
@@ -1131,10 +1477,12 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       const release = () => releaseSlot(entry.platform);
 
       if (useKeyAffinity) {
-        console.log(`[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`);
+        console.log(
+          `[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`,
+        );
         publish({
-          type: 'routing.key_affinity_selected',
-          id: '',
+          type: "routing.key_affinity_selected",
+          id: "",
           sessionKey: options!.stickySessionKey!.slice(0, 8),
           keyId: key.id,
           model: entry.model_id,
@@ -1143,20 +1491,20 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
       }
 
       return {
-              provider: provider,
-              modelId: entry.model_id,
-              modelDbId: entry.model_db_id,
-              apiKey: decryptedKey,
-              keyId: key.id,
-              platform: entry.platform,
-              displayName: entry.display_name,
-              rpdLimit: limits.rpd,
-              tpdLimit: limits.tpd,
-              maxOutputTokens: entry.max_output_tokens,
-              release,
-              useProxy: key.use_proxy === 1,
-              transportId: transportIdFromUseProxy(key.use_proxy === 1),
-            };
+        provider: provider,
+        modelId: entry.model_id,
+        modelDbId: entry.model_db_id,
+        apiKey: decryptedKey,
+        keyId: key.id,
+        platform: entry.platform,
+        displayName: entry.display_name,
+        rpdLimit: limits.rpd,
+        tpdLimit: limits.tpd,
+        maxOutputTokens: entry.max_output_tokens,
+        release,
+        useProxy: key.use_proxy === 1,
+        transportId: transportIdFromUseProxy(key.use_proxy === 1),
+      };
     }
 
     // If we reach here, this specific model has NO available keys.
@@ -1166,9 +1514,15 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     }
 
     // In pin mode, don't fall through to the next model.
-    if (pinMode && preferredModelDbId && entry.model_db_id === preferredModelDbId) {
-      const pinErr = new Error('Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.') as any;
-      pinErr.code = 'PINNED_MODEL_EXHAUSTED';
+    if (
+      pinMode &&
+      preferredModelDbId &&
+      entry.model_db_id === preferredModelDbId
+    ) {
+      const pinErr = new Error(
+        "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
+      ) as any;
+      pinErr.code = "PINNED_MODEL_EXHAUSTED";
       pinErr.status = 429;
       throw pinErr;
     }
@@ -1178,7 +1532,9 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // in the sortedChain for THIS specific request.
   }
 
-  const err = new Error('All models exhausted. Add more API keys or check provider status.') as any;
+  const err = new Error(
+    "All models exhausted. Add more API keys or check provider status.",
+  ) as any;
   err.status = 429;
   throw err;
 }
@@ -1218,12 +1574,18 @@ export interface GroupedRoutingScore {
   }>;
 }
 
-export function getRoutingScores(): { strategy: RoutingStrategy; weights: RoutingWeights | null; scores: RoutingScore[]; groupedScores?: GroupedRoutingScore[] } {
+export function getRoutingScores(): {
+  strategy: RoutingStrategy;
+  weights: RoutingWeights | null;
+  scores: RoutingScore[];
+  groupedScores?: GroupedRoutingScore[];
+} {
   const db = getDb();
   const strategy = getRoutingStrategy();
   refreshStatsCache(db);
 
-  const chain = db.prepare(`
+  const chain = db
+    .prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
            m.platform, m.model_id, m.display_name, m.intelligence_rank, m.speed_rank,
            m.size_label,
@@ -1232,51 +1594,77 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE fc.enabled = 1 AND m.enabled = 1
-  `).all() as ChainRow[];
+  `)
+    .all() as ChainRow[];
 
   // For display we score under 'balanced' weights when in priority mode, so the
   // table still shows a meaningful ranking even with the bandit turned off.
   const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-  const composites = chain.map(e => intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score));
+  const composites = chain.map((e) =>
+    intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score),
+  );
   const intelMin = composites.length ? Math.min(...composites) : 0;
   const intelMax = composites.length ? Math.max(...composites) : 0;
 
   // Speed composites for min-max normalization
-  const speedComposites = chain.map(e => speedCompositeFromRank(e.speed_rank, e.size_label));
+  const speedComposites = chain.map((e) =>
+    speedCompositeFromRank(e.speed_rank, e.size_label),
+  );
   const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
   const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
   // Latency composites for min-max normalization
-  const latencyComposites = chain.map(e => latencyCompositeFromSize(e.size_label));
-  const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
-  const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+  const latencyComposites = chain.map((e) =>
+    latencyCompositeFromSize(e.size_label),
+  );
+  const latencyMin = latencyComposites.length
+    ? Math.min(...latencyComposites)
+    : 0;
+  const latencyMax = latencyComposites.length
+    ? Math.max(...latencyComposites)
+    : 0;
 
-  const scores: RoutingScore[] = chain.map(entry => {
-    const scored = scoreChainEntry(entry, weights, intelMin, intelMax, speedMin, speedMax, latencyMin, latencyMax, false);
-    const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
-    return {
-      modelDbId: entry.model_db_id,
-      platform: entry.platform,
-      modelId: entry.model_id,
-      displayName: entry.display_name,
-      enabled: true,
-      reliability: scored.axes.reliability,
-      speed: scored.axes.speed,
-      intelligence: scored.axes.intelligence,
-      latency: scored.axes.latency,
-      degradationFactor: scored.degradationFactor,
-      boost: scored.boost,
-      score: scored.score,
-      totalRequests: Math.round((stats?.successes ?? 0) + (stats?.failures ?? 0)),
-    };
-  }).sort((a, b) => b.score - a.score);
+  const scores: RoutingScore[] = chain
+    .map((entry) => {
+      const scored = scoreChainEntry(
+        entry,
+        weights,
+        intelMin,
+        intelMax,
+        speedMin,
+        speedMax,
+        latencyMin,
+        latencyMax,
+        false,
+      );
+      const stats = statsCache?.get(`${entry.platform}:${entry.model_id}`);
+      return {
+        modelDbId: entry.model_db_id,
+        platform: entry.platform,
+        modelId: entry.model_id,
+        displayName: entry.display_name,
+        enabled: true,
+        reliability: scored.axes.reliability,
+        speed: scored.axes.speed,
+        intelligence: scored.axes.intelligence,
+        latency: scored.axes.latency,
+        degradationFactor: scored.degradationFactor,
+        boost: scored.boost,
+        score: scored.score,
+        totalRequests: Math.round(
+          (stats?.successes ?? 0) + (stats?.failures ?? 0),
+        ),
+      };
+    })
+    .sort((a, b) => b.score - a.score);
 
   // –– Grouped scores when grouping is enabled –––––––––––––––––––––––––––
-  const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+  const groupingEnabled = getSetting("model_grouping_enabled") === "true";
   let groupedScores: GroupedRoutingScore[] | undefined;
   if (groupingEnabled) {
     // Query groups with their fallback_config priority
-    const groupChain = db.prepare(`
+    const groupChain = db
+      .prepare(`
       SELECT fc.group_id, fc.priority, fc.enabled,
              mg.group_key, mg.display_name, mg.benchmark_score,
              mg.intelligence_rank, mg.size_label, mg.context_window,
@@ -1284,13 +1672,15 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
       FROM fallback_config fc
       JOIN model_groups mg ON mg.id = fc.group_id
       WHERE fc.enabled = 1 AND mg.enabled = 1
-    `).all() as GroupChainRow[];
+    `)
+      .all() as GroupChainRow[];
 
     // Collect all providers for normalization ranges
     let allProviders: ProviderRow[] = [];
     if (groupChain.length > 0) {
-      const placeholders = groupChain.map(() => '?').join(', ');
-      allProviders = db.prepare(`
+      const placeholders = groupChain.map(() => "?").join(", ");
+      allProviders = db
+        .prepare(`
         SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
                m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
                m.key_id, m.enabled, m.supports_vision, m.supports_tools,
@@ -1298,7 +1688,8 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
                m.max_output_tokens
         FROM models m
         WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
-      `).all(...groupChain.map(g => g.group_id)) as ProviderRow[];
+      `)
+        .all(...groupChain.map((g) => g.group_id)) as ProviderRow[];
     }
     const providersByGroup = new Map<number, ProviderRow[]>();
     for (const provider of allProviders) {
@@ -1308,24 +1699,50 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
     }
 
     // Min-max for provider sub-scoring
-    const speedComposites = allProviders.map(p => speedCompositeFromRank(p.speed_rank, p.size_label));
+    const speedComposites = allProviders.map((p) =>
+      speedCompositeFromRank(p.speed_rank, p.size_label),
+    );
     const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
     const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
-    const latencyComposites = allProviders.map(p => latencyCompositeFromSize(p.size_label));
-    const latencyMin = latencyComposites.length ? Math.min(...latencyComposites) : 0;
-    const latencyMax = latencyComposites.length ? Math.max(...latencyComposites) : 0;
+    const latencyComposites = allProviders.map((p) =>
+      latencyCompositeFromSize(p.size_label),
+    );
+    const latencyMin = latencyComposites.length
+      ? Math.min(...latencyComposites)
+      : 0;
+    const latencyMax = latencyComposites.length
+      ? Math.max(...latencyComposites)
+      : 0;
 
     const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-    const sortedGroups = orderGroupChain(groupChain, strategy, providersByGroup, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, false);
+    const sortedGroups = orderGroupChain(
+      groupChain,
+      strategy,
+      providersByGroup,
+      weightsForSub,
+      speedMin,
+      speedMax,
+      latencyMin,
+      latencyMax,
+      false,
+    );
 
     groupedScores = [];
     // Compute intelligence composites for all groups and min-max normalize
-    const groupComposites = sortedGroups.map(g =>
-      intelligenceComposite(g.size_label, g.intelligence_rank ?? 0, g.benchmark_score)
+    const groupComposites = sortedGroups.map((g) =>
+      intelligenceComposite(
+        g.size_label,
+        g.intelligence_rank ?? 0,
+        g.benchmark_score,
+      ),
     );
-    const groupIntelMin = groupComposites.length ? Math.min(...groupComposites) : 0;
-    const groupIntelMax = groupComposites.length ? Math.max(...groupComposites) : 0;
+    const groupIntelMin = groupComposites.length
+      ? Math.min(...groupComposites)
+      : 0;
+    const groupIntelMax = groupComposites.length
+      ? Math.max(...groupComposites)
+      : 0;
 
     for (const group of sortedGroups) {
       const providers = providersByGroup.get(group.group_id) ?? [];
@@ -1333,8 +1750,16 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
 
       // Score providers within this group (deterministic, not sampled)
       const providersScored = providers
-        .map(p => {
-          const { subScore, axes } = providerSubScore(p, weightsForSub, speedMin, speedMax, latencyMin, latencyMax, false);
+        .map((p) => {
+          const { subScore, axes } = providerSubScore(
+            p,
+            weightsForSub,
+            speedMin,
+            speedMax,
+            latencyMin,
+            latencyMax,
+            false,
+          );
           const degradationState = getAllStatesView().get(p.model_db_id);
           return {
             modelDbId: p.model_db_id,
@@ -1343,7 +1768,7 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
             subScore,
             degradation: {
               penalty: degradationState?.penalty ?? 0,
-              tier: degradationState?.tier ?? 'healthy',
+              tier: degradationState?.tier ?? "healthy",
             },
           };
         })
@@ -1379,13 +1804,15 @@ export function getRoutingScores(): { strategy: RoutingStrategy; weights: Routin
 // the generic exhaustion message when none is configured (#118, #125).
 export function hasEnabledVisionModel(): boolean {
   const db = getDb();
-  const row = db.prepare(`
+  const row = db
+    .prepare(`
     SELECT COUNT(*) as cnt
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE fc.enabled = 1 AND m.enabled = 1
       AND m.supports_vision = 1
-  `).get() as { cnt: number };
+  `)
+    .get() as { cnt: number };
   return row.cnt > 0;
 }
 
@@ -1394,12 +1821,14 @@ export function hasEnabledVisionModel(): boolean {
 // requests beats routing them to a model that mangles the tool call.
 export function hasEnabledToolsModel(): boolean {
   const db = getDb();
-  const row = db.prepare(`
+  const row = db
+    .prepare(`
     SELECT COUNT(*) as cnt
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
     WHERE fc.enabled = 1 AND m.enabled = 1
       AND m.supports_tools = 1
-  `).get() as { cnt: number };
+  `)
+    .get() as { cnt: number };
   return row.cnt > 0;
 }
