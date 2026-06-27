@@ -60,7 +60,7 @@
 
 ## Phase 9: Rabbit Routing Strategy
 
-- [ ] **T9.1** Add `rabbit` to the routing strategy model (`RoutingStrategy`, validation, API schema) and label it **Rabbit** in the dashboard strategy selector
+- [x] **T9.1** Add `rabbit` to the routing strategy model (`RoutingStrategy`, validation, API schema) and label it **Rabbit** in the dashboard strategy selector
 - [ ] **T9.2** Add `rabbit_enabled` and optional `rabbit_weights` settings. Default Rabbit weights must match the existing Smartest preset: intelligence 45%, reliability 30%, latency 15%, speed 10%
 - [ ] **T9.3** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and Rabbit eligibility helpers
 - [ ] **T9.4** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by Rabbit / Smartest-weight score, `top_rank` = rank=1 first, numeric override first)

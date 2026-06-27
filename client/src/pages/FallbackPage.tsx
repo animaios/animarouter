@@ -76,7 +76,7 @@ interface FallbackEntry {
   successRate?: number
 }
 
-type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'fastest' | 'reliable' | 'custom'
+type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'rabbit' | 'fastest' | 'reliable' | 'custom'
 
 type RoutingWeights = { reliability: number; speed: number; intelligence: number; latency: number }
 type ThresholdAxis = 'intelligence' | 'fastness' | 'reliability'
@@ -148,6 +148,7 @@ const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
   { key: 'priority', label: 'Manual', blurb: 'Route in the exact order you set below. Drag the handles to reorder. No scoring; the chain is followed top-to-bottom.' },
   { key: 'balanced', label: 'Balanced', blurb: 'Reliability leads (40%), with speed, intelligence and latency weighted equally (20% each). A sensible all-round default.' },
   { key: 'smartest', label: 'Smartest', blurb: 'Prefer the most capable model that still works. Intelligence 45%, reliability 30%, latency 15%, speed 10%.' },
+  { key: 'rabbit', label: 'Rabbit', blurb: 'Use Smartest-weight routing as the foundation for Rabbit mode. Intelligence 45%, reliability 30%, latency 15%, speed 10%.' },
   { key: 'fastest', label: 'Fastest', blurb: 'Prefer the fastest, most responsive model. Latency 35%, speed 30%, reliability 25%, intelligence 10%.' },
   { key: 'reliable', label: 'Most reliable', blurb: 'Maximize success rate above all. Reliability 60%, intelligence 15%, latency 15%, speed 10%.' },
   { key: 'custom', label: 'Custom', blurb: 'Set your own balance of reliability, speed, intelligence and latency with sliders. Same engine as the presets, just your weights.' },
