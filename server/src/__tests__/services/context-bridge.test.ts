@@ -67,6 +67,24 @@ describe("sanitizeForCrossProvider", () => {
     expect(result.cleanText).not.toContain("[INST]");
     expect(result.cleanText).not.toContain("<system>");
   });
+
+  it("handles null provider names and still applies default cleanup", () => {
+    const result = sanitizeForCrossProvider(
+      "<|assistant|> Useful answer.",
+      null,
+    );
+
+    expect(result.cleanText).toBe("[Assistant Context] Useful answer.");
+    expect(result.cleanText).not.toContain("<|assistant|>");
+    expect(result.strippedCount).toBeGreaterThan(0);
+  });
+
+  it("keeps truncated thought context within the configured character cap", () => {
+    const result = sanitizeForCrossProvider("x".repeat(7000), "openai");
+
+    expect(result.cleanText.length).toBeLessThanOrEqual(6000);
+    expect(result.cleanText.endsWith("\n...[truncated]")).toBe(true);
+  });
 });
 
 describe("buildContextBridge", () => {

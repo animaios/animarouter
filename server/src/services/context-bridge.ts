@@ -100,9 +100,13 @@ export const PROVIDER_SANITIZERS: Record<string, BridgeSanitizer> = {
 
 function safeSlice(text: string, max: number): string {
   if (text.length <= max) return text;
-  const lastCode = text.charCodeAt(max - 1);
-  const end = lastCode >= 0xd800 && lastCode <= 0xdbff ? max - 1 : max;
-  return `${text.slice(0, end).trimEnd()}\n...[truncated]`;
+  const truncationSuffix = "\n...[truncated]";
+  if (max <= truncationSuffix.length) return truncationSuffix.slice(0, max);
+  const targetMax = Math.max(0, max - truncationSuffix.length);
+  const lastCode = text.charCodeAt(targetMax - 1);
+  const end =
+    lastCode >= 0xd800 && lastCode <= 0xdbff ? targetMax - 1 : targetMax;
+  return `${text.slice(0, end).trimEnd()}${truncationSuffix}`;
 }
 
 function normalizeWhitespace(text: string): string {
@@ -127,7 +131,8 @@ function replacePattern(
   replacement: string,
 ): { text: string; count: number } {
   let count = 0;
-  const next = text.replace(cloneGlobal(pattern), () => {
+  const regex = pattern.global ? pattern : cloneGlobal(pattern);
+  const next = text.replace(regex, () => {
     count++;
     return replacement;
   });
@@ -144,9 +149,9 @@ function contentStartsWith(message: ChatMessage, prefix: string): boolean {
  */
 export function sanitizeForCrossProvider(
   responseText: string | null | undefined,
-  sourceProvider = "default",
+  sourceProvider?: string | null,
 ): { cleanText: string; strippedCount: number } {
-  const providerKey = sourceProvider.toLowerCase();
+  const providerKey = (sourceProvider ?? "default").toLowerCase();
   const sanitizer =
     PROVIDER_SANITIZERS[providerKey] ?? PROVIDER_SANITIZERS.default;
   let clean = responseText ?? "";
@@ -179,10 +184,12 @@ export function sanitizeForCrossProvider(
     strippedCount += result.count;
   }
 
-  for (const pattern of DEFAULT_TOKEN_PATTERNS) {
-    const result = replacePattern(clean, pattern, "");
-    clean = result.text;
-    strippedCount += result.count;
+  if (sanitizer.tokenPatterns !== DEFAULT_TOKEN_PATTERNS) {
+    for (const pattern of DEFAULT_TOKEN_PATTERNS) {
+      const result = replacePattern(clean, pattern, "");
+      clean = result.text;
+      strippedCount += result.count;
+    }
   }
 
   return {
