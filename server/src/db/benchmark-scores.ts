@@ -213,10 +213,16 @@ type BenchmarkRow = [string, number]; // [model_id_pattern, intelligence score]
 export const MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT = '2026-06-27T00:00:00.000Z';
 
 // Manual overrides are intentionally authoritative over live benchmark sources.
-// Nemotron 3 Ultra is a 550B MoE/A55B-active model; public benchmark feeds have
-// been misclassifying it as a lower-tier worker.
+// Public feeds lag or mis-rank several current free-tier agentic models, so
+// these curated scores preserve the operator-reviewed intelligence order.
 export const MANUAL_BENCHMARK_OVERRIDES: BenchmarkRow[] = [
-  ['%nemotron-3-ultra%', 86],
+  ['%glm-5-1%', 100],
+  ['%kimi-k2-6%', 93],
+  ['%nemotron-3-ultra%', 88],
+  ['%minimax-m2-7%', 85],
+  ['%deepseek-v4-flash%', 84],
+  ['%minimax-m3%', 78],
+  ['%step-3-7-flash%', 72],
 ];
 
 // ─── BENCHMARK SCORE TABLE ──────────────────────────────────────────────────
@@ -225,15 +231,17 @@ export const MANUAL_BENCHMARK_OVERRIDES: BenchmarkRow[] = [
 // come first (e.g. 'gemini-3.1-pro%' before 'gemini-3%').
 const BENCHMARK_SCORES: BenchmarkRow[] = [
   // ── Frontier (AA ≥ 45) ──
-  ['%nemotron-3-ultra%', 86],
-  ['%kimi-k2.6%', 58],
+  ['%nemotron-3-ultra%', 88],
+  ['%kimi-k2.6%', 93],
   ['%kimi-k2.5%', 54],
   ['%kimi-k2-thinking%', 55],
   ['%deepseek-v4-pro%', 60],
-  ['%deepseek-v4-flash%', 55],
-  ['%glm-5.1%', 52],
+  ['%deepseek-v4-flash%', 84],
+  ['%glm-5.1%', 100],
   ['%glm-5%', 48],
-  ['%minimax-m2.7%', 56],
+  ['%minimax-m2.7%', 85],
+  ['%minimax-m3%', 78],
+  ['%step-3.7-flash%', 72],
   ['%qwen3.6-max%', 57],
   ['%qwen-3.6-max%', 57],
   ['%qwen3.6-plus%', 42],
@@ -247,7 +255,6 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
 
   // ── Large (AA 26–44) ──
   ['%minimax-m2.5%', 40],
-  ['%minimax-m3%', 38],
   ['%qwen3-next-80b%', 44],
   ['%qwen-3-235b%', 42],
   ['%qwen3-235b%', 42],
@@ -267,7 +274,6 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
   ['%gemma4:31b%', 39],
   ['%gemma-4-26b%', 31],
   ['%gemini-3.1-flash-lite%', 34],
-  ['%step-3.7-flash%', 35],
   ['%step-3.5-flash%', 30],
   ['%command-a-03-2025%', 30],
   ['%command-r-plus%', 28],
@@ -297,7 +303,7 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
   ['%nemotron-nano-12b-v2-vl%', 16],
   ['%north-mini-code%', 18],
   ['%command-r-08-2024%', 7],
-  ['%moonshotai/kimi-k2.6%', 58],
+  ['%moonshotai/kimi-k2.6%', 93],
   ['%moonshotai/kimi-k2.5%', 54],
 
   // ── Small (AA ≤ 12) ──
@@ -346,15 +352,18 @@ export function scoreToIntelligenceRank(score: number): number {
   return Math.max(1, Math.min(100, Math.round(101 - score)));
 }
 
-function patternNeedle(pattern: string): string {
-  return pattern.replace(/%/g, '').toLowerCase();
+function patternNeedles(pattern: string): string[] {
+  const raw = pattern.replace(/%/g, '').toLowerCase();
+  const canonical = canonicalizeModelId(raw);
+  return raw === canonical ? [raw] : [raw, canonical];
 }
 
 export function lookupManualBenchmarkOverride(modelIdOrKey: string | null | undefined): number | null {
   if (!modelIdOrKey) return null;
   const lower = modelIdOrKey.toLowerCase();
+  const canonical = canonicalizeModelId(modelIdOrKey);
   for (const [pattern, score] of MANUAL_BENCHMARK_OVERRIDES) {
-    if (lower.includes(patternNeedle(pattern))) {
+    if (patternNeedles(pattern).some(needle => lower.includes(needle) || canonical.includes(needle))) {
       return score;
     }
   }
@@ -371,11 +380,10 @@ export function lookupBenchmarkScore(modelId: string): number {
   const lower = modelId.toLowerCase();
   // First match wins (the table is ordered specific → general)
   for (const [pattern, score] of BENCHMARK_SCORES) {
-    const sqlPattern = patternNeedle(pattern);
     // SQL LIKE semantics: % matches any sequence, _ matches one char.
     // We use a simpler approach: check if the model_id contains the
     // pattern stripped of % wildcards.
-    if (lower.includes(sqlPattern)) {
+    if (patternNeedles(pattern).some(needle => lower.includes(needle))) {
       return score;
     }
   }

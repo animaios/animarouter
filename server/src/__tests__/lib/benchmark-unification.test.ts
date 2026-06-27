@@ -183,9 +183,22 @@ describe('scoreToIntelligenceRank', () => {
 
 // ── manual benchmark overrides ──────────────────────────────────────────────
 describe('manual benchmark overrides', () => {
-  it('hardcodes Nemotron 3 Ultra to the curated benchmark score', () => {
-    expect(lookupBenchmarkScore('nvidia/nemotron-3-ultra-550b-a55b:free')).toBe(86);
-    expect(lookupBenchmarkScore('nemotron-3-ultra-free')).toBe(86);
+  it('hardcodes curated intelligence scores for the top free-tier pool', () => {
+    const cases: Array<[string, number]> = [
+      ['z-ai/glm-5.1', 100],
+      ['moonshotai/Kimi-K2.6', 93],
+      ['nvidia/nemotron-3-ultra-550b-a55b:free', 88],
+      ['nemotron-3-ultra-free', 88],
+      ['minimaxai/minimax-m2.7', 85],
+      ['deepseek-ai/deepseek-v4-flash', 84],
+      ['deepseek-v4-flash-free', 84],
+      ['minimaxai/minimax-m3', 78],
+      ['stepfun-ai/step-3.7-flash', 72],
+    ];
+
+    for (const [modelId, expectedScore] of cases) {
+      expect(lookupBenchmarkScore(modelId)).toBe(expectedScore);
+    }
   });
 });
 
@@ -350,8 +363,8 @@ describe('recomputeBenchmarkComposite', () => {
   it('manual override wins over lower source composites', () => {
     const now = new Date().toISOString();
     const id = insertModel({
-      model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free',
-      canonical_model_key: 'nemotron-3-ultra-550b-a55b:free',
+      model_id: 'minimaxai/minimax-m2.7',
+      canonical_model_key: 'minimax-m2-7',
       aa_score: 40, aa_score_updated: now, aa_confidence: 1.0,
       bg_score: 42, bg_score_updated: now, bg_confidence: 1.0,
       aiiq_score: 38, aiiq_score_updated: now, aiiq_confidence: 1.0,
@@ -361,9 +374,9 @@ describe('recomputeBenchmarkComposite', () => {
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    expect(row.benchmark_score).toBe(86);
+    expect(row.benchmark_score).toBe(85);
     expect(row.size_label).toBe('Frontier');
-    expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(86));
+    expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(85));
   });
 
   it('staleness decay reduces composite for stale source (R4.5)', () => {
