@@ -5,11 +5,13 @@ import {
   stalenessDecay,
   validateComposite,
   recomputeBenchmarkComposite,
+  applyManualBenchmarkOverrides,
   loadSourceWeights,
   invalidateSourceWeightsCache,
   scoreToTier,
   scoreToIntelligenceRank,
   lookupBenchmarkScore,
+  lookupManualBenchmarkOverride,
   TIER_BANDS,
 } from '../../db/benchmark-scores.js';
 import type Database from 'better-sqlite3';
@@ -200,6 +202,13 @@ describe('manual benchmark overrides', () => {
       expect(lookupBenchmarkScore(modelId)).toBe(expectedScore);
     }
   });
+
+  it('does not match alphanumeric continuations of curated model keys', () => {
+    expect(lookupManualBenchmarkOverride('z-ai/glm-5.10')).toBeNull();
+    expect(lookupManualBenchmarkOverride('moonshotai/kimi-k2.60')).toBeNull();
+    expect(lookupManualBenchmarkOverride('deepseek-ai/deepseek-v4-flash2')).toBeNull();
+    expect(lookupBenchmarkScore('z-ai/glm-50')).toBe(0);
+  });
 });
 
 // ── recomputeBenchmarkComposite (with real DB) ──────────────────────────────
@@ -377,6 +386,49 @@ describe('recomputeBenchmarkComposite', () => {
     expect(row.benchmark_score).toBe(85);
     expect(row.size_label).toBe('Frontier');
     expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(85));
+  });
+
+  it('manual override application uses token boundaries for models and groups', () => {
+    const targetModelId = insertModel({
+      model_id: 'z-ai/glm-5.1-boundary',
+      canonical_model_key: 'glm-5-1-boundary',
+      benchmark_score: null,
+      intelligence_rank: 50,
+      size_label: 'Custom',
+    });
+    const futureModelId = insertModel({
+      model_id: 'z-ai/glm-5.10',
+      canonical_model_key: 'glm-5-10',
+      benchmark_score: null,
+      intelligence_rank: 50,
+      size_label: 'Custom',
+    });
+
+    db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+      VALUES (?, ?, ?, ?), (?, ?, ?, ?)
+    `).run(
+      'glm-5-1-boundary', 'GLM 5.1 Boundary', 50, 'Custom',
+      'glm-5-10', 'GLM 5.10', 50, 'Custom',
+    );
+
+    applyManualBenchmarkOverrides(db);
+
+    const target = getModel(targetModelId);
+    const future = getModel(futureModelId);
+    expect(target.benchmark_score).toBe(100);
+    expect(target.intelligence_rank).toBe(scoreToIntelligenceRank(100));
+    expect(future.benchmark_score).toBeNull();
+    expect(future.intelligence_rank).toBe(50);
+
+    const targetGroup = db.prepare('SELECT benchmark_score, intelligence_rank FROM model_groups WHERE group_key = ?')
+      .get('glm-5-1-boundary') as any;
+    const futureGroup = db.prepare('SELECT benchmark_score, intelligence_rank FROM model_groups WHERE group_key = ?')
+      .get('glm-5-10') as any;
+    expect(targetGroup.benchmark_score).toBe(100);
+    expect(targetGroup.intelligence_rank).toBe(scoreToIntelligenceRank(100));
+    expect(futureGroup.benchmark_score).toBeNull();
+    expect(futureGroup.intelligence_rank).toBe(50);
   });
 
   it('staleness decay reduces composite for stale source (R4.5)', () => {

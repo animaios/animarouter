@@ -352,6 +352,15 @@ export function scoreToIntelligenceRank(score: number): number {
   return Math.max(1, Math.min(100, Math.round(101 - score)));
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function containsToken(value: string, needle: string): boolean {
+  if (!needle) return false;
+  return new RegExp(`(^|[^a-z0-9])${escapeRegex(needle)}($|[^a-z0-9])`).test(value);
+}
+
 function patternNeedles(pattern: string): string[] {
   const raw = pattern.replace(/%/g, '').toLowerCase();
   const canonical = canonicalizeModelId(raw);
@@ -363,7 +372,7 @@ export function lookupManualBenchmarkOverride(modelIdOrKey: string | null | unde
   const lower = modelIdOrKey.toLowerCase();
   const canonical = canonicalizeModelId(modelIdOrKey);
   for (const [pattern, score] of MANUAL_BENCHMARK_OVERRIDES) {
-    if (patternNeedles(pattern).some(needle => lower.includes(needle) || canonical.includes(needle))) {
+    if (patternNeedles(pattern).some(needle => containsToken(lower, needle) || containsToken(canonical, needle))) {
       return score;
     }
   }
@@ -378,12 +387,10 @@ export function lookupBenchmarkScore(modelId: string): number {
   if (manualOverride != null) return manualOverride;
 
   const lower = modelId.toLowerCase();
+  const canonical = canonicalizeModelId(modelId);
   // First match wins (the table is ordered specific → general)
   for (const [pattern, score] of BENCHMARK_SCORES) {
-    // SQL LIKE semantics: % matches any sequence, _ matches one char.
-    // We use a simpler approach: check if the model_id contains the
-    // pattern stripped of % wildcards.
-    if (patternNeedles(pattern).some(needle => lower.includes(needle))) {
+    if (patternNeedles(pattern).some(needle => containsToken(lower, needle) || containsToken(canonical, needle))) {
       return score;
     }
   }
@@ -442,21 +449,20 @@ export function applyManualBenchmarkOverrides(db: Database.Database): number {
 
   backfillCanonicalKeys(db);
 
-  const updateModels = db.prepare(`
+  const selectModels = db.prepare(`
+    SELECT id, canonical_model_key, benchmark_score, last_benchmark_update,
+           size_label, intelligence_rank, benchmark_composite_version
+      FROM models
+  `);
+
+  const updateModel = db.prepare(`
     UPDATE models SET
       benchmark_score = ?,
       last_benchmark_update = ?,
       size_label = ?,
       intelligence_rank = ?,
       benchmark_composite_version = 1
-    WHERE canonical_model_key LIKE ?
-      AND (
-        benchmark_score IS NULL OR benchmark_score != ?
-        OR last_benchmark_update IS NULL OR last_benchmark_update != ?
-        OR size_label IS NULL OR size_label != ?
-        OR intelligence_rank IS NULL OR intelligence_rank != ?
-        OR benchmark_composite_version IS NULL OR benchmark_composite_version != 1
-      )
+    WHERE id = ?
   `);
 
   const groupColumns = db.prepare('PRAGMA table_info(model_groups)').all() as { name: string }[];
@@ -468,51 +474,89 @@ export function applyManualBenchmarkOverrides(db: Database.Database): number {
     'benchmark_composite_version',
   ].every(name => groupColumns.some(c => c.name === name));
 
-  const updateGroups = canUpdateGroups
+  const selectGroups = canUpdateGroups
+    ? db.prepare(`
+      SELECT id, group_key, benchmark_score, size_label, intelligence_rank,
+             benchmark_composite_version
+        FROM model_groups
+    `)
+    : null;
+
+  const updateGroup = canUpdateGroups
     ? db.prepare(`
       UPDATE model_groups SET
         benchmark_score = ?,
         size_label = ?,
         intelligence_rank = ?,
         benchmark_composite_version = 1
-      WHERE group_key LIKE ?
-        AND (
-          benchmark_score IS NULL OR benchmark_score != ?
-          OR size_label IS NULL OR size_label != ?
-          OR intelligence_rank IS NULL OR intelligence_rank != ?
-          OR benchmark_composite_version IS NULL OR benchmark_composite_version != 1
-        )
+      WHERE id = ?
     `)
     : null;
 
   let updated = 0;
   const apply = db.transaction(() => {
-    for (const [pattern, score] of MANUAL_BENCHMARK_OVERRIDES) {
+    const modelRows = selectModels.all() as Array<{
+      id: number;
+      canonical_model_key: string | null;
+      benchmark_score: number | null;
+      last_benchmark_update: string | null;
+      size_label: string | null;
+      intelligence_rank: number | null;
+      benchmark_composite_version: number | null;
+    }>;
+
+    for (const row of modelRows) {
+      const score = lookupManualBenchmarkOverride(row.canonical_model_key);
+      if (score == null) continue;
+
       const tier = scoreToTier(score);
       const rank = scoreToIntelligenceRank(score);
-      const modelResult = updateModels.run(
+      if (
+        row.benchmark_score === score &&
+        row.last_benchmark_update === MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT &&
+        row.size_label === tier &&
+        row.intelligence_rank === rank &&
+        row.benchmark_composite_version === 1
+      ) {
+        continue;
+      }
+
+      const modelResult = updateModel.run(
         score,
         MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT,
         tier,
         rank,
-        pattern,
-        score,
-        MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT,
-        tier,
-        rank,
+        row.id,
       );
       updated += modelResult.changes;
+    }
 
-      if (updateGroups) {
-        const groupResult = updateGroups.run(
-          score,
-          tier,
-          rank,
-          pattern,
-          score,
-          tier,
-          rank,
-        );
+    if (selectGroups && updateGroup) {
+      const groupRows = selectGroups.all() as Array<{
+        id: number;
+        group_key: string | null;
+        benchmark_score: number | null;
+        size_label: string | null;
+        intelligence_rank: number | null;
+        benchmark_composite_version: number | null;
+      }>;
+
+      for (const row of groupRows) {
+        const score = lookupManualBenchmarkOverride(row.group_key);
+        if (score == null) continue;
+
+        const tier = scoreToTier(score);
+        const rank = scoreToIntelligenceRank(score);
+        if (
+          row.benchmark_score === score &&
+          row.size_label === tier &&
+          row.intelligence_rank === rank &&
+          row.benchmark_composite_version === 1
+        ) {
+          continue;
+        }
+
+        const groupResult = updateGroup.run(score, tier, rank, row.id);
         updated += groupResult.changes;
       }
     }

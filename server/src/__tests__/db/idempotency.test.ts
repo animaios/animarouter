@@ -421,45 +421,54 @@ describe('Migration idempotency', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     const db = initDb(':memory:');
 
-    const expected: Array<[string, number]> = [
-      ['%glm-5-1%', 100],
-      ['%kimi-k2-6%', 93],
-      ['%nemotron-3-ultra%', 88],
-      ['%minimax-m2-7%', 85],
-      ['%deepseek-v4-flash%', 84],
-      ['%minimax-m3%', 78],
-      ['%step-3-7-flash%', 72],
+    const expected: Array<{ label: string; score: number; modelKeys: string[]; groupKeys: string[] }> = [
+      { label: 'glm-5-1', score: 100, modelKeys: ['glm-5-1', 'glm-5-1-fp8'], groupKeys: ['glm-5-1', 'glm-5-1-fp8'] },
+      { label: 'kimi-k2-6', score: 93, modelKeys: ['@cf/moonshotai/kimi-k2-6', 'kimi-k2-6', 'kimi-k2-6:free'], groupKeys: ['@cf/moonshotai/kimi-k2-6', 'kimi-k2-6', 'kimi-k2-6:free'] },
+      { label: 'nemotron-3-ultra', score: 88, modelKeys: ['nemotron-3-ultra-550b-a55b:free', 'nemotron-3-ultra-free'], groupKeys: ['nemotron-3-ultra-550b-a55b', 'nemotron-3-ultra-free'] },
+      { label: 'minimax-m2-7', score: 85, modelKeys: ['minimax-m2-7'], groupKeys: ['minimax-m2-7'] },
+      { label: 'deepseek-v4-flash', score: 84, modelKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free'], groupKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek/deepseek-v4-flash'] },
+      { label: 'minimax-m3', score: 78, modelKeys: ['minimax-m3-free'], groupKeys: ['minimax-m3-free'] },
+      { label: 'step-3-7-flash', score: 72, modelKeys: ['step-3-7-flash:free'], groupKeys: ['step-3-7-flash:free'] },
     ];
 
-    for (const [like, score] of expected) {
+    for (const { label, score, modelKeys, groupKeys } of expected) {
+      const modelPlaceholders = modelKeys.map(() => '?').join(', ');
       const rows = db.prepare(`
-        SELECT platform, model_id, benchmark_score, intelligence_rank, size_label
+        SELECT platform, model_id, canonical_model_key, benchmark_score, intelligence_rank, size_label
           FROM models
-         WHERE canonical_model_key LIKE ?
+         WHERE canonical_model_key IN (${modelPlaceholders})
          ORDER BY platform, model_id
-      `).all(like) as Array<{
+      `).all(...modelKeys) as Array<{
         platform: string;
         model_id: string;
+        canonical_model_key: string;
         benchmark_score: number;
         intelligence_rank: number;
         size_label: string;
       }>;
 
-      expect(rows.length, like).toBeGreaterThan(0);
-      expect(rows.every(r => r.benchmark_score === score), like).toBe(true);
-      expect(rows.every(r => r.intelligence_rank === scoreToIntelligenceRank(score)), like).toBe(true);
-      expect(rows.every(r => r.size_label === 'Frontier'), like).toBe(true);
+      const seenModelKeys = new Set(rows.map(r => r.canonical_model_key));
+      for (const key of modelKeys) {
+        expect(seenModelKeys.has(key), `${label} model ${key}`).toBe(true);
+      }
+      expect(rows.every(r => r.benchmark_score === score), label).toBe(true);
+      expect(rows.every(r => r.intelligence_rank === scoreToIntelligenceRank(score)), label).toBe(true);
+      expect(rows.every(r => r.size_label === 'Frontier'), label).toBe(true);
 
+      const groupPlaceholders = groupKeys.map(() => '?').join(', ');
       const groups = db.prepare(`
-        SELECT benchmark_score, intelligence_rank, size_label
+        SELECT group_key, benchmark_score, intelligence_rank, size_label
           FROM model_groups
-         WHERE group_key LIKE ?
-      `).all(like) as Array<{ benchmark_score: number; intelligence_rank: number; size_label: string }>;
+         WHERE group_key IN (${groupPlaceholders})
+      `).all(...groupKeys) as Array<{ group_key: string; benchmark_score: number; intelligence_rank: number; size_label: string }>;
 
-      expect(groups.length, like).toBeGreaterThan(0);
-      expect(groups.every(g => g.benchmark_score === score), like).toBe(true);
-      expect(groups.every(g => g.intelligence_rank === scoreToIntelligenceRank(score)), like).toBe(true);
-      expect(groups.every(g => g.size_label === 'Frontier'), like).toBe(true);
+      const seenGroupKeys = new Set(groups.map(g => g.group_key));
+      for (const key of groupKeys) {
+        expect(seenGroupKeys.has(key), `${label} group ${key}`).toBe(true);
+      }
+      expect(groups.every(g => g.benchmark_score === score), label).toBe(true);
+      expect(groups.every(g => g.intelligence_rank === scoreToIntelligenceRank(score)), label).toBe(true);
+      expect(groups.every(g => g.size_label === 'Frontier'), label).toBe(true);
     }
   });
 
