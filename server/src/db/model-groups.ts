@@ -9,8 +9,13 @@ let aliasCache: Map<string, string> | null = null;
 
 export const DEFAULT_MODEL_GROUP_ALIASES: Array<{ alias: string; groupKey: string }> = [
   { alias: 'deepseek-v4-flash-free', groupKey: 'deepseek-v4-flash' },
+  { alias: 'minimax-m3-free', groupKey: 'minimaxai/minimax-m3' },
   { alias: 'nemotron-3-ultra-free', groupKey: 'nvidia/nemotron-3-ultra-550b-a55b' },
   { alias: 'nvidia/nemotron-3-ultra-550b-a55b:free', groupKey: 'nvidia/nemotron-3-ultra-550b-a55b' },
+];
+
+export const DEFAULT_MODEL_GROUP_DISPLAY_NAMES: Array<{ groupKey: string; displayName: string }> = [
+  { groupKey: 'minimaxai/minimax-m3', displayName: 'MiniMax M3' },
 ];
 
 export function getAliasCache(db: Database.Database): Map<string, string> {
@@ -53,6 +58,27 @@ export function seedDefaultModelGroupAliases(db: Database.Database): number {
   tx();
 
   return inserted;
+}
+
+export function applyDefaultModelGroupDisplayNames(db: Database.Database): number {
+  const update = db.prepare(`
+    UPDATE model_groups
+       SET display_name = ?
+     WHERE group_key = ?
+       AND display_name != ?
+  `);
+  let changed = 0;
+
+  const tx = db.transaction(() => {
+    for (const item of DEFAULT_MODEL_GROUP_DISPLAY_NAMES) {
+      const displayName = item.displayName.trim();
+      const groupKey = normalizeGroupKey(item.groupKey);
+      changed += update.run(displayName, groupKey, displayName).changes;
+    }
+  });
+  tx();
+
+  return changed;
 }
 
 export function syncFallbackConfigGroupIds(db: Database.Database): void {

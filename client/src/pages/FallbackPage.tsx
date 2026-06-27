@@ -604,16 +604,16 @@ function RowContent({
               >
                 <Pencil className="size-3.5" />
               </button>
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onArchive(row); }}
-                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors"
-                title="Archive model"
-              >
-                <Archive className="size-3.5" />
-              </button>
             </>
           )}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onArchive(row); }}
+            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-destructive transition-colors"
+            title={row.isGroup ? 'Archive model group' : 'Archive model'}
+          >
+            <Archive className="size-3.5" />
+          </button>
         </div>
       </td>
     </>
@@ -756,6 +756,27 @@ export default function FallbackPage() {
       queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
+    },
+  })
+
+  const archiveGroupMutation = useMutation({
+    mutationFn: ({ groupId }: { groupId: number; providerModelDbIds: number[] }) =>
+      apiFetch(`/api/models/groups/${groupId}`, { method: 'DELETE' }),
+    onSuccess: (_data, { groupId, providerModelDbIds }) => {
+      setPendingModelEdits(prev => {
+        if (providerModelDbIds.every(id => !prev.has(id))) return prev
+        const next = new Map(prev)
+        for (const id of providerModelDbIds) next.delete(id)
+        return next
+      })
+      setLocalEntries(current =>
+        current?.filter(entry => entry.groupId !== groupId) ?? current,
+      )
+      queryClient.invalidateQueries({ queryKey: ['fallback'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
+      queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
+      queryClient.invalidateQueries({ queryKey: ['models'] })
+      queryClient.invalidateQueries({ queryKey: ['models', 'groups'] })
     },
   })
 
@@ -906,6 +927,13 @@ export default function FallbackPage() {
   }
 
   function handleArchive(row: Row) {
+    if (row.isGroup && row.groupId != null) {
+      archiveGroupMutation.mutate({
+        groupId: row.groupId,
+        providerModelDbIds: row.providers?.map(provider => provider.modelDbId) ?? [],
+      })
+      return
+    }
     archiveModelMutation.mutate(row.modelDbId)
   }
 
