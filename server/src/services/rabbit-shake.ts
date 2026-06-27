@@ -48,6 +48,12 @@ export interface RabbitEligibilityInput {
   config?: OscillatorConfig;
 }
 
+export interface MeowDetectionResult {
+  detected: boolean;
+  reason?: "custom_pattern" | "structural_tag" | "repeated_character" | "replacement_character" | "script_fragmentation";
+  pattern?: string;
+}
+
 export const RABBIT_DEFAULT_WEIGHTS: RoutingWeights = BANDIT_PRESETS.smartest;
 
 const DEFAULT_MEOW_PATTERNS = [
@@ -165,6 +171,81 @@ export function isRabbitOscillatorEligible(input: RabbitEligibilityInput): boole
     !input.loadShedActive &&
     isComplexReasoningPrompt(input.promptText)
   );
+}
+
+function matchesCustomPattern(text: string, pattern: string): boolean {
+  try {
+    return new RegExp(pattern, "iu").test(text);
+  } catch {
+    return false;
+  }
+}
+
+function scriptOf(char: string): string | null {
+  if (!/\p{Letter}/u.test(char)) return null;
+  if (/\p{Script=Latin}/u.test(char)) return "Latin";
+  if (/\p{Script=Cyrillic}/u.test(char)) return "Cyrillic";
+  if (/\p{Script=Greek}/u.test(char)) return "Greek";
+  if (/\p{Script=Arabic}/u.test(char)) return "Arabic";
+  if (/\p{Script=Han}/u.test(char)) return "Han";
+  if (/\p{Script=Hangul}/u.test(char)) return "Hangul";
+  if (/\p{Script=Hiragana}/u.test(char)) return "Hiragana";
+  if (/\p{Script=Katakana}/u.test(char)) return "Katakana";
+  if (/\p{Script=Devanagari}/u.test(char)) return "Devanagari";
+  return "Other";
+}
+
+function hasScriptFragmentation(text: string): boolean {
+  let previous: string | null = null;
+  let switches = 0;
+  const counts = new Map<string, number>();
+
+  for (const char of text) {
+    const script = scriptOf(char);
+    if (!script) continue;
+    counts.set(script, (counts.get(script) ?? 0) + 1);
+    if (previous && previous !== script) switches++;
+    previous = script;
+  }
+
+  const substantialScripts = [...counts.values()].filter((count) => count >= 3);
+  return substantialScripts.length >= 4 && switches >= 10;
+}
+
+export function detectMeow(
+  text: string,
+  patterns: string[] = DEFAULT_MEOW_PATTERNS,
+): MeowDetectionResult {
+  const normalized = text.trim();
+  if (normalized.length === 0) return { detected: false };
+
+  if (
+    /<\|[^>\n]{1,80}\|>|\[(?:INST|\/INST|SYS|\/SYS|SYSTEM|ASSISTANT|USER)\]|<\/?(?:system|assistant|user)>/iu.test(
+      normalized,
+    )
+  ) {
+    return { detected: true, reason: "structural_tag" };
+  }
+
+  if (/(.)\1{24,}/u.test(normalized)) {
+    return { detected: true, reason: "repeated_character" };
+  }
+
+  if (/\uFFFD{3,}/u.test(normalized)) {
+    return { detected: true, reason: "replacement_character" };
+  }
+
+  if (hasScriptFragmentation(normalized)) {
+    return { detected: true, reason: "script_fragmentation" };
+  }
+
+  for (const pattern of patterns) {
+    if (matchesCustomPattern(normalized, pattern)) {
+      return { detected: true, reason: "custom_pattern", pattern };
+    }
+  }
+
+  return { detected: false };
 }
 
 function metadataByModelId(modelDbIds: number[]): Map<number, Omit<

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getDb, initDb, setSetting } from "../../db/index.js";
 import {
+  detectMeow,
   getOscillatorConfig,
   getRabbitCandidates,
   getRabbitWeights,
@@ -234,6 +235,30 @@ describe("Rabbit Shake routing helpers", () => {
         pinnedModelDbId: 1,
         config: config(),
       }),
+    ).toBe(false);
+  });
+
+  it("detects structural tag leakage and obvious corruption", () => {
+    expect(detectMeow("Final answer <|assistant|> leaked marker").detected).toBe(true);
+    expect(detectMeow("[INST] hidden prompt artifact [/INST]").detected).toBe(true);
+    expect(detectMeow(`ok ${"x".repeat(30)}`).reason).toBe("repeated_character");
+    expect(detectMeow("bad replacement chars ���").reason).toBe("replacement_character");
+  });
+
+  it("supports custom meow patterns", () => {
+    expect(detectMeow("the router emitted RABBIT_BAD_TOKEN", ["RABBIT_BAD_TOKEN"]).detected).toBe(true);
+    expect(detectMeow("normal response", ["RABBIT_BAD_TOKEN"]).detected).toBe(false);
+  });
+
+  it("flags extreme Unicode script fragmentation but not normal prose", () => {
+    const fragmented = "abcабвδεζمرح你好世界abcабвδεζمرح你好世界abcабвδεζمرح你好世界";
+    const normal =
+      "The answer compares latency, reliability, and cost. Короткое пояснение рядом is acceptable.";
+
+    expect(detectMeow(fragmented).reason).toBe("script_fragmentation");
+    expect(detectMeow(normal).detected).toBe(false);
+    expect(
+      detectMeow("Here is a TypeScript example: const total = 1 + 2; return total.").detected,
     ).toBe(false);
   });
 });
