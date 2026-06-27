@@ -5,11 +5,13 @@ import {
   stalenessDecay,
   validateComposite,
   recomputeBenchmarkComposite,
+  applyManualBenchmarkOverrides,
   loadSourceWeights,
   invalidateSourceWeightsCache,
   scoreToTier,
   scoreToIntelligenceRank,
   lookupBenchmarkScore,
+  lookupManualBenchmarkOverride,
   TIER_BANDS,
 } from '../../db/benchmark-scores.js';
 import type Database from 'better-sqlite3';
@@ -183,9 +185,29 @@ describe('scoreToIntelligenceRank', () => {
 
 // ── manual benchmark overrides ──────────────────────────────────────────────
 describe('manual benchmark overrides', () => {
-  it('hardcodes Nemotron 3 Ultra to the curated benchmark score', () => {
-    expect(lookupBenchmarkScore('nvidia/nemotron-3-ultra-550b-a55b:free')).toBe(86);
-    expect(lookupBenchmarkScore('nemotron-3-ultra-free')).toBe(86);
+  it('hardcodes curated intelligence scores for the top free-tier pool', () => {
+    const cases: Array<[string, number]> = [
+      ['z-ai/glm-5.1', 100],
+      ['moonshotai/Kimi-K2.6', 93],
+      ['nvidia/nemotron-3-ultra-550b-a55b:free', 88],
+      ['nemotron-3-ultra-free', 88],
+      ['minimaxai/minimax-m2.7', 85],
+      ['deepseek-ai/deepseek-v4-flash', 84],
+      ['deepseek-v4-flash-free', 84],
+      ['minimaxai/minimax-m3', 78],
+      ['stepfun-ai/step-3.7-flash', 72],
+    ];
+
+    for (const [modelId, expectedScore] of cases) {
+      expect(lookupBenchmarkScore(modelId)).toBe(expectedScore);
+    }
+  });
+
+  it('does not match alphanumeric continuations of curated model keys', () => {
+    expect(lookupManualBenchmarkOverride('z-ai/glm-5.10')).toBeNull();
+    expect(lookupManualBenchmarkOverride('moonshotai/kimi-k2.60')).toBeNull();
+    expect(lookupManualBenchmarkOverride('deepseek-ai/deepseek-v4-flash2')).toBeNull();
+    expect(lookupBenchmarkScore('z-ai/glm-50')).toBe(0);
   });
 });
 
@@ -350,8 +372,8 @@ describe('recomputeBenchmarkComposite', () => {
   it('manual override wins over lower source composites', () => {
     const now = new Date().toISOString();
     const id = insertModel({
-      model_id: 'nvidia/nemotron-3-ultra-550b-a55b:free',
-      canonical_model_key: 'nemotron-3-ultra-550b-a55b:free',
+      model_id: 'minimaxai/minimax-m2.7',
+      canonical_model_key: 'minimax-m2-7',
       aa_score: 40, aa_score_updated: now, aa_confidence: 1.0,
       bg_score: 42, bg_score_updated: now, bg_confidence: 1.0,
       aiiq_score: 38, aiiq_score_updated: now, aiiq_confidence: 1.0,
@@ -361,9 +383,52 @@ describe('recomputeBenchmarkComposite', () => {
     recomputeBenchmarkComposite(db, new Set([id]), weights);
 
     const row = getModel(id);
-    expect(row.benchmark_score).toBe(86);
+    expect(row.benchmark_score).toBe(85);
     expect(row.size_label).toBe('Frontier');
-    expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(86));
+    expect(row.intelligence_rank).toBe(scoreToIntelligenceRank(85));
+  });
+
+  it('manual override application uses token boundaries for models and groups', () => {
+    const targetModelId = insertModel({
+      model_id: 'z-ai/glm-5.1-boundary',
+      canonical_model_key: 'glm-5-1-boundary',
+      benchmark_score: null,
+      intelligence_rank: 50,
+      size_label: 'Custom',
+    });
+    const futureModelId = insertModel({
+      model_id: 'z-ai/glm-5.10',
+      canonical_model_key: 'glm-5-10',
+      benchmark_score: null,
+      intelligence_rank: 50,
+      size_label: 'Custom',
+    });
+
+    db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+      VALUES (?, ?, ?, ?), (?, ?, ?, ?)
+    `).run(
+      'glm-5-1-boundary', 'GLM 5.1 Boundary', 50, 'Custom',
+      'glm-5-10', 'GLM 5.10', 50, 'Custom',
+    );
+
+    applyManualBenchmarkOverrides(db);
+
+    const target = getModel(targetModelId);
+    const future = getModel(futureModelId);
+    expect(target.benchmark_score).toBe(100);
+    expect(target.intelligence_rank).toBe(scoreToIntelligenceRank(100));
+    expect(future.benchmark_score).toBeNull();
+    expect(future.intelligence_rank).toBe(50);
+
+    const targetGroup = db.prepare('SELECT benchmark_score, intelligence_rank FROM model_groups WHERE group_key = ?')
+      .get('glm-5-1-boundary') as any;
+    const futureGroup = db.prepare('SELECT benchmark_score, intelligence_rank FROM model_groups WHERE group_key = ?')
+      .get('glm-5-10') as any;
+    expect(targetGroup.benchmark_score).toBe(100);
+    expect(targetGroup.intelligence_rank).toBe(scoreToIntelligenceRank(100));
+    expect(futureGroup.benchmark_score).toBeNull();
+    expect(futureGroup.intelligence_rank).toBe(50);
   });
 
   it('staleness decay reduces composite for stale source (R4.5)', () => {
