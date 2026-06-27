@@ -17,11 +17,16 @@
     "build": "npm run build -w server && npm run build -w client && npm run typecheck -w worker",
     "build:server": "npm run build -w server",
     "build:worker": "npm run typecheck -w worker",
-    "deploy:worker": "node scripts/deploy-worker-wizard.mjs"
+    "deploy:worker": "node scripts/deploy-worker-wizard.mjs",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "prepare": "husky"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.1",
     "@vitest/coverage-v8": "^3.2.6",
     "concurrently": "^9.1.2",
+    "husky": "^9.1.7",
     "vitest": "^3.2.6"
   },
   "allowScripts": {
