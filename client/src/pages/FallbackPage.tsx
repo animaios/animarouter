@@ -770,7 +770,7 @@ export default function FallbackPage() {
         return next
       })
       setLocalEntries(current =>
-        current?.filter(entry => !(entry.isGroup && entry.groupId === groupId)) ?? current,
+        current?.filter(entry => entry.groupId !== groupId) ?? current,
       )
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
       queryClient.invalidateQueries({ queryKey: ['fallback', 'performance'] })
