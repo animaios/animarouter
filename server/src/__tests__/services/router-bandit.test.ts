@@ -82,8 +82,20 @@ describe('bandit router', () => {
     expect(getRoutingStrategy()).toBe('balanced');
     setRoutingStrategy('smartest');
     expect(getRoutingStrategy()).toBe('smartest');
+    setRoutingStrategy('rabbit');
+    expect(getRoutingStrategy()).toBe('rabbit');
     setRoutingStrategy('priority');
     expect(getRoutingStrategy()).toBe('priority');
+  });
+
+  it('rabbit uses the Smartest weight vector', () => {
+    setRoutingStrategy('rabbit');
+    expect(getRoutingScores().weights).toEqual({
+      reliability: 0.30,
+      speed: 0.10,
+      intelligence: 0.45,
+      latency: 0.15,
+    });
   });
 
   it('priority strategy follows the manual chain order deterministically', () => {

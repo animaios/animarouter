@@ -607,6 +607,110 @@ export const REGISTRY: FeatureSettingDef[] = [
     effect: "live",
     group: "Scoring",
   },
+  // ── Routing ──
+  {
+    key: "rabbit_enabled",
+    label: "Rabbit",
+    description:
+      "Enable Rabbit oscillator behavior when the Rabbit routing strategy is active. Normal Rabbit routing still uses Smartest-weight single-model fallback when the oscillator is not eligible.",
+    type: "boolean",
+    default: false,
+    envVar: "RABBIT_ENABLED",
+    effect: "live",
+    group: "Routing",
+  },
+  {
+    key: "rabbit_weights",
+    label: "Rabbit Weights",
+    description:
+      'Optional JSON weight override. Leave blank to use Smartest defaults: {"reliability":0.30,"speed":0.10,"intelligence":0.45,"latency":0.15}.',
+    type: "string",
+    default: "",
+    envVar: "RABBIT_WEIGHTS",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
+  {
+    key: "oscillator_foundation_selection",
+    label: "Foundation Selection",
+    description:
+      "How Rabbit chooses Step 1 and Step 3 foundation candidates. Auto orders eligible models by Rabbit / Smartest-weight score; top rank tries intelligence rank 1 first. Can also be a numeric model ID override.",
+    type: "string",
+    default: "auto",
+    envVar: "OSCILLATOR_FOUNDATION_SELECTION",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
+  {
+    key: "oscillator_injection_selection",
+    label: "Injection Selection",
+    description:
+      "How Rabbit chooses the Step 2 injection model. Divergent prefers a high-intelligence model on a different provider from the selected foundation. Can also be a numeric model ID override.",
+    type: "string",
+    default: "divergent",
+    envVar: "OSCILLATOR_INJECTION_SELECTION",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
+  {
+    key: "oscillator_min_intelligence_gap",
+    label: "Minimum Intelligence Gap",
+    description:
+      "Minimum intelligence-axis gap between foundation and injection models. Lower values allow closer peers; higher values demand a more distinct second perspective.",
+    type: "number",
+    default: 0,
+    min: 0,
+    max: 100,
+    envVar: "OSCILLATOR_MIN_INTELLIGENCE_GAP",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
+  {
+    key: "oscillator_injection_max_sentences",
+    label: "Injection Sentences",
+    description:
+      "Maximum sentences the injection model may return. The default is exactly 2 to keep the divergent perspective concise.",
+    type: "number",
+    default: 2,
+    min: 1,
+    max: 5,
+    envVar: "OSCILLATOR_INJECTION_MAX_SENTENCES",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
+  {
+    key: "oscillator_load_shed_threshold",
+    label: "Load-Shed Threshold",
+    description:
+      "Concurrent request count above which Rabbit bypasses the oscillator and uses normal Smartest-weight single-model routing.",
+    type: "number",
+    default: 21,
+    min: 1,
+    max: 100,
+    envVar: "OSCILLATOR_LOAD_SHED_THRESHOLD",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
+  {
+    key: "oscillator_step_timeout_ms",
+    label: "Step Timeout (ms)",
+    description:
+      "Timeout for each Rabbit oscillator step before falling back to the foundation response or normal single-model routing.",
+    type: "number",
+    default: 30000,
+    min: 5000,
+    max: 120000,
+    envVar: "OSCILLATOR_STEP_TIMEOUT_MS",
+    effect: "live",
+    group: "Routing",
+    parentToggle: "rabbit_enabled",
+  },
   // ── Proxy Transport ──
   {
     key: "proxy_transport_enabled",
@@ -626,7 +730,7 @@ export const REGISTRY: FeatureSettingDef[] = [
 /** Returns parsed number if valid (not NaN, within min/max bounds), otherwise undefined. */
 function parseNumber(raw: string, def: FeatureSettingDef): number | undefined {
   const parsed = parseFloat(raw);
-  if (isNaN(parsed)) return undefined;
+  if (Number.isNaN(parsed)) return undefined;
   if (def.min !== undefined && parsed < def.min) return undefined;
   if (def.max !== undefined && parsed > def.max) return undefined;
   return parsed;
@@ -651,7 +755,8 @@ function resolveSetting(def: FeatureSettingDef): boolean | number | string {
   }
 
   if (def.envVar && process.env[def.envVar] !== undefined) {
-    const raw = process.env[def.envVar]!;
+    const raw = process.env[def.envVar];
+    if (raw === undefined) return def.default;
     if (def.type === "boolean") return raw === "true";
     if (def.type === "number") {
       const parsed = parseNumber(raw, def);
@@ -719,7 +824,7 @@ export function saveFeatureSettings(
       errors.push(`${key}: expected boolean, got ${typeof value}`);
     }
     if (def.type === "number") {
-      if (typeof value !== "number" || isNaN(value)) {
+      if (typeof value !== "number" || Number.isNaN(value)) {
         errors.push(`${key}: expected number`);
       } else if (def.min !== undefined && value < def.min) {
         errors.push(`${key}: must be ≥ ${def.min}`);

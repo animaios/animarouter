@@ -269,6 +269,7 @@ const VALID_STRATEGIES: RoutingStrategy[] = [
   "priority",
   "balanced",
   "smartest",
+  "rabbit",
   "fastest",
   "reliable",
   "custom",

@@ -60,17 +60,17 @@
 
 ## Phase 9: Rabbit Routing Strategy
 
-- [ ] **T9.1** Add `rabbit` to the routing strategy model (`RoutingStrategy`, validation, API schema) and label it **Rabbit** in the dashboard strategy selector
-- [ ] **T9.2** Add `rabbit_enabled` and optional `rabbit_weights` settings. Default Rabbit weights must match the existing Smartest preset: intelligence 45%, reliability 30%, latency 15%, speed 10%
-- [ ] **T9.3** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and Rabbit eligibility helpers
-- [ ] **T9.4** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by Rabbit / Smartest-weight score, `top_rank` = rank=1 first, numeric override first)
-- [ ] **T9.5** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
+- [x] **T9.1** Add `rabbit` to the routing strategy model (`RoutingStrategy`, validation, API schema) and label it **Rabbit** in the dashboard strategy selector
+- [x] **T9.2** Add `rabbit_enabled` and optional `rabbit_weights` settings. Default Rabbit weights must match the existing Smartest preset: intelligence 45%, reliability 30%, latency 15%, speed 10%
+- [x] **T9.3** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and Rabbit eligibility helpers
+- [x] **T9.4** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by Rabbit / Smartest-weight score, `top_rank` = rank=1 first, numeric override first)
+- [x] **T9.5** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
 - [ ] **T9.6** Implement `executeOscillator()` — 3-step pipeline: Foundation → Context Bridge → Injection → Context Bridge → Anchor
 - [ ] **T9.7** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal Smartest-weight single-model path; Step 2/3 fail → return selected Foundation)
-- [ ] **T9.8** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
+- [x] **T9.8** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
 - [ ] **T9.9** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator; when load-shed, continue with normal Rabbit / Smartest-weight single-model routing
 - [ ] **T9.10** Unit tests for Rabbit strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
-- [ ] **T9.11** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
+- [x] **T9.11** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
 
 ## Phase 10: Oscillator Integration
 

@@ -57,6 +57,15 @@ export function SettingRow({ setting, value, onChange, disabled }: SettingRowPro
               ))}
             </SelectContent>
           </Select>
+        ) : setting.type === 'string' ? (
+          <Input
+            id={`setting-${setting.key}`}
+            type="text"
+            value={String(value ?? '')}
+            onChange={(e) => onChange(e.target.value)}
+            className="w-[260px]"
+            disabled={disabled}
+          />
         ) : (
           <Input
             id={`setting-${setting.key}`}

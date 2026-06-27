@@ -124,6 +124,23 @@ describe('Fallback API', () => {
     expect(reset.status).toBe(200);
   });
 
+  it('PUT /api/fallback/routing accepts Rabbit strategy', async () => {
+    try {
+      const { status, body } = await request(app, 'PUT', '/api/fallback/routing', { strategy: 'rabbit' });
+
+      expect(status).toBe(200);
+      expect(body.strategy).toBe('rabbit');
+      expect(body.presets.rabbit).toEqual({
+        reliability: 0.30,
+        speed: 0.10,
+        intelligence: 0.45,
+        latency: 0.15,
+      });
+    } finally {
+      await request(app, 'PUT', '/api/fallback/routing', { strategy: 'balanced' });
+    }
+  });
+
   it('PUT /api/fallback updates order', async () => {
     const { body: original } = await request(app, 'GET', '/api/fallback');
 
