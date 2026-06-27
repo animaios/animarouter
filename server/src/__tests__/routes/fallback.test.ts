@@ -192,6 +192,48 @@ describe('Fallback API', () => {
     }
   });
 
+  it('persists group boost across all grouped provider rows', async () => {
+    setSetting('model_grouping_enabled', 'true');
+    let groupId: number | undefined;
+    let providerIds: number[] = [];
+    try {
+      const { body: original } = await request(app, 'GET', '/api/fallback');
+      const group = original.find((entry: any) => entry.isGroup && entry.providers?.length > 0);
+      expect(group).toBeDefined();
+      if (!group) return;
+
+      groupId = group.groupId;
+      providerIds = group.providers.map((provider: any) => provider.modelDbId);
+
+      const boosted = await request(app, 'PUT', `/api/fallback/boost/groups/${groupId}`, { boost: 2 });
+      expect(boosted.status).toBe(200);
+      expect(boosted.body).toMatchObject({ groupId, boost: 2 });
+      expect(boosted.body.modelDbIds.sort((a: number, b: number) => a - b)).toEqual([...providerIds].sort((a, b) => a - b));
+
+      const { body: afterBoost } = await request(app, 'GET', '/api/fallback');
+      const boostedGroup = afterBoost.find((entry: any) => entry.groupId === groupId);
+      expect(boostedGroup.boost).toBe(2);
+
+      const db = getDb();
+      for (const providerId of providerIds) {
+        const row = db.prepare('SELECT boost FROM model_degradation WHERE model_db_id = ?').get(providerId) as { boost: number } | undefined;
+        expect(row?.boost).toBe(2);
+      }
+
+      const reset = await request(app, 'DELETE', `/api/fallback/boost/groups/${groupId}`);
+      expect(reset.status).toBe(200);
+
+      const { body: afterReset } = await request(app, 'GET', '/api/fallback');
+      const resetGroup = afterReset.find((entry: any) => entry.groupId === groupId);
+      expect(resetGroup.boost).toBe(1);
+    } finally {
+      if (groupId !== undefined) {
+        await request(app, 'DELETE', `/api/fallback/boost/groups/${groupId}`);
+      }
+      setSetting('model_grouping_enabled', 'false');
+    }
+  });
+
   it('POST /api/fallback/sort/intelligence sorts by cross-provider tier, then rank', async () => {
     const { status } = await request(app, 'POST', '/api/fallback/sort/intelligence');
     expect(status).toBe(200);
