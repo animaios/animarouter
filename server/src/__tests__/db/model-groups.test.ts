@@ -10,6 +10,7 @@ import {
   reconcileGroups,
   ensureModelInGroup,
   seedDefaultModelGroupAliases,
+  applyDefaultModelGroupDisplayNames,
 } from '../../db/model-groups.js';
 import { initDb, getDb, setSetting } from '../../db/index.js';
 
@@ -102,10 +103,26 @@ describe('alias cache', () => {
     const inserted = seedDefaultModelGroupAliases(db);
     const cache = loadAliasCache(db);
 
-    expect(inserted).toBeGreaterThanOrEqual(3);
+    expect(inserted).toBeGreaterThanOrEqual(4);
     expect(cache.get('deepseek-v4-flash-free')).toBe('deepseek-v4-flash');
+    expect(cache.get('minimax-m3-free')).toBe('minimax-m3');
     expect(cache.get('nemotron-3-ultra-free')).toBe('nemotron-3-ultra-550b-a55b');
     expect(cache.get('nemotron-3-ultra-550b-a55b:free')).toBe('nemotron-3-ultra-550b-a55b');
+  });
+
+  it('applies default display names for canonical grouped models', () => {
+    db.prepare(`
+      UPDATE model_groups
+         SET display_name = 'MiniMax M3 Free (OpenCode Zen)'
+       WHERE group_key = 'minimax-m3'
+    `).run();
+
+    const changed = applyDefaultModelGroupDisplayNames(db);
+    const group = db.prepare('SELECT display_name FROM model_groups WHERE group_key = ?')
+      .get('minimax-m3') as { display_name: string };
+
+    expect(changed).toBeGreaterThanOrEqual(1);
+    expect(group.display_name).toBe('MiniMax M3');
   });
 });
 

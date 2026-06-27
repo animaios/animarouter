@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { initEncryptionKey } from '../lib/crypto.js';
 import { applyBenchmarkScores, applyManualBenchmarkOverrides } from './benchmark-scores.js';
-import { invalidateAliasCache, reconcileGroups, seedDefaultModelGroupAliases } from './model-groups.js';
+import { applyDefaultModelGroupDisplayNames, invalidateAliasCache, reconcileGroups, seedDefaultModelGroupAliases } from './model-groups.js';
 import { BenchmarkService } from '../services/benchmarks.js';
 
 // Bump this when adding a new data migration. Schema-level changes (column
@@ -2798,7 +2798,11 @@ function seedModelGroupAliasesV38(db: Database.Database) {
       invalidateAliasCache();
       const result = reconcileGroups(db);
       normalizeFallbackConfigGroupsV38(db);
+      const renamed = applyDefaultModelGroupDisplayNames(db);
       console.log(`[V38] Seeded ${inserted} default model group aliases; reassigned ${result.modelsReassigned} models`);
+      if (renamed > 0) console.log(`[V38] Applied ${renamed} default model group display name(s)`);
+    } else {
+      applyDefaultModelGroupDisplayNames(db);
     }
   } catch (err: any) {
     console.warn('[V38] Default model group alias seed skipped:', err.message);
