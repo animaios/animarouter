@@ -52,11 +52,11 @@
 
 ## Phase 8: Context Bridge & Sanitization (Rabbit Shake)
 
-- [ ] **T8.1** Create `server/src/services/context-bridge.ts` with `PROVIDER_SANITIZERS` registry for token patterns (reusing `parseTokenDialect` from `tool-call-rescue.ts`)
-- [ ] **T8.2** Implement `sanitizeForCrossProvider(responseText, sourceProvider)` — strips `<|...|>` tokens, structural blocks, maps system markers to plain text
-- [ ] **T8.3** Implement `buildContextBridge()` — wraps `maybeInjectContextHandoff`, adds `[Thought Context: ...]` with sanitized prior response
-- [ ] **T8.4** Unit tests for `sanitizeForCrossProvider` — each provider's tokens, structural blocks, generic `<|...|>` fallback
-- [ ] **T8.5** Unit tests for `buildContextBridge` — standard handoff, oscillator handoff, no artifact leakage
+- [x] **T8.1** Create `server/src/services/context-bridge.ts` with `PROVIDER_SANITIZERS` registry for token patterns (reusing `parseTokenDialect` from `tool-call-rescue.ts`)
+- [x] **T8.2** Implement `sanitizeForCrossProvider(responseText, sourceProvider)` — strips `<|...|>` tokens, structural blocks, maps system markers to plain text
+- [x] **T8.3** Implement `buildContextBridge()` — wraps `maybeInjectContextHandoff`, adds `[Thought Context: ...]` with sanitized prior response
+- [x] **T8.4** Unit tests for `sanitizeForCrossProvider` — each provider's tokens, structural blocks, generic `<|...|>` fallback
+- [x] **T8.5** Unit tests for `buildContextBridge` — standard handoff, oscillator handoff, no artifact leakage
 
 ## Phase 9: Rabbit Routing Strategy
 
