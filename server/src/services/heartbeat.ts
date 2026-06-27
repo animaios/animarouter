@@ -22,7 +22,7 @@ import { getFeatureSetting } from './feature-settings.js';
 // Per-key-per-model health state
 // ──────────────────────────────────────────────────────────────────────
 
-interface KeyHealth {
+export interface KeyHealth {
   /** 0 = healthy, higher = worse. Incremented on failure, reset on success. */
   penalty: number;
   /** Timestamp of last ping attempt (success or failure). */
@@ -31,6 +31,8 @@ interface KeyHealth {
   healthy: boolean;
   /** Last error message (if unhealthy). */
   lastError?: string;
+  /** Round-trip time of the most recent successful heartbeat ping (ms). */
+  lastPingLatencyMs?: number;
 }
 
 /** Composite key for per-key-per-model health map: `${keyId}:${modelId}` */
@@ -663,6 +665,7 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
       lastPingAt: Date.now(),
       healthy: false,
       lastError: 'decrypt failed',
+      lastPingLatencyMs: undefined,
     });
     const db = getDb();
     db.prepare("UPDATE api_keys SET status = 'sick' WHERE id = ? AND status = 'healthy'").run(keyRow.id);
@@ -682,11 +685,13 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
     );
 
     // Success — mark key+model healthy and reduce model-level degradation
+    const latencyMs = Date.now() - start;
     const key = healthKey(keyRow.id, modelId);
     keyHealthMap.set(key, {
       penalty: 0,
       lastPingAt: Date.now(),
       healthy: true,
+      lastPingLatencyMs: latencyMs,
     });
     const db = getDb();
     // If this key was sick in DB, check if it's now healthy on the model
@@ -732,6 +737,7 @@ async function pingKey(platform: string, modelDbId: number, modelId: string, key
         lastPingAt: Date.now(),
         healthy: false,
         lastError: (err?.message ?? 'unknown').slice(0, 120),
+        lastPingLatencyMs: prev?.lastPingLatencyMs,
       });
       const db = getDb();
       // DB: Only set sick if key is unhealthy on ALL models for its platform

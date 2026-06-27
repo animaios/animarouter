@@ -7,7 +7,7 @@ import { decrypt } from '../lib/crypto.js';
 // Rate-limit pre-checks removed — routing relies on heartbeat-based health
 // detection instead of predictive quota tracking. See PR: heartbeat per-key.
 // recordRequest/recordTokens still track usage for analytics purposes.
-import { isKeyHealthy, isHeartbeatEnabled } from './heartbeat.js';
+import { isKeyHealthy, isHeartbeatEnabled, getKeyHealth } from './heartbeat.js';
 import { isExhausted } from './key-exhaustion.js';
 import {
   BANDIT_PRESETS, DEFAULT_STRATEGY, type RoutingStrategy, type RoutingWeights,
@@ -142,6 +142,40 @@ function rotateArray<T>(arr: T[], offset: number): T[] {
   if (arr.length === 0) return arr;
   const shift = offset % arr.length;
   return [...arr.slice(shift), ...arr.slice(0, shift)];
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Ping-weighted key shuffle
+// When heartbeat is enabled, healthy keys are shuffled with probability
+// proportional to inverse latency so faster keys are picked more often,
+// while still giving slower keys a chance (Boltzmann exploration).
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shuffle keys by perceived ping latency with weighted randomness.
+ * Keys with lower latency get higher probability of appearing first.
+ * Uses exponential noise / weight ordering (equivalent to sampling without
+ * replacement from a categorical distribution with weights ∝ 1/(latency+baseline)).
+ */
+function pingWeightedShuffle(keys: KeyRow[], modelId: string): KeyRow[] {
+  if (keys.length <= 1) return keys;
+
+  // Baseline latency (ms) added to weight denominator so unknown/slow keys
+  // still get nonzero weight. Tuned to ~100ms — roughly network RTT floor.
+  const BASELINE_LATENCY_MS = 100;
+
+  const scored = keys.map(key => {
+    const health = getKeyHealth(key.id, modelId);
+    const latency = health?.lastPingLatencyMs ?? 2000; // unknown keys get 2s default
+    const weight = 1 / (latency + BASELINE_LATENCY_MS);
+    // Exponential noise: -ln(U) / weight. Higher weight → smaller score → picked earlier.
+    const noise = -Math.log(1 - Math.random() + 1e-15);
+    const score = noise / weight;
+    return { key, score };
+  });
+
+  scored.sort((a, b) => a.score - b.score);
+  return scored.map(s => s.key);
 }
 
 // ── Parallel request gating ──
@@ -826,35 +860,40 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
 
         const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id, provider.model_id));
 
-        // Key ordering
-        const rrKey = `${provider.platform}:${provider.model_id}`;
-        const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
-        let providerStickyEnabled = false;
-        if (!keyAffinityEnabled) {
-          const stickyRow = db.prepare(
-            'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
-          ).get(provider.platform) as { sticky_sessions_enabled: number } | undefined;
-          providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
-        }
-        const useKeyAffinity = (keyAffinityEnabled || (providerStickyEnabled && options?.stickySessionKey))
-          && options?.stickySessionKey;
+                // Key ordering
+                const rrKey = `${provider.platform}:${provider.model_id}`;
+                const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
+                let providerStickyEnabled = false;
+                if (!keyAffinityEnabled) {
+                  const stickyRow = db.prepare(
+                    'SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?'
+                  ).get(provider.platform) as { sticky_sessions_enabled: number } | undefined;
+                  providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
+                }
+                const useKeyAffinity = (keyAffinityEnabled || (providerStickyEnabled && options?.stickySessionKey))
+                  && options?.stickySessionKey;
 
-        let keyOrder: KeyRow[];
-        let idx: number;
-        let rrIdx = 0;
-        if (useKeyAffinity) {
-          keyOrder = [...healthyKeys, ...unhealthyKeys];
-          const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
-          const hashInt = hash.readUInt32BE(0);
-          idx = hashInt % keyOrder.length;
-        } else {
-          rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-          keyOrder = [
-            ...rotateArray(healthyKeys, rrIdx),
-            ...rotateArray(unhealthyKeys, rrIdx),
-          ];
-          idx = 0;
-        }
+                let keyOrder: KeyRow[];
+                let idx: number;
+                let rrIdx = 0;
+                if (useKeyAffinity) {
+                  keyOrder = [...healthyKeys, ...unhealthyKeys];
+                  const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
+                  const hashInt = hash.readUInt32BE(0);
+                  idx = hashInt % keyOrder.length;
+                } else {
+                  rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+                  // When heartbeat is enabled, shuffle healthy keys by ping latency
+                  // with weighted randomness so faster keys get more traffic
+                  const orderedHealthyKeys = heartbeatEnabled
+                    ? pingWeightedShuffle(healthyKeys, provider.model_id)
+                    : rotateArray(healthyKeys, rrIdx);
+                  keyOrder = [
+                    ...orderedHealthyKeys,
+                    ...rotateArray(unhealthyKeys, rrIdx),
+                  ];
+                  idx = 0;
+                }
 
         for (let attempt = 0; attempt < keyOrder.length; attempt++) {
           const actualIdx = useKeyAffinity ? (idx + attempt) % keyOrder.length : attempt;
@@ -1061,27 +1100,32 @@ export function routeRequest(estimatedTokens = 1000, skipKeys?: Set<string>, pre
     // independently to maintain fair distribution while respecting health.
     const unhealthyKeys = heartbeatEnabled ? [] : keys.filter(k => !isKeyHealthy(k.id, entry.model_id));
 
-    // Build the key ordering array and starting index.
-    // For key affinity: concatenate healthy+unhealthy and hash into it.
-    // For round-robin: rotate within each health group independently so
-    // healthy keys are ALWAYS tried first regardless of the offset.
+        // Build the key ordering array and starting index.
+        // For key affinity: concatenate healthy+unhealthy and hash into it.
+        // For round-robin: rotate within each health group independently so
+        // healthy keys are ALWAYS tried first regardless of the offset.
 
-    let keyOrder: KeyRow[];
-    let idx: number;
-    let rrIdx = 0; // For round-robin increment tracking
-    if (useKeyAffinity) {
-      keyOrder = [...healthyKeys, ...unhealthyKeys];
-      const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
-      const hashInt = hash.readUInt32BE(0);
-      idx = hashInt % keyOrder.length;
-    } else {
-      rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-      keyOrder = [
-        ...rotateArray(healthyKeys, rrIdx),
-        ...rotateArray(unhealthyKeys, rrIdx),
-      ];
-      idx = 0; // start from beginning — healthy-first guaranteed by construction
-    }
+        let keyOrder: KeyRow[];
+        let idx: number;
+        let rrIdx = 0; // For round-robin increment tracking
+        if (useKeyAffinity) {
+          keyOrder = [...healthyKeys, ...unhealthyKeys];
+          const hash = crypto.createHash('sha1').update(options!.stickySessionKey!).digest();
+          const hashInt = hash.readUInt32BE(0);
+          idx = hashInt % keyOrder.length;
+        } else {
+          rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+          // When heartbeat is enabled, shuffle healthy keys by ping latency
+          // with weighted randomness so faster keys get more traffic
+          const orderedHealthyKeys = heartbeatEnabled
+            ? pingWeightedShuffle(healthyKeys, entry.model_id)
+            : rotateArray(healthyKeys, rrIdx);
+          keyOrder = [
+            ...orderedHealthyKeys,
+            ...rotateArray(unhealthyKeys, rrIdx),
+          ];
+          idx = 0; // start from beginning — healthy-first guaranteed by construction
+        }
 
     for (let attempt = 0; attempt < keyOrder.length; attempt++) {
       const actualIdx = useKeyAffinity ? (idx + attempt) % keyOrder.length : attempt;
