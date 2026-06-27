@@ -36,9 +36,9 @@ The heartbeat advisor runs passively during health checks. The Rabbit Shake osci
 │  Normal path: single model → response                       │
 │                                                              │
 │  ★ New: Rabbit Shake path (when conditions met):            │
-│    1. [Foundation] Highest-intelligence model → base logic  │
+│    1. [Foundation] Top eligible intelligence model → base   │
 │       ↓ Context Bridge (sanitize + handoff)                 │
-│    2. [Injection] Divergent-intelligence model → critique   │
+│    2. [Injection] Divergent eligible model → critique       │
 │       ↓ Context Bridge (sanitize + handoff)                 │
 │    3. [Anchor] Foundation model → final synthesis           │
 │       ↓                                                      │
@@ -192,6 +192,11 @@ interface OscillatorConfig {
    * - 'auto' (default): the model with the highest intelligence composite score
    * - 'top_rank': the model with intelligence_rank = 1 (if available)
    * - model_db_id: explicit model DB ID override
+   *
+   * Selection is model-agnostic. GLM, Nemotron, or any other model may become
+   * the foundation if it is the top eligible candidate in the local pool.
+   * If the preferred foundation fails before producing Step 1 output, the
+   * resolver should advance to the next eligible high-intelligence candidate.
    */
   foundationSelection: 'auto' | 'top_rank' | number;
 
@@ -202,6 +207,10 @@ interface OscillatorConfig {
    * - 'top_rank': the highest-intelligence model regardless of provider
    * - 'different_tier': a model from a different size tier than foundation
    * - model_db_id: explicit model DB ID override
+   *
+   * Selection is also model-agnostic. The injection model is not a static
+   * fallback model; it is a currently eligible divergent candidate selected
+   * from the enabled routing pool for the foundation chosen in Step 1.
    */
   injectionSelection: 'divergent' | 'top_rank' | 'different_tier' | number;
 
@@ -453,7 +462,7 @@ function buildContextBridge(params: {
 
   ### 3.2.1 Model Resolution Functions
 
-  These functions use the existing intelligence ranking system (`intelligenceComposite`, `intelligenceRank`, `sizeLabel`) to dynamically select foundation and injection models. No hardcoded model names.
+  These functions use the existing intelligence ranking system (`intelligenceComposite`, `intelligenceRank`, `sizeLabel`) to dynamically select foundation and injection models. They must not hardcode provider or model names. The foundation resolver returns an ordered candidate list so Step 1 can advance to the next eligible high-intelligence model if the preferred model fails.
 
   ```typescript
   // server/src/services/rabbit-shake.ts
@@ -462,25 +471,35 @@ function buildContextBridge(params: {
   import { getDb } from '../db/index.js';
 
   /**
-   * Resolve the foundation model DB ID based on config selection strategy.
+   * Resolve ordered foundation model candidates based on config selection strategy.
+   * The first candidate is the preferred foundation. Later candidates are failover
+   * options if the Step 1 call fails before producing usable output.
    */
-  function resolveFoundationModel(config: OscillatorConfig): number {
+  function resolveFoundationCandidates(config: OscillatorConfig): ChainRow[] {
     const scores = getRoutingScores(); // Returns scored models with intelligence composite
-    const eligible = scores.scores.filter(s => s.enabled && s.modelDbId);
+    const eligible = scores.scores
+      .filter(s => s.enabled && s.modelDbId)
+      .sort((a, b) => b.compositeScore - a.compositeScore);
     if (eligible.length === 0) throw new Error('No eligible models for oscillator foundation');
+
+    if (typeof config.foundationSelection === 'number') {
+      const explicit = eligible.find(s => s.modelDbId === config.foundationSelection);
+      if (explicit) return [explicit, ...eligible.filter(s => s.modelDbId !== explicit.modelDbId)];
+      return eligible;
+    }
 
     switch (config.foundationSelection) {
       case 'top_rank':
-        // Pick model with intelligence_rank = 1 (best)
+        // Prefer intelligence_rank = 1 (best), then keep all other eligible models
+        // ordered by current routing score for Step 1 failover.
         const topRank = eligible.find(s => s.intelligenceRank === 1);
-        if (topRank) return topRank.modelDbId;
-        // Fallback to highest composite
-        return eligible.reduce((best, s) => s.compositeScore > best.compositeScore ? s : best).modelDbId;
+        if (topRank) return [topRank, ...eligible.filter(s => s.modelDbId !== topRank.modelDbId)];
+        return eligible;
 
       case 'auto':
       default:
-        // Pick model with highest intelligence composite score
-        return eligible.reduce((best, s) => s.compositeScore > best.compositeScore ? s : best).modelDbId;
+        // Highest intelligence/routing composite first, then lower-ranked failovers.
+        return eligible;
     }
   }
 
@@ -490,10 +509,11 @@ function buildContextBridge(params: {
    */
   function resolveInjectionModel(config: OscillatorConfig, foundationModelDbId: number): number {
     const scores = getRoutingScores();
-    const eligible = scores.scores.filter(s => s.enabled && s.modelDbId && s.modelDbId !== foundationModelDbId);
+    const allEligible = scores.scores.filter(s => s.enabled && s.modelDbId);
+    const foundation = allEligible.find(s => s.modelDbId === foundationModelDbId);
+    const eligible = allEligible.filter(s => s.modelDbId !== foundationModelDbId);
     if (eligible.length === 0) throw new Error('No eligible models for oscillator injection');
 
-    const foundation = eligible.find(s => s.modelDbId === foundationModelDbId);
     const foundationComposite = foundation?.compositeScore ?? 0;
 
     switch (config.injectionSelection) {
@@ -501,7 +521,7 @@ function buildContextBridge(params: {
         // Prefer: different provider, high intelligence, meets min gap
         const divergent = eligible
           .filter(s => s.provider !== foundation?.provider)
-          .filter(s => (foundationComposite - s.compositeScore) <= -config.minIntelligenceGap)
+          .filter(s => Math.abs(foundationComposite - s.compositeScore) >= config.minIntelligenceGap)
           .sort((a, b) => b.compositeScore - a.compositeScore)[0];
         if (divergent) return divergent.modelDbId;
         // Fallback: any different provider with high intelligence
@@ -541,6 +561,8 @@ The oscillator is triggered **instead of** a normal single-model request when al
 3. The prompt is classified as "complex reasoning" (heuristic: total message length > 500 chars OR contains code blocks OR has multi-turn assistant messages)
 4. Current concurrent request count is below `loadShedThreshold`
 
+The oscillator is model-agnostic. It resolves an ordered foundation candidate list from the enabled routing pool, using intelligence score, health, capability, and current routing eligibility. The injection model is then selected relative to the foundation candidate, preferring a high-intelligence divergent provider or tier. If the first foundation candidate fails before Step 1 succeeds, the router should try the next foundation candidate and re-resolve the injection model for that candidate.
+
 ```typescript
 // server/src/services/rabbit-shake.ts
 
@@ -572,22 +594,29 @@ async function executeOscillator(params: {
   const start = Date.now();
   const bridgeStats: ContextBridgeResult[] = [];
 
-  // ─── Step 1: Foundation (highest-intelligence model) ─────────
-  let foundationText: string;
-  let foundationProvider: string;
-  let foundationModelDbId: number;
-  try {
-    foundationModelDbId = resolveFoundationModel(config);
-    const foundationResult = await callModelWithTimeout(
-      foundationModelDbId,
-      messages,
-      { max_tokens: route.maxOutputTokens },
-      config.stepTimeoutMs,
-    );
-    foundationText = extractResponseText(foundationResult);
-    foundationProvider = getPlatformForModelDbId(foundationModelDbId);
-  } catch (err) {
-    // Step 1 fails → fall back to single-model path
+  // ─── Step 1: Foundation (top eligible intelligence candidate) ─
+  let foundationText = '';
+  let foundationProvider = '';
+  let foundationModelDbId = 0;
+  const foundationCandidates = resolveFoundationCandidates(config);
+  for (const candidate of foundationCandidates) {
+    try {
+      const foundationResult = await callModelWithTimeout(
+        candidate.modelDbId,
+        messages,
+        { max_tokens: route.maxOutputTokens },
+        config.stepTimeoutMs,
+      );
+      foundationModelDbId = candidate.modelDbId;
+      foundationText = extractResponseText(foundationResult);
+      foundationProvider = getPlatformForModelDbId(foundationModelDbId);
+      break;
+    } catch (err) {
+      recordOscillatorCandidateFailure(candidate.modelDbId, err);
+    }
+  }
+  if (!foundationText) {
+    // All foundation candidates failed → fall back to normal single-model path
     return {
       text: '', complete: false, failedStep: 1,
       latencyMs: Date.now() - start, meowDetected: false,
@@ -672,7 +701,7 @@ async function executeOscillator(params: {
   let anchorText: string;
   try {
     const anchorResult = await callModelWithTimeout(
-      config.foundationModelDbId,
+      foundationModelDbId,
       anchorMessages,
       { max_tokens: route.maxOutputTokens },
       config.stepTimeoutMs,
@@ -707,7 +736,7 @@ async function executeOscillator(params: {
     complete: true,
     latencyMs: Date.now() - start,
     meowDetected: false,
-    finalModelDbId: config.foundationModelDbId,
+    finalModelDbId: foundationModelDbId,
     bridgeStats,
   };
 }
@@ -791,11 +820,12 @@ if (oscillatorEligible) {
   // Log oscillator outcome for heartbeat advisor metrics
   logOscillatorResult(result);
   
-  if (result.complete && !result.meowDetected) {
-    // Return the synthesized response
+  if (result.text) {
+    // Return synthesized text, selected-foundation fallback, or meow-safe fallback.
     return sendResponse(result.text, result.finalModelDbId);
   }
-  // If oscillator failed or meowed, fall through to normal single-model path
+  // If all Step 1 foundation candidates failed before any usable output,
+  // fall through to normal best-eligible model routing.
 }
 
 // Normal single-model path (existing code, unchanged)
@@ -910,14 +940,14 @@ If the advisor is disabled or the response can't be parsed:
 {
   key: 'oscillator_enabled',
   label: 'Rabbit Shake Oscillator',
-  description: 'Enable the 3-step multi-model oscillator for complex reasoning prompts. Step 1: Highest-intelligence model generates base logic. Step 2: Divergent-intelligence model provides a concise alternative perspective. Step 3: Foundation model synthesizes. Falls back to normal routing on failure or meow detection.',
+  description: 'Enable the 3-step multi-model oscillator for complex reasoning prompts. Step 1: Top eligible intelligence model generates base logic. Step 2: Divergent eligible model provides a concise alternative perspective. Step 3: The selected foundation model synthesizes. Falls back to normal routing on failure, meow detection, or load shedding.',
   type: 'boolean', default: false,
   envVar: 'OSCILLATOR_ENABLED', effect: 'restart', group: 'Resilience',
 },
 {
   key: 'oscillator_foundation_selection',
   label: 'Oscillator Foundation Selection',
-  description: 'How to select the foundation model (Steps 1 & 3). \'auto\' = highest intelligence composite; \'top_rank\' = intelligence_rank=1; or explicit model DB ID.',
+  description: 'How to select foundation candidates (Steps 1 & 3). \'auto\' = ordered by highest eligible intelligence composite; \'top_rank\' = intelligence_rank=1 first; or explicit model DB ID. If the first candidate fails Step 1, try the next eligible candidate.',
   type: 'string', default: 'auto',
   enum: ['auto', 'top_rank'],
   envVar: 'OSCILLATOR_FOUNDATION_SELECTION', effect: 'restart', group: 'Resilience',
@@ -925,7 +955,7 @@ If the advisor is disabled or the response can't be parsed:
 {
   key: 'oscillator_injection_selection',
   label: 'Oscillator Injection Selection',
-  description: 'How to select the injection model (Step 2). \'divergent\' = high intelligence, different provider from foundation; \'top_rank\' = highest intelligence; \'different_tier\' = different size tier; or explicit model DB ID.',
+  description: 'How to select the injection model (Step 2). \'divergent\' = high intelligence, different provider from the selected foundation; \'top_rank\' = highest eligible non-foundation model; \'different_tier\' = different size tier; or explicit model DB ID.',
   type: 'string', default: 'divergent',
   enum: ['divergent', 'top_rank', 'different_tier'],
   envVar: 'OSCILLATOR_INJECTION_SELECTION', effect: 'restart', group: 'Resilience',
@@ -947,7 +977,7 @@ If the advisor is disabled or the response can't be parsed:
 {
   key: 'oscillator_load_shed_threshold',
   label: 'Load-Shed Threshold',
-  description: 'Concurrent request count above which the oscillator is automatically disabled to prevent latency cascades. Default: 21.',
+  description: 'Concurrent request count above which the oscillator is bypassed and traffic uses normal best-eligible single-model routing. Default: 21. Eligibility resumes automatically when traffic drops below the threshold.',
   type: 'number', default: 21, min: 5, max: 100,
   envVar: 'OSCILLATOR_LOAD_SHED_THRESHOLD', effect: 'live', group: 'Resilience',
 },
@@ -1049,7 +1079,7 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 | **`sanitizeForCrossProvider`** | **Each provider's token patterns, structural block removal, generic `<\|...\|>` fallback** |
 | **`buildContextBridge`** | **Standard handoff path, oscillator handoff with [Thought Context], no artifact leakage** |
 | `detectMeow` | Structural tag leakage, script fragmentation, repeated chars, false positives on normal text |
-| **`executeOscillator`** | **Happy path (3 steps complete), Step 2 timeout → fallback, Step 3 meow → fallback, Step 1 failure → normal path** |
+| **`executeOscillator`** | **Happy path (3 steps complete), Step 1 candidate failure → next candidate, all Step 1 candidates fail → normal path, Step 2 timeout → selected-foundation fallback, Step 3 meow → selected-foundation fallback** |
 | **Load shedding** | **Threshold enforcement, automatic re-enable below threshold** |
 | Integration | Advisor enabled → parsed → applied; oscillator enabled → 3-step → events published |
 
@@ -1063,7 +1093,7 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 | Advisory creates feedback loops | Medium | Medium | Ephemeral per-cycle; past adjustments absorbed into stats |
 | **Oscillator Step 2 (injection) amplifies bias instead of diversifying** | Medium | Medium | Higher temperature (0.7) + strict 2-sentence limit; meow validation catches incoherence |
 | **Cross-provider token leakage ("meowing")** | Medium | High | `sanitizeForCrossProvider` strips all known provider tokens; generic `<\|...\|>` regex catches unknowns; meow validation as safety net |
-| **Cascading latency timeouts under load** | Medium | High | Load-shed threshold auto-disables oscillator; per-step timeout; fallback to foundation response on any failure |
+| **Cascading latency timeouts under load** | Medium | High | Load-shed threshold bypasses oscillator; per-step timeout; Step 1 tries the next foundation candidate, Step 2/3 failures fall back to the selected foundation response |
 | **Oscillator cost exceeds value** | Low | Medium | Only eligible for complex reasoning; load-shed disables under pressure; heartbeat advisor can suggest disabling if metrics are poor |
 | **`parseTokenDialect` doesn't cover all provider dialects** | Low | Low | Generic `<\|...\|>` regex as second pass; meow detection catches remaining artifacts |
 | **Injection model sees too much context → hallucination** | Low | Medium | Only `[Thought Context]` is passed (sanitized, not raw); 2-sentence limit; explicit prompt to provide *alternative*, not *continuation* |

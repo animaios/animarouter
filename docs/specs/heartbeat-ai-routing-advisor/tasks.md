@@ -61,13 +61,13 @@
 ## Phase 9: Rabbit Shake Oscillator Core
 
 - [ ] **T9.1** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and feature flag `oscillator_enabled`
-- [ ] **T9.2** Implement `resolveFoundationModel(config)` — selects model by `foundationSelection` (`auto` = highest composite, `top_rank` = rank=1)
-- [ ] **T9.3** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects divergent model by `injectionSelection` (`divergent` = diff provider, `top_rank`, `different_tier`)
+- [ ] **T9.2** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by highest composite, `top_rank` = rank=1 first, numeric override first)
+- [ ] **T9.3** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
 - [ ] **T9.4** Implement `executeOscillator()` — 3-step pipeline: Foundation → Context Bridge → Injection → Context Bridge → Anchor
-- [ ] **T9.5** Implement per-step timeout and graceful fallback (Step 1 fail → normal path; Step 2/3 fail → return Foundation)
+- [ ] **T9.5** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal path; Step 2/3 fail → return selected Foundation)
 - [ ] **T9.6** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
 - [ ] **T9.7** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator
-- [ ] **T9.8** Unit tests for `resolveFoundationModel`, `resolveInjectionModel` with various config combos
+- [ ] **T9.8** Unit tests for `resolveFoundationCandidates`, `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
 - [ ] **T9.9** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
 
 ## Phase 10: Oscillator Integration
