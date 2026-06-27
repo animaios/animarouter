@@ -33,7 +33,7 @@ function getEnabledGroupProviderIds(groupId: number): number[] | null {
   const group = db.prepare('SELECT id FROM model_groups WHERE id = ? AND enabled = 1').get(groupId) as { id: number } | undefined;
   if (!group) return null;
 
-  const providers = db.prepare('SELECT id FROM models WHERE group_id = ? AND enabled = 1').all(groupId) as Array<{ id: number }>;
+  const providers = db.prepare('SELECT id FROM models WHERE group_id = ?').all(groupId) as Array<{ id: number }>;
   return providers.map(provider => provider.id);
 }
 

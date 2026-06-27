@@ -629,7 +629,7 @@ function RowContent({
   )
 }
 
-function ThumbsButton({ direction, active, onClick }: {
+function ThumbsButton({ direction, active, targetLabel, onClick }: {
   direction: BoostDirection
   active: boolean
   targetLabel: 'model' | 'model group'
@@ -799,6 +799,9 @@ export default function FallbackPage() {
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
       queryClient.invalidateQueries({ queryKey: ['models', 'groups'] })
+    },
+    onError: (err: Error) => {
+      addToast({ kind: 'warning', title: 'Group archive failed', description: err.message })
     },
   })
 
