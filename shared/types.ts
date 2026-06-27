@@ -8,28 +8,28 @@
 // SambaNova was dropped in V23 (free tier permanently retired — 402
 // "payment method required" once the one-time $5 trial credit lapses).
 export type Platform =
-  | 'google'
-  | 'groq'
-  | 'cerebras'
-  | 'nvidia'
-  | 'mistral'
-  | 'openrouter'
-  | 'github'
-  | 'cohere'
-  | 'cloudflare'
-  | 'zhipu'
-  | 'ollama'
-  | 'kilo'
-  | 'pollinations'
-  | 'llm7'
-  | 'huggingface'
+  | "google"
+  | "groq"
+  | "cerebras"
+  | "nvidia"
+  | "mistral"
+  | "openrouter"
+  | "github"
+  | "cohere"
+  | "cloudflare"
+  | "zhipu"
+  | "ollama"
+  | "kilo"
+  | "pollinations"
+  | "llm7"
+  | "huggingface"
   // OpenCode Zen — OpenAI-compatible gateway. Free promotional models require a
   // free (no-card) account key from opencode.ai/auth; see migrateModelsV18.
-  | 'opencode'
+  | "opencode"
   // OVHcloud AI Endpoints — OpenAI-compatible, keyless anonymous tier
   // (2 req/min per IP per model); see migrateModelsV26.
-  | 'ovh'
-  | 'commandcode';
+  | "ovh"
+  | "commandcode";
 // NOTE: the literal string 'custom' is no longer a special platform. Users add
 // their own OpenAI-compatible providers (ollama, llama.cpp, LM Studio, vLLM,
 // any base_url) via POST /api/custom-providers, and the resulting slug becomes
@@ -49,7 +49,7 @@ export interface CustomProvider {
   tpdLimit: number | null;
   maxParallelRequests: number | null;
   keyless: boolean;
-  apiFormat: 'openai' | 'anthropic';
+  apiFormat: "openai" | "anthropic";
   stickySessionsEnabled: boolean;
   archived: boolean;
 }
@@ -63,7 +63,7 @@ export interface CustomProviderCreate {
   tpdLimit?: number | null;
   maxParallelRequests?: number | null;
   keyless?: boolean;
-  apiFormat?: 'openai' | 'anthropic';
+  apiFormat?: "openai" | "anthropic";
   stickySessionsEnabled?: boolean;
 }
 
@@ -76,7 +76,7 @@ export interface CustomProviderUpdate {
   tpdLimit?: number | null;
   maxParallelRequests?: number | null;
   keyless?: boolean;
-  apiFormat?: 'openai' | 'anthropic';
+  apiFormat?: "openai" | "anthropic";
   stickySessionsEnabled?: boolean;
 }
 
@@ -145,7 +145,13 @@ export interface ModelListRow {
   context_window: number | null;
 }
 
-export type KeyStatus = 'healthy' | 'sick' | 'rate_limited' | 'invalid' | 'error' | 'unknown';
+export type KeyStatus =
+  | "healthy"
+  | "sick"
+  | "rate_limited"
+  | "invalid"
+  | "error"
+  | "unknown";
 
 export interface ApiKey {
   id: number;
@@ -201,7 +207,7 @@ export interface ChatToolCallFunction {
 
 export interface ChatToolCall {
   id: string;
-  type: 'function';
+  type: "function";
   function: ChatToolCallFunction;
   thought_signature?: string;
 }
@@ -214,20 +220,20 @@ export interface ChatToolFunctionDefinition {
 }
 
 export interface ChatToolDefinition {
-  type: 'function';
+  type: "function";
   function: ChatToolFunctionDefinition;
 }
 
 export type ChatToolChoice =
-  | 'none'
-  | 'auto'
-  | 'required'
+  | "none"
+  | "auto"
+  | "required"
   | {
-    type: 'function';
-    function: {
-      name: string;
+      type: "function";
+      function: {
+        name: string;
+      };
     };
-  };
 
 // OpenAI's multimodal envelope: clients like opencode / continue.dev send
 // content as an array of typed blocks even for text-only messages, and
@@ -235,11 +241,13 @@ export type ChatToolChoice =
 // with no `type` — plus bare strings inside arrays. We accept all of it on
 // the wire and flatten to string for providers that don't support arrays
 // (Cohere, Cloudflare). See server/src/lib/content.ts. (#200)
-export type ChatContentBlock = string | { type?: string; text?: string; [key: string]: unknown };
+export type ChatContentBlock =
+  | string
+  | { type?: string; text?: string; [key: string]: unknown };
 export type ChatContent = string | null | ChatContentBlock[];
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
+  role: "system" | "user" | "assistant" | "tool";
   content: ChatContent;
   name?: string;
   tool_call_id?: string;
@@ -258,7 +266,13 @@ export interface ChatMessage {
 // vocabulary (`thinking.level`, `thinkingBudget`, `output_config.effort`, etc.).
 // `xhigh` is Anthropic-only; providers that don't recognize it collapse it to
 // `high` so the user's intent is honored.
-export type ThinkingEffort = 'max' | 'xhigh' | 'high' | 'medium' | 'low' | 'minimal';
+export type ThinkingEffort =
+  | "max"
+  | "xhigh"
+  | "high"
+  | "medium"
+  | "low"
+  | "minimal";
 
 // Reasoning trace replay hint. `enabled` carries Anthropic's `budget_tokens`
 // (and can coexist with `effort` for the newer Opus 4.6 / Sonnet 4.6 adaptive
@@ -267,12 +281,12 @@ export type ThinkingEffort = 'max' | 'xhigh' | 'high' | 'medium' | 'low' | 'mini
 export interface ThinkingConfig {
   // Anthropic-style: 'enabled' | 'adaptive' | 'disabled'.
   // OpenAI-compat / Google: 'enabled' | 'disabled'.
-  type?: 'enabled' | 'adaptive' | 'disabled';
+  type?: "enabled" | "adaptive" | "disabled";
   effort?: ThinkingEffort;
   // Anthropic budget_tokens; Google Gemini 2.5 thinkingBudget. Optional.
   budget?: number;
   // Anthropic display hint ('summarized' | 'omitted'). Optional.
-  display?: 'summarized' | 'omitted';
+  display?: "summarized" | "omitted";
   // Google, also returned by some OpenAI-compat providers: include the raw
   // (non-summarized) reasoning trace in the response. Default true when
   // thinking is enabled.
@@ -308,12 +322,12 @@ export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
-  reasoning_tokens?: number;  // thinking/reasoning tokens produced by the model
+  reasoning_tokens?: number; // thinking/reasoning tokens produced by the model
 }
 
 export interface ChatCompletionResponse {
   id: string;
-  object: 'chat.completion';
+  object: "chat.completion";
   created: number;
   model: string;
   choices: ChatCompletionChoice[];
@@ -324,15 +338,100 @@ export interface ChatCompletionResponse {
   };
 }
 
+// ---- Heartbeat Advisor Types ----
+
+export interface AdvisoryPayload {
+  self: { provider: string; model: string };
+  keys: Array<{
+    keyId: number;
+    models: Array<{
+      model: string;
+      healthy: boolean;
+      penalty: number;
+      lastError?: string;
+      lastPingLatencyMs?: number;
+      cooldownActive: boolean;
+      cooldownTier?: number;
+    }>;
+  }>;
+  models: Array<{
+    model: string;
+    provider: string;
+    stats: {
+      successRate: number;
+      avgLatencyMs: number;
+      p95LatencyMs?: number;
+      tokPerSec: number;
+      avgTtfbMs: number | null;
+    };
+    degradation?: {
+      penalty: number;
+      tier: string;
+      consecutiveFailures: number;
+      boost: number;
+    };
+  }>;
+  cooldowns: Array<{
+    keyId: number;
+    model: string;
+    tier: number;
+    remainingMs: number;
+  }>;
+  dailyUsage: Array<{
+    keyId: number;
+    requestCount: number;
+    dailyCap: number | null;
+  }>;
+  routing: {
+    strategy: string;
+    customWeights?: Record<string, number>;
+  };
+  oscillator?: {
+    attempts: number;
+    successes: number;
+    failures: number;
+    avgLatencyMs: number;
+    meowCount: number;
+    loadShedActive: boolean;
+  };
+}
+
+export interface RoutingAdvice {
+  confidence: number;
+  selfScore: number;
+  alt?: string;
+  cooldownHint: number;
+  recheckSooner: boolean;
+  oscillatorHint?: "enable" | "disable" | "no_opinion";
+  injectionModel?: string;
+  injectionBrevity?: "shorter" | "longer" | "default";
+}
+
+export interface AdviceResult {
+  applied:
+    | "score_boost"
+    | "score_penalty"
+    | "cooldown_extend"
+    | "cooldown_reduce"
+    | "recheck_scheduled"
+    | "alt_suggested"
+    | "oscillator_toggled"
+    | "injection_adjusted"
+    | "no_opinion"
+    | "parse_error";
+  modelDbId?: number;
+  magnitude: number;
+}
+
 export interface ChatCompletionChunk {
   id: string;
-  object: 'chat.completion.chunk';
+  object: "chat.completion.chunk";
   created: number;
   model: string;
   choices: {
     index: number;
     delta: {
-      role?: 'assistant';
+      role?: "assistant";
       content?: string;
       tool_calls?: ChatToolCall[];
       // Streaming reasoning trace delta. Anthropic's `thinking_delta` and
@@ -393,7 +492,7 @@ export interface RequestLog {
   id: number;
   platform: Platform;
   modelId: string;
-  status: 'success' | 'error';
+  status: "success" | "error";
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;
@@ -427,7 +526,12 @@ export interface ErrorEntry {
 export interface ErrorDistribution {
   byCategory: { category: string; count: number }[];
   byPlatform: { platform: string; count: number }[];
-  detailed: { platform: string; model_id: string; error_category: string; count: number }[];
+  detailed: {
+    platform: string;
+    model_id: string;
+    error_category: string;
+    count: number;
+  }[];
 }
 
 // ---- Rate Limit Types ----

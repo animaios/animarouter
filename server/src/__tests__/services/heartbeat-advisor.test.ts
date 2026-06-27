@@ -1,0 +1,189 @@
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { getDb, initDb, setSetting } from "../../db/index.js";
+import { getBoost, initDegradation } from "../../services/degradation.js";
+import {
+  applyAdvice,
+  buildAdvisoryMessages,
+  buildAdvisoryPayload,
+  parseAdviceResponse,
+  truncateToTokenBudget,
+} from "../../services/heartbeat-advisor.js";
+import { isOnCooldown } from "../../services/ratelimit.js";
+
+describe("Heartbeat AI routing advisor", () => {
+  beforeAll(() => {
+    process.env.ENCRYPTION_KEY = "0".repeat(64);
+    initDb(":memory:");
+    initDegradation();
+  });
+
+  beforeEach(() => {
+    const db = getDb();
+    db.exec(`
+      DELETE FROM fallback_config;
+      DELETE FROM api_keys;
+      DELETE FROM requests;
+      DELETE FROM rate_limit_cooldowns;
+      DELETE FROM models;
+      DELETE FROM settings WHERE key LIKE 'heartbeat_advisor_%' OR key IN ('routing_strategy', 'routing_custom_weights', 'oscillator_enabled');
+    `);
+    initDegradation();
+    setSetting("heartbeat_advisor_max_input_tokens", "400");
+  });
+
+  function seedProvider() {
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
+      VALUES ('testprov', 'test-model', 'Test Model', 1, 1, 1)
+    `).run();
+    const modelDbId = (
+      db
+        .prepare(
+          "SELECT id FROM models WHERE platform = 'testprov' AND model_id = 'test-model'",
+        )
+        .get() as { id: number }
+    ).id;
+    db.prepare(
+      "INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 1, 1)",
+    ).run(modelDbId);
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES ('testprov', 'Key 1', 'sk-secret-value', 'iv', 'tag', 'healthy', 1)
+    `).run();
+    const keyId = (
+      db
+        .prepare("SELECT id FROM api_keys WHERE platform = 'testprov'")
+        .get() as { id: number }
+    ).id;
+    db.prepare(`
+      INSERT INTO requests (platform, model_id, key_id, status, output_tokens, reasoning_tokens, latency_ms, ttfb_ms, request_type, created_at)
+      VALUES
+        ('testprov', 'test-model', ?, 'success', 100, 10, 1000, 120, 'chat', datetime('now')),
+        ('testprov', 'test-model', ?, 'error', 0, 0, 2000, NULL, 'chat', datetime('now'))
+    `).run(keyId, keyId);
+    return { modelDbId, keyId };
+  }
+
+  it("parses JSON, compact text, and garbage safely", () => {
+    expect(
+      parseAdviceResponse(
+        '{"confidence":7,"selfScore":-4,"cooldownHint":1,"recheckSooner":true}',
+      ),
+    ).toMatchObject({
+      confidence: 7,
+      selfScore: -4,
+      cooldownHint: 1,
+      recheckSooner: true,
+    });
+
+    expect(
+      parseAdviceResponse("c:8 self:3 cooldown:2 recheck:true"),
+    ).toMatchObject({
+      confidence: 8,
+      selfScore: 3,
+      cooldownHint: 2,
+      recheckSooner: true,
+    });
+
+    expect(parseAdviceResponse("not advice")).toMatchObject({
+      confidence: 0,
+      selfScore: 0,
+      cooldownHint: 0,
+      recheckSooner: false,
+    });
+  });
+
+  it("builds sanitized payloads without key material or raw error text", () => {
+    const { modelDbId, keyId } = seedProvider();
+    const payload = buildAdvisoryPayload({
+      platform: "testprov",
+      modelDbId,
+      modelId: "test-model",
+      keyId,
+      keyHealth: new Map([
+        [
+          `${keyId}:test-model`,
+          {
+            penalty: 2,
+            healthy: false,
+            lastError: "401 Unauthorized for sk-secret-value",
+            lastPingLatencyMs: 321,
+          },
+        ],
+      ]),
+    });
+
+    const json = JSON.stringify(payload);
+    expect(json).not.toContain("sk-secret-value");
+    expect(json).not.toContain("Unauthorized");
+    expect(json).toContain("auth_error");
+    expect(payload.keys[0].models[0].lastPingLatencyMs).toBe(321);
+    expect(payload.models[0].stats.successRate).toBe(0.5);
+  });
+
+  it("truncates the advisory prompt to the approximate token budget", () => {
+    const { modelDbId, keyId } = seedProvider();
+    const payload = buildAdvisoryPayload({
+      platform: "testprov",
+      modelDbId,
+      modelId: "test-model",
+      keyId,
+      keyHealth: new Map(),
+    });
+    payload.models.push(
+      ...Array.from({ length: 50 }, (_, i) => ({
+        model: `extra-${i}`,
+        provider: "other",
+        stats: {
+          successRate: 1,
+          avgLatencyMs: 100,
+          p95LatencyMs: 200,
+          tokPerSec: 50,
+          avgTtfbMs: 20,
+        },
+      })),
+    );
+
+    const truncated = truncateToTokenBudget(payload, 120);
+    const { estimatedInputTokens } = buildAdvisoryMessages(truncated, 120);
+    expect(estimatedInputTokens).toBeLessThanOrEqual(120);
+  });
+
+  it("applies advice with capped boost, cooldown, and recheck scheduling", () => {
+    const { modelDbId, keyId } = seedProvider();
+    const scheduled: Array<{
+      keyId: number;
+      modelId: string;
+      delayMs: number;
+    }> = [];
+
+    const results = applyAdvice({
+      advice: {
+        confidence: 9,
+        selfScore: 9,
+        cooldownHint: 2,
+        recheckSooner: true,
+      },
+      modelDbId,
+      platform: "testprov",
+      modelId: "test-model",
+      keyId,
+      normalRecheckDelayMs: 100_000,
+      scheduleRecheck: (scheduledKeyId, modelId, delayMs) => {
+        scheduled.push({ keyId: scheduledKeyId, modelId, delayMs });
+      },
+    });
+
+    expect(results.map((result) => result.applied)).toEqual([
+      "score_boost",
+      "cooldown_reduce",
+      "recheck_scheduled",
+    ]);
+    expect(getBoost(modelDbId)).toBe(2);
+    expect(isOnCooldown("testprov", "test-model", keyId)).toBe(true);
+    expect(scheduled).toEqual([
+      { keyId, modelId: "test-model", delayMs: 50_000 },
+    ]);
+  });
+});
