@@ -122,7 +122,10 @@ interface RoutingData {
   }>
 }
 
-type BoostResponse = { modelDbId: number; boost: number }
+type BoostDirection = 'up' | 'down'
+type BoostTarget = { modelDbId: number; groupId?: undefined } | { groupId: number; modelDbId?: undefined }
+type BoostMutationVariables = BoostTarget & { boost: number }
+type BoostResponse = { modelDbId?: number; groupId?: number; modelDbIds?: number[]; boost: number }
 
 interface ModelGroup {
   id: number
@@ -478,10 +481,12 @@ function RowContent({
   dragHandle?: ReactNode
   onEdit: (row: Row) => void
   onArchive: (row: Row) => void
-  onBoost: (modelDbId: number, direction: 'up' | 'down') => void
+  onBoost: (row: Row, direction: BoostDirection) => void
   showEligibilityChip?: boolean
 }) {
   const eligibilityChip = showEligibilityChip ? eligibilityChipText(row.eligibility) : null
+  const canBoost = !row.isGroup || row.groupId != null
+  const boostTargetLabel = row.isGroup ? 'model group' : 'model'
 
   return (
     <>
@@ -592,10 +597,14 @@ function RowContent({
       </td>
       <td className="py-2 pr-3 align-middle text-right">
         <div className="flex items-center gap-1 justify-end">
+          {canBoost && (
+            <>
+              <ThumbsButton direction="up" active={(row.boost ?? 1) > 1.01} targetLabel={boostTargetLabel} onClick={(e) => { e.stopPropagation(); onBoost(row, 'up') }} />
+              <ThumbsButton direction="down" active={(row.boost ?? 1) < 0.99} targetLabel={boostTargetLabel} onClick={(e) => { e.stopPropagation(); onBoost(row, 'down') }} />
+            </>
+          )}
           {!row.isGroup && (
             <>
-              <ThumbsButton direction="up" active={(row.boost ?? 1) > 1.01} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'up') }} />
-              <ThumbsButton direction="down" active={(row.boost ?? 1) < 0.99} onClick={(e) => { e.stopPropagation(); onBoost(row.modelDbId, 'down') }} />
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onEdit(row); }}
@@ -620,9 +629,10 @@ function RowContent({
   )
 }
 
-function ThumbsButton({ direction, active, onClick }: {
-  direction: 'up' | 'down'
+function ThumbsButton({ direction, active, targetLabel, onClick }: {
+  direction: BoostDirection
   active: boolean
+  targetLabel: 'model' | 'model group'
   onClick: (e: React.MouseEvent) => void
 }) {
   const Icon = direction === 'up' ? ThumbsUp : ThumbsDown
@@ -634,14 +644,14 @@ function ThumbsButton({ direction, active, onClick }: {
       type="button"
       onClick={onClick}
       className={`p-1 rounded hover:bg-muted transition-colors ${active ? activeColor : 'text-muted-foreground/40 hover:text-foreground'}`}
-      title={direction === 'up' ? 'Boost this model (routes more)' : 'Demote this model (routes less)'}
+      title={direction === 'up' ? `Boost this ${targetLabel} (routes more)` : `Demote this ${targetLabel} (routes less)`}
     >
       <Icon className="size-3.5" fill={active ? 'currentColor' : 'none'} />
     </button>
   )
 }
 
-function SortableRow({ row, rank, onEdit, onArchive, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onEdit: (row: Row) => void; onArchive: (row: Row) => void; onBoost: (modelDbId: number, direction: 'up' | 'down') => void; showEligibilityChip?: boolean }) {
+function SortableRow({ row, rank, onEdit, onArchive, onBoost, showEligibilityChip = true }: { row: Row; rank: number; onEdit: (row: Row) => void; onArchive: (row: Row) => void; onBoost: (row: Row, direction: BoostDirection) => void; showEligibilityChip?: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: rowKey(row) })
   const handle = (
     <button
@@ -727,14 +737,26 @@ export default function FallbackPage() {
   // Boost mutation: thumbs up → 2.0, thumbs down → 0.5, click active → reset to 1.0.
   // Fires instantly and invalidates the routing cache so scores recalculate.
   const boostMutation = useMutation({
-    mutationFn: ({ modelDbId, boost }: { modelDbId: number; boost: number }) =>
-      boost === 1
+    mutationFn: ({ modelDbId, groupId, boost }: BoostMutationVariables) => {
+      if (groupId != null) {
+        return boost === 1
+          ? apiFetch<BoostResponse>(`/api/fallback/boost/groups/${groupId}`, { method: 'DELETE' })
+          : apiFetch<BoostResponse>(`/api/fallback/boost/groups/${groupId}`, { method: 'PUT', body: JSON.stringify({ boost }) })
+      }
+      return boost === 1
         ? apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'DELETE' })
-        : apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) }),
-    onSuccess: ({ modelDbId, boost }) => {
+        : apiFetch<BoostResponse>(`/api/fallback/boost/${modelDbId}`, { method: 'PUT', body: JSON.stringify({ boost }) })
+    },
+    onSuccess: ({ modelDbId, groupId, boost }, variables) => {
+      const updatedModelDbId = modelDbId ?? variables.modelDbId
+      const updatedGroupId = groupId ?? variables.groupId
       setLocalEntries(current =>
         current
-          ? current.map(entry => entry.modelDbId === modelDbId ? { ...entry, boost } : entry)
+          ? current.map(entry => {
+              if (updatedGroupId != null && entry.groupId === updatedGroupId) return { ...entry, boost }
+              if (updatedModelDbId != null && entry.modelDbId === updatedModelDbId) return { ...entry, boost }
+              return entry
+            })
           : current,
       )
       queryClient.invalidateQueries({ queryKey: ['fallback'] })
@@ -777,6 +799,9 @@ export default function FallbackPage() {
       queryClient.invalidateQueries({ queryKey: ['fallback', 'routing'] })
       queryClient.invalidateQueries({ queryKey: ['models'] })
       queryClient.invalidateQueries({ queryKey: ['models', 'groups'] })
+    },
+    onError: (err: Error) => {
+      addToast({ kind: 'warning', title: 'Group archive failed', description: err.message })
     },
   })
 
@@ -823,7 +848,6 @@ export default function FallbackPage() {
   // Merge fallback metadata with live scores, keyed by model.
   const scoreById = new Map((routing?.scores ?? []).map(s => [s.modelDbId, s]))
   const groupedScoreById = new Map((routing?.groupedScores ?? []).map(s => [s.groupId, s]))
-  const boostById = new Map(allEntries.map(e => [e.modelDbId, e.boost ?? 1]))
   const configured = allEntries.filter(e => e.keyCount > 0)
   const unconfiguredPlatforms = [...new Set(allEntries.filter(e => e.keyCount === 0).map(e => e.platform))]
 
@@ -915,15 +939,19 @@ export default function FallbackPage() {
     setLocalEntries(merged)
   }
 
-  function handleBoost(modelDbId: number, direction: 'up' | 'down') {
-    const currentBoost = boostById.get(modelDbId) ?? scoreById.get(modelDbId)?.boost ?? 1
+  function handleBoost(row: Row, direction: BoostDirection) {
+    const currentBoost = row.boost ?? scoreById.get(row.modelDbId)?.boost ?? 1
     let nextBoost: number
     if (direction === 'up') {
       nextBoost = currentBoost > 1.01 ? 1 : 2   // toggle: active → reset, inactive → 2.0
     } else {
       nextBoost = currentBoost < 0.99 ? 1 : 0.5  // toggle: active → reset, inactive → 0.5
     }
-    boostMutation.mutate({ modelDbId, boost: nextBoost })
+    if (row.isGroup && row.groupId != null) {
+      boostMutation.mutate({ groupId: row.groupId, boost: nextBoost })
+      return
+    }
+    boostMutation.mutate({ modelDbId: row.modelDbId, boost: nextBoost })
   }
 
   function handleArchive(row: Row) {

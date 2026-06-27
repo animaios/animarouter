@@ -8,6 +8,35 @@ import { BANDIT_PRESETS, type RoutingStrategy } from '../services/scoring.js';
 
 export const fallbackRouter = Router();
 
+const NEUTRAL_BOOST = 1.0;
+const BOOST_EPSILON = 0.01;
+
+function summarizeProviderBoost(providerIds: number[]): number {
+  const boosts = providerIds.map(id => getBoost(id));
+  const nonNeutral = boosts.filter(boost => Math.abs(boost - NEUTRAL_BOOST) > BOOST_EPSILON);
+  if (nonNeutral.length === 0) return NEUTRAL_BOOST;
+
+  const hasBoosted = nonNeutral.some(boost => boost > NEUTRAL_BOOST);
+  const hasDemoted = nonNeutral.some(boost => boost < NEUTRAL_BOOST);
+  if (hasBoosted && hasDemoted) return NEUTRAL_BOOST;
+
+  return hasBoosted ? Math.max(...nonNeutral) : Math.min(...nonNeutral);
+}
+
+function parsePositiveIntParam(value: string | string[] | undefined): number | null {
+  const parsed = Number.parseInt(Array.isArray(value) ? value[0] : String(value), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getEnabledGroupProviderIds(groupId: number): number[] | null {
+  const db = getDb();
+  const group = db.prepare('SELECT id FROM model_groups WHERE id = ? AND enabled = 1').get(groupId) as { id: number } | undefined;
+  if (!group) return null;
+
+  const providers = db.prepare('SELECT id FROM models WHERE group_id = ?').all(groupId) as Array<{ id: number }>;
+  return providers.map(provider => provider.id);
+}
+
 // ── Bandit routing strategy ─────────────────────────────────────────────────
 // GET  /routing → active strategy, preset weights, the saved custom weights,
 //                 and the per-model score breakdown (reliability / speed /
@@ -160,6 +189,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
         const penalty = penaltyMap.get(p.id)?.penalty ?? 0;
         return Math.max(max, penalty);
       }, 0);
+      const providerIds = groupProviders.map(p => p.id);
       const keyCount = [...new Set(groupProviders.map(p => p.platform))]
         .reduce((sum, platform) => sum + (keyCountMap.get(platform) ?? 0), 0);
       const speedRanks = groupProviders.map(p => p.speed_rank).filter((rank): rank is number => typeof rank === 'number');
@@ -175,7 +205,7 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
         effectivePriority: g.priority + groupPenalty,
         penalty: groupPenalty,
         rateLimitHits: 0,
-        boost: 1,
+        boost: summarizeProviderBoost(providerIds),
         enabled: true,
         platform: groupProviders.map(p => p.platform).join(', '),
         modelId: g.group_key,
@@ -398,12 +428,84 @@ const boostSchema = z.object({
   boost: z.number().finite().positive(),
 });
 
+// PUT /boost/groups/:groupId → set boost multiplier for every enabled provider in a group.
+fallbackRouter.put('/boost/groups/:groupId', (req: Request, res: Response) => {
+  const groupId = parsePositiveIntParam(req.params.groupId);
+  if (groupId === null) {
+    res.status(400).json({ error: { message: 'groupId must be a positive number' } });
+    return;
+  }
+
+  const parsed = boostSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+
+  const providerIds = getEnabledGroupProviderIds(groupId);
+  if (providerIds === null) {
+    res.status(404).json({ error: { message: 'Model group not found' } });
+    return;
+  }
+
+  const db = getDb();
+  const persistBoost = db.prepare(`
+    INSERT INTO model_degradation (model_db_id, penalty, tier, consecutive, consecutive_major, last_hit_at, half_life_ms, boost)
+    VALUES (?, 0, 'minor', 0, 0, 0, 120000, ?)
+    ON CONFLICT(model_db_id) DO UPDATE SET boost = excluded.boost
+  `);
+  const updateAll = db.transaction(() => {
+    for (const modelDbId of providerIds) {
+      setBoost(modelDbId, parsed.data.boost);
+      persistBoost.run(modelDbId, getBoost(modelDbId));
+    }
+  });
+  updateAll();
+
+  res.json({ groupId, modelDbIds: providerIds, boost: summarizeProviderBoost(providerIds) });
+});
+
+// DELETE /boost/groups/:groupId → reset boost for every enabled provider in a group.
+fallbackRouter.delete('/boost/groups/:groupId', (req: Request, res: Response) => {
+  const groupId = parsePositiveIntParam(req.params.groupId);
+  if (groupId === null) {
+    res.status(400).json({ error: { message: 'groupId must be a positive number' } });
+    return;
+  }
+
+  const providerIds = getEnabledGroupProviderIds(groupId);
+  if (providerIds === null) {
+    res.status(404).json({ error: { message: 'Model group not found' } });
+    return;
+  }
+
+  const db = getDb();
+  const selectPenalty = db.prepare('SELECT penalty FROM model_degradation WHERE model_db_id = ?');
+  const deleteBoostRow = db.prepare('DELETE FROM model_degradation WHERE model_db_id = ?');
+  const resetBoostRow = db.prepare('UPDATE model_degradation SET boost = 1.0 WHERE model_db_id = ?');
+  const resetAll = db.transaction(() => {
+    for (const modelDbId of providerIds) {
+      resetBoost(modelDbId);
+      const row = selectPenalty.get(modelDbId) as { penalty: number } | undefined;
+      if (row) {
+        if (row.penalty <= 0) {
+          deleteBoostRow.run(modelDbId);
+        } else {
+          resetBoostRow.run(modelDbId);
+        }
+      }
+    }
+  });
+  resetAll();
+
+  res.json({ groupId, modelDbIds: providerIds, boost: NEUTRAL_BOOST });
+});
+
 // PUT /boost/:modelDbId → set boost multiplier for a model, clamped to [boostMin, boostMax]
 fallbackRouter.put('/boost/:modelDbId', (req: Request, res: Response) => {
-  const rawId = req.params.modelDbId;
-  const modelDbId = parseInt(Array.isArray(rawId) ? rawId[0] : rawId, 10);
-  if (isNaN(modelDbId)) {
-    res.status(400).json({ error: { message: 'modelDbId must be a number' } });
+  const modelDbId = parsePositiveIntParam(req.params.modelDbId);
+  if (modelDbId === null) {
+    res.status(400).json({ error: { message: 'modelDbId must be a positive number' } });
     return;
   }
 
@@ -430,10 +532,9 @@ fallbackRouter.put('/boost/:modelDbId', (req: Request, res: Response) => {
 
 // DELETE /boost/:modelDbId → reset boost to 1.0 (default)
 fallbackRouter.delete('/boost/:modelDbId', (req: Request, res: Response) => {
-  const rawId = req.params.modelDbId;
-  const modelDbId = parseInt(Array.isArray(rawId) ? rawId[0] : rawId, 10);
-  if (isNaN(modelDbId)) {
-    res.status(400).json({ error: { message: 'modelDbId must be a number' } });
+  const modelDbId = parsePositiveIntParam(req.params.modelDbId);
+  if (modelDbId === null) {
+    res.status(400).json({ error: { message: 'modelDbId must be a positive number' } });
     return;
   }
 
