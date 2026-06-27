@@ -181,4 +181,37 @@ describe('Model group alias routes', () => {
     expect(row.model_group_id).toBe(targetGroup.id);
     expect(row.fallback_group_id).toBe(targetGroup.id);
   });
+
+  it('archives every provider row in a model group', async () => {
+    const db = getDb();
+    const groupInfo = db.prepare(`
+      INSERT INTO model_groups (group_key, display_name, intelligence_rank, size_label)
+      VALUES ('archive-group', 'Archive Group', 1, 'Large')
+    `).run();
+    const groupId = Number(groupInfo.lastInsertRowid);
+    const insertModel = db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, benchmark_score, intelligence_rank, speed_rank, size_label, group_id, enabled)
+      VALUES (?, ?, ?, 75, 2, 1, 'Large', ?, 1)
+    `);
+    const first = insertModel.run('provider-a', 'archive-model-a', 'Archive Model A', groupId);
+    const second = insertModel.run('provider-b', 'archive-model-b', 'Archive Model B', groupId);
+    db.prepare('INSERT INTO fallback_config (model_db_id, priority, group_id, enabled) VALUES (?, 1, ?, 1)')
+      .run(first.lastInsertRowid, groupId);
+    db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, 2, 1)')
+      .run(second.lastInsertRowid);
+
+    const archived = await request(app, 'DELETE', `/api/models/groups/${groupId}`);
+    expect(archived.status).toBe(200);
+    expect(archived.body.archivedModels).toBe(2);
+
+    const enabledRows = db.prepare('SELECT COUNT(*) AS n FROM models WHERE group_id = ? AND enabled = 1').get(groupId) as { n: number };
+    expect(enabledRows.n).toBe(0);
+    const fallbackRows = db.prepare(`
+      SELECT COUNT(*) AS n
+        FROM fallback_config
+       WHERE group_id = ?
+          OR model_db_id IN (?, ?)
+    `).get(groupId, first.lastInsertRowid, second.lastInsertRowid) as { n: number };
+    expect(fallbackRows.n).toBe(0);
+  });
 });

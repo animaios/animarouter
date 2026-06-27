@@ -417,6 +417,31 @@ describe('Migration idempotency', () => {
     expect(gemma.enabled).toBe(0);
   });
 
+  it('groups OpenCode Zen MiniMax M3 Free under canonical MiniMax M3', () => {
+    process.env.ENCRYPTION_KEY = '0'.repeat(64);
+    const db = initDb(':memory:');
+
+    const alias = db.prepare(`
+      SELECT group_key
+        FROM model_group_aliases
+       WHERE alias = 'minimax-m3-free'
+    `).get() as { group_key: string };
+    expect(alias.group_key).toBe('minimax-m3');
+
+    const grouped = db.prepare(`
+      SELECT g.group_key, g.display_name
+        FROM models m
+        JOIN model_groups g ON g.id = m.group_id
+       WHERE m.platform = 'opencode'
+         AND m.model_id = 'minimax-m3-free'
+    `).get() as { group_key: string; display_name: string };
+
+    expect(grouped).toEqual({
+      group_key: 'minimax-m3',
+      display_name: 'MiniMax M3',
+    });
+  });
+
   it('manual benchmark overrides pin the curated top-pool intelligence order', () => {
     process.env.ENCRYPTION_KEY = '0'.repeat(64);
     const db = initDb(':memory:');
@@ -427,7 +452,7 @@ describe('Migration idempotency', () => {
       { label: 'nemotron-3-ultra', score: 88, modelKeys: ['nemotron-3-ultra-550b-a55b:free', 'nemotron-3-ultra-free'], groupKeys: ['nemotron-3-ultra-550b-a55b', 'nemotron-3-ultra-free'] },
       { label: 'minimax-m2-7', score: 85, modelKeys: ['minimax-m2-7'], groupKeys: ['minimax-m2-7'] },
       { label: 'deepseek-v4-flash', score: 84, modelKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free'], groupKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek/deepseek-v4-flash'] },
-      { label: 'minimax-m3', score: 78, modelKeys: ['minimax-m3-free'], groupKeys: ['minimax-m3-free'] },
+      { label: 'minimax-m3', score: 78, modelKeys: ['minimax-m3-free'], groupKeys: ['minimax-m3'] },
       { label: 'step-3-7-flash', score: 72, modelKeys: ['step-3-7-flash:free'], groupKeys: ['step-3-7-flash:free'] },
     ];
 

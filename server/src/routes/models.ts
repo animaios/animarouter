@@ -194,6 +194,39 @@ modelsRouter.delete('/groups/aliases/:alias', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
+// DELETE /api/models/groups/:groupId — archive every provider row in a model group.
+modelsRouter.delete('/groups/:groupId', (req: Request, res: Response) => {
+  const groupId = Number(req.params.groupId);
+  if (!Number.isInteger(groupId) || groupId <= 0) {
+    res.status(400).json({ error: 'invalid group id' });
+    return;
+  }
+
+  const db = getDb();
+  const group = db.prepare('SELECT id FROM model_groups WHERE id = ?').get(groupId) as { id: number } | undefined;
+  if (!group) {
+    res.status(404).json({ error: 'Group not found' });
+    return;
+  }
+
+  const providerRows = db.prepare('SELECT id FROM models WHERE group_id = ? AND enabled = 1').all(groupId) as Array<{ id: number }>;
+  if (providerRows.length === 0) {
+    res.status(400).json({ error: 'model group is already archived' });
+    return;
+  }
+
+  const providerIds = providerRows.map(row => row.id);
+  const placeholders = providerIds.map(() => '?').join(', ');
+  const archiveGroup = db.transaction(() => {
+    db.prepare('DELETE FROM fallback_config WHERE group_id = ?').run(groupId);
+    db.prepare(`DELETE FROM fallback_config WHERE model_db_id IN (${placeholders})`).run(...providerIds);
+    db.prepare('UPDATE models SET enabled = 0 WHERE group_id = ? AND enabled = 1').run(groupId);
+  });
+  archiveGroup();
+
+  res.json({ success: true, groupId, archived: true, archivedModels: providerIds.length });
+});
+
 // PATCH /api/models/groups/:groupKey — update group properties
 modelsRouter.patch('/groups/:groupKey', (req: Request, res: Response) => {
   const db = getDb();
