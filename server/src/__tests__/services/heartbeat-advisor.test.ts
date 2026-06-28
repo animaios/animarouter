@@ -129,6 +129,24 @@ describe("Heartbeat AI routing advisor", () => {
       injectionModel: "other/test-model",
       injectionBrevity: "longer",
     });
+
+    expect(
+      parseAdviceResponse("o:\"enabled\" i:'intelligence_rank:2' b:short"),
+    ).toMatchObject({
+      oscillatorHint: "enable",
+      injectionModel: "intelligence_rank:2",
+      injectionBrevity: "shorter",
+    });
+
+    expect(
+      parseAdviceResponse(
+        '{"oscillatorHint":"disabled","injectionModel":"\'other/test-model\'","injectionBrevity":"long"}',
+      ),
+    ).toMatchObject({
+      oscillatorHint: "disable",
+      injectionModel: "other/test-model",
+      injectionBrevity: "longer",
+    });
   });
 
   it("builds sanitized payloads without key material or raw error text", () => {

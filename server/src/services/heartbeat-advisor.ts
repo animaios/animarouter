@@ -618,7 +618,7 @@ function parseCompactAdvice(text: string): Partial<RoutingAdvice> | null {
     const match = field.match(/^([a-zA-Z_]+)\s*[:=]\s*(.+)$/);
     if (!match) continue;
     const key = match[1].toLowerCase();
-    const value = match[2];
+    const value = cleanCompactAdviceValue(match[2]);
     if (["c", "conf", "confidence"].includes(key))
       out.confidence = Number(value);
     if (["self", "selfscore", "self_score"].includes(key))
@@ -643,32 +643,48 @@ function parseCompactAdvice(text: string): Partial<RoutingAdvice> | null {
 function parseCompactOscillatorHint(
   value: string,
 ): RoutingAdvice["oscillatorHint"] {
-  const normalized = value.toLowerCase();
-  if (normalized === "e" || normalized === "enable") return "enable";
-  if (normalized === "d" || normalized === "disable") return "disable";
+  const normalized = cleanCompactAdviceValue(value).toLowerCase();
+  if (normalized === "e" || normalized === "enable" || normalized === "enabled")
+    return "enable";
+  if (
+    normalized === "d" ||
+    normalized === "disable" ||
+    normalized === "disabled"
+  )
+    return "disable";
   return "no_opinion";
 }
 
 function parseCompactInjectionBrevity(
   value: string,
 ): RoutingAdvice["injectionBrevity"] {
-  const normalized = value.toLowerCase();
-  if (normalized === "s" || normalized === "shorter") return "shorter";
-  if (normalized === "l" || normalized === "longer") return "longer";
+  const normalized = cleanCompactAdviceValue(value).toLowerCase();
+  if (normalized === "s" || normalized === "shorter" || normalized === "short")
+    return "shorter";
+  if (normalized === "l" || normalized === "longer" || normalized === "long")
+    return "longer";
   if (normalized === "d" || normalized === "default") return "default";
   return undefined;
 }
 
+function cleanCompactAdviceValue(value: string): string {
+  const trimmed = value.trim();
+  const first = trimmed[0];
+  const last = trimmed.at(-1);
+  if ((first === "'" || first === '"') && first === last) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed.replace(/^['"]|['"]$/g, "").trim();
+}
+
 function normalizeAdvice(input: Partial<RoutingAdvice>): RoutingAdvice {
   const oscillatorHint =
-    input.oscillatorHint === "enable" || input.oscillatorHint === "disable"
-      ? input.oscillatorHint
+    typeof input.oscillatorHint === "string"
+      ? parseCompactOscillatorHint(input.oscillatorHint)
       : "no_opinion";
   const injectionBrevity =
-    input.injectionBrevity === "shorter" ||
-    input.injectionBrevity === "longer" ||
-    input.injectionBrevity === "default"
-      ? input.injectionBrevity
+    typeof input.injectionBrevity === "string"
+      ? parseCompactInjectionBrevity(input.injectionBrevity)
       : undefined;
 
   return {
@@ -680,7 +696,7 @@ function normalizeAdvice(input: Partial<RoutingAdvice>): RoutingAdvice {
     oscillatorHint,
     injectionModel:
       typeof input.injectionModel === "string"
-        ? input.injectionModel.slice(0, 80)
+        ? cleanCompactAdviceValue(input.injectionModel).slice(0, 80)
         : undefined,
     injectionBrevity,
   };
