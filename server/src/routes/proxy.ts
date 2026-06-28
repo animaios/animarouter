@@ -2925,10 +2925,10 @@ export function logRequest(
         VALUES (?, ?, ?, 1, 0, ?, ?, 1)
         ON CONFLICT(platform, model_id, key_id) DO UPDATE SET
           successes = successes + 1,
-          tokPerSec = (tokPerSec * totalRequests + excluded.tokPerSec) / (totalRequests + 1),
+          tokPerSec = (tokPerSec * successes + excluded.tokPerSec) / (successes + 1),
           avgTtfbMs = CASE
             WHEN excluded.avgTtfbMs IS NOT NULL AND avgTtfbMs IS NOT NULL
-            THEN (avgTtfbMs * totalRequests + excluded.avgTtfbMs) / (totalRequests + 1)
+            THEN (avgTtfbMs * successes + excluded.avgTtfbMs) / (successes + 1)
             WHEN excluded.avgTtfbMs IS NOT NULL
             THEN excluded.avgTtfbMs
             ELSE avgTtfbMs
