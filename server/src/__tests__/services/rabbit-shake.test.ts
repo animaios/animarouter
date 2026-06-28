@@ -463,6 +463,74 @@ describe("Rabbit Shake routing helpers", () => {
     expect(result.error).toMatch(/timed out/);
   });
 
+  it("falls back to normal single-model routing when every foundation candidate fails", async () => {
+    const candidates = [
+      candidate({ modelDbId: 1, platform: "alpha", modelId: "first" }),
+      candidate({ modelDbId: 2, platform: "beta", modelId: "second" }),
+    ];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Debug this failing plan." }],
+      sessionKey: "thread-4",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: async ({ step, candidate: selected }) => {
+        if (step === "foundation") {
+          throw new Error(`failed ${selected.modelDbId}`);
+        }
+        return "unreachable";
+      },
+    });
+
+    expect(result.status).toBe("single_model_fallback");
+    expect(result.failedStep).toBe("foundation");
+    expect(result.foundationAttempts).toBe(2);
+    expect(result.error).toBe("failed 2");
+  });
+
+  it("falls back to foundation output when no divergent injection model is available", async () => {
+    const candidates = [
+      candidate({ modelDbId: 1, platform: "alpha", modelId: "foundation" }),
+    ];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze the plan." }],
+      sessionKey: "thread-5",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: async () => "Foundation only.",
+    });
+
+    expect(result.status).toBe("foundation_fallback");
+    expect(result.failedStep).toBe("injection");
+    expect(result.text).toBe("Foundation only.");
+    expect(result.error).toMatch(/No eligible/);
+  });
+
+  it("falls back to foundation output when anchor validation detects meowing", async () => {
+    const candidates = [
+      candidate({ modelDbId: 1, platform: "alpha", modelId: "foundation" }),
+      candidate({ modelDbId: 2, platform: "beta", modelId: "injection" }),
+    ];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze the reasoning." }],
+      sessionKey: "thread-6",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: async ({ step }) => {
+        if (step === "foundation") return "Coherent foundation.";
+        if (step === "injection") return "Alternative view. Concise.";
+        return "Final answer leaked <|assistant|> marker.";
+      },
+    });
+
+    expect(result.status).toBe("foundation_fallback");
+    expect(result.failedStep).toBe("validation");
+    expect(result.text).toBe("Coherent foundation.");
+    expect(result.meow?.reason).toBe("structural_tag");
+  });
+
   it("applies basic oscillator eligibility gates", () => {
     expect(
       isRabbitOscillatorEligible({
