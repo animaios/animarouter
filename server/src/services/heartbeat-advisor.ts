@@ -307,7 +307,7 @@ export function buildAdvisoryMessages(
       {
         role: "system",
         content:
-          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean}. No prose.',
+          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint only for Rabbit oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
       },
       {
         role: "user",
@@ -629,9 +629,34 @@ function parseCompactAdvice(text: string): Partial<RoutingAdvice> | null {
       out.recheckSooner = /^(1|true|yes)$/i.test(value);
     }
     if (key === "alt") out.alt = value.slice(0, 80);
+    if (["o", "oscillator", "oscillatorhint", "oscillator_hint"].includes(key))
+      out.oscillatorHint = parseCompactOscillatorHint(value);
+    if (["i", "injection", "injectionmodel", "injection_model"].includes(key))
+      out.injectionModel = value.slice(0, 80);
+    if (["b", "brevity", "injectionbrevity", "injection_brevity"].includes(key))
+      out.injectionBrevity = parseCompactInjectionBrevity(value);
   }
 
   return Object.keys(out).length > 0 ? out : null;
+}
+
+function parseCompactOscillatorHint(
+  value: string,
+): RoutingAdvice["oscillatorHint"] {
+  const normalized = value.toLowerCase();
+  if (normalized === "e" || normalized === "enable") return "enable";
+  if (normalized === "d" || normalized === "disable") return "disable";
+  return "no_opinion";
+}
+
+function parseCompactInjectionBrevity(
+  value: string,
+): RoutingAdvice["injectionBrevity"] {
+  const normalized = value.toLowerCase();
+  if (normalized === "s" || normalized === "shorter") return "shorter";
+  if (normalized === "l" || normalized === "longer") return "longer";
+  if (normalized === "d" || normalized === "default") return "default";
+  return undefined;
 }
 
 function normalizeAdvice(input: Partial<RoutingAdvice>): RoutingAdvice {
