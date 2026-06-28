@@ -79,7 +79,7 @@
 - [x] **T10.3** Add oscillator metrics logging to `logOscillatorResult()` for heartbeat advisor payload
 - [x] **T10.4** Add `oscillator_results` SQLite table + `logOscillatorResult()` persistence
 - [x] **T10.5** Implement `collectOscillatorStats(windowMs)` for advisory payload (§10.2)
-- [ ] **T10.6** Add Rabbit / oscillator feature settings (T9 config keys) to DB seed + `feature-settings.ts`
+- [x] **T10.6** Add Rabbit / oscillator feature settings (T9 config keys) to DB seed + `feature-settings.ts`
 - [ ] **T10.7** Add oscillator SSE events (`oscillator.started`, `.step_complete`, `.complete`, `.failed`, `.load_shed`, `.meow_detected`)
 
 ## Phase 11: Advisor ↔ Oscillator Feedback Loop
