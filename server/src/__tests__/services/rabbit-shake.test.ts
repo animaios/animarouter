@@ -7,6 +7,7 @@ import {
   getRabbitCandidates,
   getRabbitWeights,
   isComplexReasoningPrompt,
+  isRabbitLoadShedActive,
   isRabbitOscillatorEligible,
   type OscillatorConfig,
   parseRabbitWeights,
@@ -341,6 +342,18 @@ describe("Rabbit Shake routing helpers", () => {
         config: config(),
       }),
     ).toBe(false);
+  });
+
+  it("load-sheds only above the configured concurrent request threshold", () => {
+    expect(isRabbitLoadShedActive(config({ loadShedThreshold: 21 }), 21)).toBe(
+      false,
+    );
+    expect(isRabbitLoadShedActive(config({ loadShedThreshold: 21 }), 22)).toBe(
+      true,
+    );
+    expect(isRabbitLoadShedActive(config({ loadShedThreshold: 0 }), 999)).toBe(
+      false,
+    );
   });
 
   it("treats null prompt text as non-complex instead of throwing", () => {

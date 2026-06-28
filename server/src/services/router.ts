@@ -225,6 +225,14 @@ function releaseSlot(platform: string): void {
   if (entry && entry.count > 0) entry.count--;
 }
 
+export function getProviderInFlightTotal(): number {
+  let total = 0;
+  for (const entry of providerInFlight.values()) {
+    total += entry.count;
+  }
+  return total;
+}
+
 // ── Degradation integration ──────────────────────────────────────────────────
 // The degradation engine (degradation.ts) replaces the old flat 429-penalty
 // system with progressive, severity-weighted degradation. State is in-memory;
