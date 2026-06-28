@@ -285,15 +285,18 @@ describe("Rabbit proxy integration", () => {
 
   it("uses normal single-model routing when Rabbit is load-shed", async () => {
     setSetting("oscillator_load_shed_threshold", "1");
-    const heldRoutes = [routeRequest(100), routeRequest(100)];
-    chatCompletion.mockResolvedValue({
-      choices: [
-        { message: { role: "assistant", content: "Load-shed answer." } },
-      ],
-      usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
-    });
+    const heldRoutes: Array<ReturnType<typeof routeRequest>> = [];
 
     try {
+      heldRoutes.push(routeRequest(100));
+      heldRoutes.push(routeRequest(100));
+      chatCompletion.mockResolvedValue({
+        choices: [
+          { message: { role: "assistant", content: "Load-shed answer." } },
+        ],
+        usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+      });
+
       const { status, body, headers } = await post(
         app,
         "/v1/chat/completions",
