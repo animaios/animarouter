@@ -149,7 +149,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     description:
       "Use heartbeat pings to request compact routing advice from the pinged model. Falls back to the normal health check if parsing fails.",
     type: "boolean",
-    default: false,
+    default: true,
     envVar: "HEARTBEAT_ADVISOR_ENABLED",
     effect: "live",
     group: "Resilience",
@@ -175,7 +175,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     description:
       "Maximum output tokens for heartbeat advisor responses. Kept tiny so heartbeat cost stays close to the old ping.",
     type: "number",
-    default: 8,
+    default: 16,
     min: 1,
     max: 32,
     envVar: "HEARTBEAT_ADVISOR_MAX_OUTPUT_TOKENS",
@@ -218,7 +218,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     description:
       "Route all requests in a conversation to the same model to prevent mid-conversation model switches and hallucination.",
     type: "boolean",
-    default: false,
+    default: true,
     envVar: "STICKY_SESSION_ENABLED",
     effect: "live",
     group: "Sessions",
@@ -279,7 +279,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     description:
       "Treat provider variants of the same underlying model as one routing group. The router chooses the best healthy provider inside the selected group.",
     type: "boolean",
-    default: false,
+    default: true,
     envVar: "MODEL_GROUPING_ENABLED",
     effect: "live",
     group: "Models",
@@ -701,7 +701,7 @@ export const REGISTRY: FeatureSettingDef[] = [
     description:
       "Route requests through FreeLLMProxy instead of connecting directly to providers. Requires PROXY_ROUTER_URL and PROXY_AUTH_KEY environment variables. When enabled, keys flagged with use_proxy will route through the proxy.",
     type: "boolean",
-    default: false,
+    default: true,
     envVar: "PROXY_TRANSPORT_ENABLED",
     effect: "live",
     group: "Proxy Transport",

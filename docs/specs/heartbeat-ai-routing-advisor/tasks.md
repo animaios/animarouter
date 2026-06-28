@@ -67,10 +67,10 @@
 - [x] **T9.5** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
 - [x] **T9.6** Implement `executeOscillator()` — 3-step pipeline: Foundation → Context Bridge → Injection → Context Bridge → Anchor
 - [x] **T9.7** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal Smartest-weight single-model path; Step 2/3 fail → return selected Foundation)
-- [x] **T9.8** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
+- [x] **T9.8** Implement `detectAnomaly(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
 - [x] **T9.9** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator; when load-shed, continue with normal Iterative Refinement / Smartest-weight single-model routing
 - [x] **T9.10** Unit tests for Iterative Refinement strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
-- [x] **T9.11** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
+- [x] **T9.11** Unit tests for `detectAnomaly` — positive/negative cases, false positive rate on normal text
 
 ## Phase 10: Oscillator Integration
 
@@ -80,7 +80,7 @@
 - [x] **T10.4** Add `oscillator_results` SQLite table + `logOscillatorResult()` persistence
 - [x] **T10.5** Implement `collectOscillatorStats(windowMs)` for advisory payload (§10.2)
 - [x] **T10.6** Add Iterative Refinement / oscillator feature settings (T9 config keys) to DB seed + `feature-settings.ts`
-- [x] **T10.7** Add oscillator SSE events (`oscillator.started`, `.step_complete`, `.complete`, `.failed`, `.load_shed`, `.meow_detected`)
+- [x] **T10.7** Add oscillator SSE events (`oscillator.started`, `.step_complete`, `.complete`, `.failed`, `.load_shed`, `.anomaly_detected`)
 
 ## Phase 11: Advisor ↔ Oscillator Feedback Loop
 

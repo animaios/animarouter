@@ -26,7 +26,7 @@ Meanwhile, the heartbeat pings are *wasted tokens* — they send `max_tokens: 5`
 
 **As an** AI Platform Engineer,
 **I want to** expose Iterative Refinement as an **Iterative Refinement** routing strategy that runs a model-agnostic, context-sanitizing, sequential pipeline using Smartest-weight model selection,
-**So that** we can inject alternative reasoning into complex prompts to break logic loops ("Iterative Refinement") without causing token collisions, context corruption ("meowing"), or cascading latency timeouts.
+**So that** we can inject alternative reasoning into complex prompts to break logic loops ("Iterative Refinement") without causing token collisions, context corruption, output anomalies, or cascading latency timeouts.
 
 Iterative Refinement is not a hardcoded GLM/Nemotron feature and not a hidden provider fallback. It is a first-class routing strategy, exposed in the UI as **Iterative Refinement**, that selects models from the enabled routing pool using the same scoring axes as normal routing. Its default foundation ordering is based on the existing **Smartest** preset weights: intelligence 45%, reliability 30%, latency 15%, speed 10%. The injection model is selected as a divergent eligible model relative to the foundation that actually succeeded.
 
@@ -64,7 +64,7 @@ In one installation, the selected foundation and injection models might be GLM a
    - Then the router must bypass the oscillator and route through the normal single-model path using the best currently eligible Smartest-weight model.
    - When traffic falls below the threshold, oscillator eligibility should resume automatically without manual intervention.
 
-6. **Stability & Anti-Meow Validation**
+6. **Stability & Output Anomaly Validation**
    - Given the router is actively mixing foundation and injection models,
    - When analyzing the final output,
    - Then the combined response must preserve logical coherence and must not expose raw structural tags, provider control tokens, abrupt style fragmentation, or gibberish.

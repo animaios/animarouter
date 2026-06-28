@@ -152,6 +152,24 @@ export type LiveEventBase =
       at: number;
     }
   | {
+      type: "oscillator.decision";
+      sessionKey: string;
+      strategy: string;
+      mode: "oscillator" | "single_model";
+      skipReason?: string;
+      stream: boolean;
+      pinned: boolean;
+      hasImage: boolean;
+      wantsTools: boolean;
+      loadShedActive: boolean;
+      concurrentRequests: number;
+      threshold: number;
+      foundationSelection: string;
+      injectionSelection: string;
+      willRunOscillator: boolean;
+      at: number;
+    }
+  | {
       type: "oscillator.started";
       sessionKey: string;
       foundationModel: string;
@@ -172,7 +190,7 @@ export type LiveEventBase =
       type: "oscillator.complete";
       sessionKey: string;
       totalLatencyMs: number;
-      meowDetected: boolean;
+      anomalyDetected: boolean;
       finalModel: string;
       at: number;
     }
@@ -191,7 +209,7 @@ export type LiveEventBase =
       at: number;
     }
   | {
-      type: "oscillator.meow_detected";
+      type: "oscillator.anomaly_detected";
       sessionKey: string;
       pattern: string;
       fellBackTo: string;
@@ -225,7 +243,7 @@ export type LiveEventBase =
       type: "oscillator.stream_start";
       sessionKey: string;
       step: "foundation" | "injection" | "anchor";
-      timestamp: number;
+      at: number;
     }
   | {
       type: "oscillator.stream_delta";
@@ -233,20 +251,20 @@ export type LiveEventBase =
       step: "foundation" | "injection" | "anchor";
       delta: string;
       accumulated: string;
-      timestamp: number;
+      at: number;
     }
   | {
       type: "oscillator.stream_step_complete";
       sessionKey: string;
       step: "foundation" | "injection" | "anchor";
       fullText: string;
-      timestamp: number;
+      at: number;
     }
   | {
       type: "oscillator.stream_complete";
       sessionKey: string;
       result: ExecuteOscillatorResult;
-      timestamp: number;
+      at: number;
     }
   | {
       type: "oscillator.stream_error";
@@ -254,7 +272,7 @@ export type LiveEventBase =
       step: "foundation" | "injection" | "anchor";
       error: string;
       fallback: boolean;
-      timestamp: number;
+      at: number;
     };
 
 /** Live event as delivered to SSE subscribers (may carry dedup metadata). */

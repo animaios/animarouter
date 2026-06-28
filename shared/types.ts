@@ -350,6 +350,18 @@ export interface AdvisoryPayload {
       penalty: number;
       lastError?: string;
       lastPingLatencyMs?: number;
+      stats?: {
+        tokPerSec: number;
+        avgTtfbMs: number | null;
+        successes: number;
+        failures: number;
+        totalRequests: number;
+      };
+      advisor?: {
+        score: number;
+        confidence: number;
+        updatedAt: number | null;
+      };
       cooldownActive: boolean;
       cooldownTier?: number;
     }>;
@@ -391,7 +403,7 @@ export interface AdvisoryPayload {
     successes: number;
     failures: number;
     avgLatencyMs: number;
-    meowCount: number;
+    anomalyCount: number;
     loadShedActive: boolean;
   };
 }
@@ -415,6 +427,8 @@ export interface AdviceResult {
     | "cooldown_reduce"
     | "recheck_scheduled"
     | "alt_suggested"
+    | "key_score_boost"
+    | "key_score_penalty"
     | "oscillator_toggled"
     | "injection_adjusted"
     | "no_opinion"

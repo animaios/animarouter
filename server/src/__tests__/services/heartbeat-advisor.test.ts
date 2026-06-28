@@ -23,6 +23,7 @@ describe("Heartbeat AI routing advisor", () => {
         DELETE FROM fallback_config;
         DELETE FROM api_keys;
         DELETE FROM requests;
+        DELETE FROM key_stats_temp;
         DELETE FROM oscillator_results;
         DELETE FROM rate_limit_cooldowns;
         DELETE FROM models;
@@ -66,6 +67,13 @@ describe("Heartbeat AI routing advisor", () => {
         ('testprov', 'test-model', ?, 'success', 100, 10, 1000, 120, 'chat', datetime('now')),
         ('testprov', 'test-model', ?, 'error', 0, 0, 2000, NULL, 'chat', datetime('now'))
     `).run(keyId, keyId);
+    db.prepare(`
+      INSERT INTO key_stats_temp (
+        platform, model_id, key_id, successes, failures, tokPerSec, avgTtfbMs,
+        totalRequests, advisorScore, advisorConfidence, advisorUpdatedAt
+      )
+      VALUES ('testprov', 'test-model', ?, 1, 1, 110, 120, 2, 3, 7, 123456)
+    `).run(keyId);
     return { modelDbId, keyId };
   }
 
@@ -87,6 +95,28 @@ describe("Heartbeat AI routing advisor", () => {
       confidence: 8,
       selfScore: 3,
       cooldownHint: 2,
+      recheckSooner: true,
+    });
+
+    expect(
+      parseAdviceResponse(
+        '{"confidence":7,"selfScore":2,"cooldownHint":0,"recheckSooner":false',
+      ),
+    ).toMatchObject({
+      confidence: 7,
+      selfScore: 2,
+      cooldownHint: 0,
+      recheckSooner: false,
+    });
+
+    expect(
+      parseAdviceResponse(
+        "confidence: 6 selfScore: -2 cooldownHint: 1 recheckSooner: yes",
+      ),
+    ).toMatchObject({
+      confidence: 6,
+      selfScore: -2,
+      cooldownHint: 1,
       recheckSooner: true,
     });
 
@@ -173,6 +203,18 @@ describe("Heartbeat AI routing advisor", () => {
     expect(json).not.toContain("Unauthorized");
     expect(json).toContain("auth_error");
     expect(payload.keys[0].models[0].lastPingLatencyMs).toBe(321);
+    expect(payload.keys[0].models[0].stats).toMatchObject({
+      tokPerSec: 110,
+      avgTtfbMs: 120,
+      successes: 1,
+      failures: 1,
+      totalRequests: 2,
+    });
+    expect(payload.keys[0].models[0].advisor).toMatchObject({
+      score: 3,
+      confidence: 7,
+      updatedAt: 123456,
+    });
     expect(payload.models[0].stats.successRate).toBe(0.5);
   });
 
@@ -187,7 +229,7 @@ describe("Heartbeat AI routing advisor", () => {
         total_latency_ms,
         complete,
         status,
-        meow_detected
+        anomaly_detected
       )
       VALUES ('thread-advisor', ?, ?, 1500, 1, 'completed', 0)
     `).run(modelDbId, modelDbId);
@@ -205,7 +247,7 @@ describe("Heartbeat AI routing advisor", () => {
       successes: 1,
       failures: 0,
       avgLatencyMs: 1500,
-      meowCount: 0,
+      anomalyCount: 0,
     });
   });
 
@@ -240,8 +282,8 @@ describe("Heartbeat AI routing advisor", () => {
     const systemPrompt = String(messages[0].content);
     expect(estimatedInputTokens).toBeLessThanOrEqual(120);
     expect(systemPrompt).toContain("oscillatorHint");
-    expect(systemPrompt).toContain("injectionModel");
-    expect(systemPrompt).toContain("injectionBrevity");
+    expect(systemPrompt).toContain("i:<provider/model");
+    expect(systemPrompt).toContain("b:<s|l|d>");
   });
 
   it("applies advice with capped boost, cooldown, and recheck scheduling", () => {
@@ -271,6 +313,7 @@ describe("Heartbeat AI routing advisor", () => {
 
     expect(results.map((result) => result.applied)).toEqual([
       "score_boost",
+      "key_score_boost",
       "cooldown_reduce",
       "recheck_scheduled",
     ]);
@@ -279,6 +322,20 @@ describe("Heartbeat AI routing advisor", () => {
     expect(scheduled).toEqual([
       { keyId, modelId: "test-model", delayMs: 50_000 },
     ]);
+    const keyStats = getDb()
+      .prepare(
+        `SELECT advisorScore, advisorConfidence, advisorUpdatedAt
+         FROM key_stats_temp
+         WHERE platform = 'testprov' AND model_id = 'test-model' AND key_id = ?`,
+      )
+      .get(keyId) as {
+      advisorScore: number;
+      advisorConfidence: number;
+      advisorUpdatedAt: number | null;
+    };
+    expect(keyStats.advisorScore).toBe(9);
+    expect(keyStats.advisorConfidence).toBe(9);
+    expect(keyStats.advisorUpdatedAt).toBeGreaterThan(0);
   });
 
   it("applies confident Iterative Refinement injection model advice", () => {

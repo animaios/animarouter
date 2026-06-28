@@ -23,7 +23,7 @@ let streamFactory:
  *  callModel which knows the step, but streamChatCompletion signature only
  *  has modelId. We track step via a closure counter. */
 let streamStepCounter = 0;
-let currentStreamStep: "foundation" | "injection" | "anchor" = "foundation";
+const currentStreamStep: "foundation" | "injection" | "anchor" = "foundation";
 
 function streamChatCompletion(
   apiKey: string,
@@ -49,7 +49,8 @@ const fakeProvider = { name: "fake", chatCompletion, streamChatCompletion };
 const publishedEvents: Array<{ type: string; [key: string]: unknown }> = [];
 
 vi.mock("../../providers/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../providers/index.js")>();
+  const actual =
+    await importOriginal<typeof import("../../providers/index.js")>();
   return {
     ...actual,
     getProvider: () => fakeProvider,
@@ -132,8 +133,7 @@ async function postStream(
     const frames = raw
       .split("\n")
       .filter(
-        (l: string) =>
-          l.startsWith("data: ") && l.trim() !== "data: [DONE]",
+        (l: string) => l.startsWith("data: ") && l.trim() !== "data: [DONE]",
       )
       .map((l: string) => JSON.parse(l.slice(6)));
     return { status: res.status, headers: res.headers, frames, raw };
@@ -218,9 +218,7 @@ function buildStreamChunks(
       object: "chat.completion.chunk",
       created,
       model: modelId,
-      choices: [
-        { index: 0, delta: { content: text }, finish_reason: null },
-      ],
+      choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
     });
   }
   chunks.push({
@@ -247,8 +245,8 @@ describe("Iterative Refinement proxy integration", () => {
   });
 
   beforeEach(() => {
-      const db = getDb();
-      db.exec(`
+    const db = getDb();
+    db.exec(`
         DELETE FROM fallback_config;
         DELETE FROM api_keys;
         DELETE FROM models;
@@ -256,16 +254,17 @@ describe("Iterative Refinement proxy integration", () => {
         DELETE FROM oscillator_results;
         DELETE FROM settings
         WHERE key LIKE 'oscillator_%'
-           OR key IN ('routing_strategy', 'model_grouping_enabled');
+           OR key IN ('routing_strategy', 'model_grouping_enabled', 'heartbeat_enabled');
       `);
-      setSetting("model_grouping_enabled", "false");
-      setRoutingStrategy("iterative_refinement");
-      setSetting("oscillator_foundation_selection", "auto");
-      setSetting("oscillator_injection_selection", "divergent");
-      setSetting("oscillator_min_intelligence_gap", "0");
-      setSetting("oscillator_injection_max_sentences", "2");
-      setSetting("oscillator_load_shed_threshold", "21");
-      setSetting("oscillator_step_timeout_ms", "1000");
+    setSetting("model_grouping_enabled", "false");
+    setSetting("heartbeat_enabled", "false");
+    setRoutingStrategy("iterative_refinement");
+    setSetting("oscillator_foundation_selection", "auto");
+    setSetting("oscillator_injection_selection", "divergent");
+    setSetting("oscillator_min_intelligence_gap", "0");
+    setSetting("oscillator_injection_max_sentences", "2");
+    setSetting("oscillator_load_shed_threshold", "21");
+    setSetting("oscillator_step_timeout_ms", "1000");
 
     addModel({
       platform: "alpha",
@@ -337,8 +336,13 @@ describe("Iterative Refinement proxy integration", () => {
         );
         return {
           choices: [
-                      { message: { role: "assistant", content: "Final Iterative Refinement answer." } },
-                    ],
+            {
+              message: {
+                role: "assistant",
+                content: "Final Iterative Refinement answer.",
+              },
+            },
+          ],
           usage: {
             prompt_tokens: 8,
             completion_tokens: 4,
@@ -371,9 +375,7 @@ describe("Iterative Refinement proxy integration", () => {
       "injection",
       "foundation",
     ]);
-    const row = getDb()
-      .prepare("SELECT * FROM oscillator_results")
-      .get() as {
+    const row = getDb().prepare("SELECT * FROM oscillator_results").get() as {
       status: string;
       complete: number;
       failed_step: number | null;
@@ -400,12 +402,26 @@ describe("Iterative Refinement proxy integration", () => {
         .filter((event) => event.type.startsWith("oscillator."))
         .map((event) => event.type),
     ).toEqual([
+      "oscillator.decision",
       "oscillator.started",
       "oscillator.step_complete",
       "oscillator.step_complete",
       "oscillator.step_complete",
       "oscillator.complete",
     ]);
+    expect(
+      publishedEvents.find((event) => event.type === "oscillator.decision"),
+    ).toMatchObject({
+      mode: "oscillator",
+      willRunOscillator: true,
+      strategy: "iterative_refinement",
+      stream: false,
+      pinned: false,
+      hasImage: false,
+      wantsTools: false,
+      foundationSelection: "auto",
+      injectionSelection: "divergent",
+    });
   });
 
   it("uses normal single-model routing for simple Iterative Refinement requests", async () => {
@@ -430,13 +446,18 @@ describe("Iterative Refinement proxy integration", () => {
     expect(responseText(body)).toBe("Single model answer.");
     expect(headers.get("x-iterative-refinement-status")).toBeNull();
     expect(chatCompletion).toHaveBeenCalledTimes(1);
+    expect(
+      publishedEvents.find((event) => event.type === "oscillator.decision"),
+    ).toMatchObject({
+      mode: "single_model",
+      skipReason: "simple_prompt",
+      willRunOscillator: false,
+    });
   });
 
   it("uses normal pinned-model routing even when the prompt is complex", async () => {
     chatCompletion.mockResolvedValue({
-      choices: [
-        { message: { role: "assistant", content: "Pinned answer." } },
-      ],
+      choices: [{ message: { role: "assistant", content: "Pinned answer." } }],
       usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
     });
 
@@ -460,6 +481,14 @@ describe("Iterative Refinement proxy integration", () => {
     expect(headers.get("x-iterative-refinement-status")).toBeNull();
     expect(chatCompletion).toHaveBeenCalledTimes(1);
     expect(chatCompletion.mock.calls[0][2]).toBe("foundation");
+    expect(
+      publishedEvents.find((event) => event.type === "oscillator.decision"),
+    ).toMatchObject({
+      mode: "single_model",
+      skipReason: "pinned_model",
+      willRunOscillator: false,
+      pinned: true,
+    });
   });
 
   it("uses normal single-model routing when Iterative Refinement is load-shed", async () => {
@@ -505,18 +534,22 @@ describe("Iterative Refinement proxy integration", () => {
         concurrentRequests: 2,
         threshold: 1,
       });
+      expect(
+        publishedEvents.find((event) => event.type === "oscillator.decision"),
+      ).toMatchObject({
+        mode: "single_model",
+        skipReason: "load_shed",
+        loadShedActive: true,
+        willRunOscillator: false,
+      });
     } finally {
       for (const route of heldRoutes) route.release();
     }
   });
 
-  it("emits a meow event when Iterative Refinement anchor validation falls back", async () => {
+  it("emits an anomaly event when Iterative Refinement anchor validation falls back", async () => {
     chatCompletion.mockImplementation(
-      async (
-        _apiKey: string,
-        _messages: ChatMessage[],
-        modelId: string,
-      ) => {
+      async (_apiKey: string, _messages: ChatMessage[], modelId: string) => {
         if (
           modelId === "foundation" &&
           chatCompletion.mock.calls.length === 1
@@ -559,7 +592,8 @@ describe("Iterative Refinement proxy integration", () => {
             {
               message: {
                 role: "assistant",
-                content: "Final Iterative Refinement answer leaked \u003c|assistant|\u003e.",
+                content:
+                  "Final Iterative Refinement answer leaked \u003c|assistant|\u003e.",
               },
             },
           ],
@@ -589,9 +623,13 @@ describe("Iterative Refinement proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Foundation base.");
-    expect(headers.get("x-iterative-refinement-status")).toBe("foundation_fallback");
+    expect(headers.get("x-iterative-refinement-status")).toBe(
+      "foundation_fallback",
+    );
     expect(
-      publishedEvents.find((event) => event.type === "oscillator.meow_detected"),
+      publishedEvents.find(
+        (event) => event.type === "oscillator.anomaly_detected",
+      ),
     ).toMatchObject({
       pattern: "structural_tag",
       fellBackTo: "alpha/foundation",
@@ -600,11 +638,7 @@ describe("Iterative Refinement proxy integration", () => {
 
   it("does not emit step-complete for a failed Iterative Refinement injection step", async () => {
     chatCompletion.mockImplementation(
-      async (
-        _apiKey: string,
-        _messages: ChatMessage[],
-        modelId: string,
-      ) => {
+      async (_apiKey: string, _messages: ChatMessage[], modelId: string) => {
         if (modelId === "injection") throw new Error("injection failed");
         return {
           choices: [
@@ -641,7 +675,9 @@ describe("Iterative Refinement proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Foundation base.");
-    expect(headers.get("x-iterative-refinement-status")).toBe("foundation_fallback");
+    expect(headers.get("x-iterative-refinement-status")).toBe(
+      "foundation_fallback",
+    );
     expect(
       publishedEvents
         .filter((event) => event.type === "oscillator.step_complete")
@@ -701,9 +737,7 @@ describe("Iterative Refinement proxy integration", () => {
     ]);
     expect(
       getDb()
-        .prepare(
-          "SELECT status, complete, failed_step FROM oscillator_results",
-        )
+        .prepare("SELECT status, complete, failed_step FROM oscillator_results")
         .get(),
     ).toMatchObject({
       status: "single_model_fallback",
@@ -726,9 +760,18 @@ describe("Iterative Refinement proxy integration", () => {
     });
 
     it("happy path streaming: Foundation → Injection → Anchor chunks arrive via SSE with [DONE] marker", async () => {
-      const foundationChunks = buildStreamChunks("Foundation base analysis.", "foundation");
-      const injectionChunks = buildStreamChunks("Alternative perspective.", "injection");
-      const anchorChunks = buildStreamChunks("Final synthesized answer.", "foundation");
+      const foundationChunks = buildStreamChunks(
+        "Foundation base analysis.",
+        "foundation",
+      );
+      const injectionChunks = buildStreamChunks(
+        "Alternative perspective.",
+        "injection",
+      );
+      const anchorChunks = buildStreamChunks(
+        "Final synthesized answer.",
+        "foundation",
+      );
 
       streamFactory = async function* (
         step: "foundation" | "injection" | "anchor",
@@ -787,21 +830,35 @@ describe("Iterative Refinement proxy integration", () => {
       );
       const eventTypes = oscillatorEvents.map((e) => e.type);
 
-      // First event should be stream_start
-      expect(eventTypes[0]).toBe("oscillator.stream_start");
+      // First event should describe the routing decision.
+      expect(eventTypes[0]).toBe("oscillator.decision");
+      expect(oscillatorEvents[0]).toMatchObject({
+        mode: "oscillator",
+        willRunOscillator: true,
+        stream: true,
+      });
       // Last event should be stream_complete
-      expect(eventTypes[eventTypes.length - 1]).toBe("oscillator.stream_complete");
+      expect(eventTypes[eventTypes.length - 1]).toBe(
+        "oscillator.stream_complete",
+      );
       // Should have at least 3 stream_step_complete events (one per step)
-      const stepCompleteCount = eventTypes.filter((t) => t === "oscillator.stream_step_complete").length;
+      const stepCompleteCount = eventTypes.filter(
+        (t) => t === "oscillator.stream_step_complete",
+      ).length;
       expect(stepCompleteCount).toBeGreaterThanOrEqual(3);
       // Should have at least 3 stream_start events (one per step)
-      const streamStartCount = eventTypes.filter((t) => t === "oscillator.stream_start").length;
+      const streamStartCount = eventTypes.filter(
+        (t) => t === "oscillator.stream_start",
+      ).length;
       expect(streamStartCount).toBeGreaterThanOrEqual(3);
       // Sequence should be: stream_start, stream_step_complete, stream_start, stream_step_complete, ...
       // (alternating, ending with stream_complete)
       expect(eventTypes).toContain("oscillator.stream_start");
       expect(eventTypes).toContain("oscillator.stream_step_complete");
       expect(eventTypes).toContain("oscillator.stream_complete");
+      for (const event of oscillatorEvents) {
+        expect(event.at).toEqual(expect.any(Number));
+      }
 
       // Verify stream.chunk events were published for anchor chunks
       const streamChunkEvents = publishedEvents.filter(
@@ -810,7 +867,9 @@ describe("Iterative Refinement proxy integration", () => {
       expect(streamChunkEvents.length).toBeGreaterThan(0);
 
       // Verify oscillator result in DB
-      const row = getDb().prepare("SELECT status, complete FROM oscillator_results").get() as { status: string; complete: number };
+      const row = getDb()
+        .prepare("SELECT status, complete FROM oscillator_results")
+        .get() as { status: string; complete: number };
       expect(row).toMatchObject({ status: "completed", complete: 1 });
     });
 
@@ -828,10 +887,22 @@ describe("Iterative Refinement proxy integration", () => {
       addKey("gamma");
 
       let foundationAttempt = 0;
-      const foundationChunks1 = buildStreamChunks("Failed foundation.", "foundation");
-      const foundationChunks2 = buildStreamChunks("Foundation base analysis.", "foundation2");
-      const injectionChunks = buildStreamChunks("Alternative perspective.", "injection");
-      const anchorChunks = buildStreamChunks("Final synthesized answer.", "foundation2");
+      const foundationChunks1 = buildStreamChunks(
+        "Failed foundation.",
+        "foundation",
+      );
+      const foundationChunks2 = buildStreamChunks(
+        "Foundation base analysis.",
+        "foundation2",
+      );
+      const injectionChunks = buildStreamChunks(
+        "Alternative perspective.",
+        "injection",
+      );
+      const anchorChunks = buildStreamChunks(
+        "Final synthesized answer.",
+        "foundation2",
+      );
 
       streamFactory = async function* (
         step: "foundation" | "injection" | "anchor",
@@ -882,7 +953,9 @@ describe("Iterative Refinement proxy integration", () => {
       const oscillatorEvents = publishedEvents.filter((e) =>
         e.type.startsWith("oscillator."),
       );
-      expect(oscillatorEvents.map((e) => e.type)).toContain("oscillator.stream_start");
+      expect(oscillatorEvents.map((e) => e.type)).toContain(
+        "oscillator.stream_start",
+      );
       // Should have stream_step_complete for foundation (2nd attempt), injection, anchor = 3
       // Note: first foundation attempt may also emit step_complete before failing, so >= 3
       const stepCompleteEvents = oscillatorEvents.filter(
@@ -971,22 +1044,33 @@ describe("Iterative Refinement proxy integration", () => {
           threshold: 1,
         });
 
-        // No Iterative Refinement oscillator events (only load_shed)
+        // No Iterative Refinement oscillator execution events (only decision + load_shed)
         const oscillatorEvents = publishedEvents.filter((e) =>
           e.type.startsWith("oscillator."),
         );
-        expect(oscillatorEvents.length).toBe(1);
-        expect(oscillatorEvents[0].type).toBe("oscillator.load_shed");
+        expect(oscillatorEvents.map((event) => event.type)).toEqual([
+          "oscillator.decision",
+          "oscillator.load_shed",
+        ]);
       } finally {
         for (const route of heldRoutes) route.release();
       }
     });
 
-    it("meow detection during streaming: anchor step detects meow → fallback to foundation", async () => {
-      const foundationChunks = buildStreamChunks("Foundation base analysis.", "foundation");
-      const injectionChunks = buildStreamChunks("Alternative perspective.", "injection");
-      // Anchor returns text with meow pattern (structural tag leak)
-      const anchorChunks = buildStreamChunks("Final answer leaked \u003c|assistant|\u003e.", "foundation");
+    it("anomaly detection during streaming: anchor step detects anomaly → fallback to foundation", async () => {
+      const foundationChunks = buildStreamChunks(
+        "Foundation base analysis.",
+        "foundation",
+      );
+      const injectionChunks = buildStreamChunks(
+        "Alternative perspective.",
+        "injection",
+      );
+      // Anchor returns text with anomaly pattern (structural tag leak)
+      const anchorChunks = buildStreamChunks(
+        "Final answer leaked \u003c|assistant|\u003e.",
+        "foundation",
+      );
 
       streamFactory = async function* (
         step: "foundation" | "injection" | "anchor",
@@ -1021,7 +1105,7 @@ describe("Iterative Refinement proxy integration", () => {
       expect(status).toBe(200);
       expect(headers.get("x-iterative-refinement-status")).toBe("streaming");
 
-      // Both anchor text (with meow) and foundation fallback text are streamed
+      // Both anchor text (with anomaly) and foundation fallback text are streamed
       const textFrames = frames.filter(
         (f) =>
           typeof f.choices?.[0]?.delta?.content === "string" &&
@@ -1035,34 +1119,48 @@ describe("Iterative Refinement proxy integration", () => {
       // Foundation text may or may not be present depending on streaming fallback path
       expect(streamedText.length).toBeGreaterThan(0);
 
-      // Verify meow_detected event (published by non-streaming event path)
+      // Verify anomaly_detected event (published by non-streaming event path)
       // or stream_error with fallback for streaming path
-      const meowEvent = publishedEvents.find(
-        (e) => e.type === "oscillator.meow_detected",
+      const anomalyEvent = publishedEvents.find(
+        (e) => e.type === "oscillator.anomaly_detected",
       );
       const streamErrorEvent = publishedEvents.find(
         (e) => e.type === "oscillator.stream_error" && e.fallback === true,
       );
       // At least one of these should be present
-      expect(meowEvent || streamErrorEvent).toBeDefined();
+      expect(anomalyEvent || streamErrorEvent).toBeDefined();
 
       // Verify oscillator.stream_error event with anchor step (validation failure)
       const failedEvent = publishedEvents.find(
-        (e) => (e.type === "oscillator.stream_error" || e.type === "oscillator.failed") && e.step === "anchor",
+        (e) =>
+          (e.type === "oscillator.stream_error" ||
+            e.type === "oscillator.failed") &&
+          e.step === "anchor",
       );
-      expect(failedEvent || publishedEvents.find(
-        (e) => e.type === "oscillator.failed" && e.failedStep === 3,
-      )).toBeDefined();
+      expect(
+        failedEvent ||
+          publishedEvents.find(
+            (e) => e.type === "oscillator.failed" && e.failedStep === 3,
+          ),
+      ).toBeDefined();
 
       // Verify [DONE] marker
       expect(raw).toContain("data: [DONE]");
     });
 
     it("client disconnect handling: simulate client abort during streaming, verify cleanup without unhandled errors", async () => {
-      const foundationChunks = buildStreamChunks("Foundation base analysis.", "foundation");
-      const injectionChunks = buildStreamChunks("Alternative perspective.", "injection");
+      const foundationChunks = buildStreamChunks(
+        "Foundation base analysis.",
+        "foundation",
+      );
+      const injectionChunks = buildStreamChunks(
+        "Alternative perspective.",
+        "injection",
+      );
       const anchorChunks = buildStreamChunks(
-        "Final synthesized answer that is very long and would take time to stream.".repeat(10),
+        "Final synthesized answer that is very long and would take time to stream.".repeat(
+          10,
+        ),
         "foundation",
       );
 
@@ -1138,9 +1236,18 @@ describe("Iterative Refinement proxy integration", () => {
     });
 
     it("SSE event ordering: verify oscillator.started → oscillator.step_complete* → oscillator.complete", async () => {
-      const foundationChunks = buildStreamChunks("Foundation base analysis.", "foundation");
-      const injectionChunks = buildStreamChunks("Alternative perspective.", "injection");
-      const anchorChunks = buildStreamChunks("Final synthesized answer.", "foundation");
+      const foundationChunks = buildStreamChunks(
+        "Foundation base analysis.",
+        "foundation",
+      );
+      const injectionChunks = buildStreamChunks(
+        "Alternative perspective.",
+        "injection",
+      );
+      const anchorChunks = buildStreamChunks(
+        "Final synthesized answer.",
+        "foundation",
+      );
 
       streamFactory = async function* (
         step: "foundation" | "injection" | "anchor",
@@ -1181,13 +1288,20 @@ describe("Iterative Refinement proxy integration", () => {
         .filter((e) => e.type.startsWith("oscillator."))
         .map((e) => e.type);
 
-      // First event should be a stream_start (foundation step begins)
-      expect(oscillatorEvents[0]).toBe("oscillator.stream_start");
+      // First event should explain why the request entered streaming oscillator mode.
+      expect(oscillatorEvents[0]).toBe("oscillator.decision");
       // Last event should be stream_complete
-      expect(oscillatorEvents[oscillatorEvents.length - 1]).toBe("oscillator.stream_complete");
+      expect(oscillatorEvents[oscillatorEvents.length - 1]).toBe(
+        "oscillator.stream_complete",
+      );
       // Should have at least one stream_start and one stream_step_complete per step
-      expect(oscillatorEvents.filter((t) => t === "oscillator.stream_start").length).toBeGreaterThanOrEqual(2);
-      expect(oscillatorEvents.filter((t) => t === "oscillator.stream_step_complete").length).toBeGreaterThanOrEqual(2);
+      expect(
+        oscillatorEvents.filter((t) => t === "oscillator.stream_start").length,
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        oscillatorEvents.filter((t) => t === "oscillator.stream_step_complete")
+          .length,
+      ).toBeGreaterThanOrEqual(2);
 
       // Verify streaming step names in stream_step_complete events
       const stepCompleteEvents = publishedEvents.filter(
