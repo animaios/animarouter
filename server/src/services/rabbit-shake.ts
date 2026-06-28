@@ -77,8 +77,10 @@ export interface OscillatorModelCallInput {
 export type OscillatorModelCallResult =
   | string
   | {
-      text: string;
-    };
+      text?: string | null;
+    }
+  | null
+  | undefined;
 
 export type OscillatorModelCall = (
   input: OscillatorModelCallInput,
@@ -499,7 +501,8 @@ function candidateKey(candidate: RabbitCandidate): string {
 }
 
 function asText(result: OscillatorModelCallResult): string {
-  return typeof result === "string" ? result : result.text;
+  if (!result) return "";
+  return typeof result === "string" ? result : (result.text ?? "");
 }
 
 function errorMessage(error: unknown): string {

@@ -420,7 +420,7 @@ describe("Rabbit Shake routing helpers", () => {
         if (step === "foundation") {
           attempts.push(selected.modelDbId);
           if (selected.modelDbId === 1) {
-            throw new Error("provider failed");
+            return undefined;
           }
           return "Recovered foundation.";
         }
