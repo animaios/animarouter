@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getDb, initDb, setSetting } from "../../db/index.js";
+import { getDb, getSetting, initDb, setSetting } from "../../db/index.js";
 import { getBoost, initDegradation } from "../../services/degradation.js";
 import {
   applyAdvice,
@@ -26,7 +26,11 @@ describe("Heartbeat AI routing advisor", () => {
       DELETE FROM oscillator_results;
       DELETE FROM rate_limit_cooldowns;
       DELETE FROM models;
-      DELETE FROM settings WHERE key LIKE 'heartbeat_advisor_%' OR key IN ('routing_strategy', 'routing_custom_weights', 'oscillator_enabled');
+      DELETE FROM settings
+      WHERE key LIKE 'heartbeat_advisor_%'
+         OR key LIKE 'rabbit_%'
+         OR key LIKE 'oscillator_%'
+         OR key IN ('routing_strategy', 'routing_custom_weights');
     `);
     initDegradation();
     setSetting("heartbeat_advisor_max_input_tokens", "400");
@@ -235,5 +239,112 @@ describe("Heartbeat AI routing advisor", () => {
     expect(scheduled).toEqual([
       { keyId, modelId: "test-model", delayMs: 50_000 },
     ]);
+  });
+
+  it("applies confident Rabbit toggle and injection model advice", () => {
+    const { modelDbId, keyId } = seedProvider();
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
+      VALUES ('other', 'test-model', 'Other Test Model', 2, 2, 1)
+    `).run();
+    const injectionModelDbId = (
+      db
+        .prepare(
+          "SELECT id FROM models WHERE platform = 'other' AND model_id = 'test-model'",
+        )
+        .get() as { id: number }
+    ).id;
+
+    setSetting("rabbit_enabled", "false");
+
+    const results = applyAdvice({
+      advice: {
+        confidence: 8,
+        selfScore: 0,
+        cooldownHint: 0,
+        recheckSooner: false,
+        oscillatorHint: "enable",
+        injectionModel: " other / test-model ",
+        injectionBrevity: "shorter",
+      },
+      modelDbId,
+      platform: "testprov",
+      modelId: "test-model",
+      keyId,
+    });
+
+    expect(results.map((result) => result.applied)).toEqual([
+      "oscillator_toggled",
+      "injection_adjusted",
+      "injection_adjusted",
+    ]);
+    expect(getSetting("rabbit_enabled")).toBe("true");
+    expect(getSetting("oscillator_injection_selection")).toBe(
+      String(injectionModelDbId),
+    );
+    expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+
+    const rankResults = applyAdvice({
+      advice: {
+        confidence: 6,
+        selfScore: 0,
+        cooldownHint: 0,
+        recheckSooner: false,
+        injectionModel: "intelligence_rank : 2",
+      },
+      modelDbId,
+      platform: "testprov",
+      modelId: "test-model",
+      keyId,
+    });
+
+    expect(rankResults).toContainEqual({
+      applied: "injection_adjusted",
+      modelDbId: injectionModelDbId,
+      magnitude: injectionModelDbId,
+    });
+    expect(getSetting("oscillator_injection_selection")).toBe(
+      String(injectionModelDbId),
+    );
+  });
+
+  it("uses a lower confidence threshold for Rabbit disable advice", () => {
+    const { modelDbId, keyId } = seedProvider();
+    setSetting("rabbit_enabled", "true");
+
+    expect(
+      applyAdvice({
+        advice: {
+          confidence: 3,
+          selfScore: 0,
+          cooldownHint: 0,
+          recheckSooner: false,
+          oscillatorHint: "disable",
+        },
+        modelDbId,
+        platform: "testprov",
+        modelId: "test-model",
+        keyId,
+      }),
+    ).toEqual([{ applied: "no_opinion", modelDbId, magnitude: 0 }]);
+    expect(getSetting("rabbit_enabled")).toBe("true");
+
+    expect(
+      applyAdvice({
+        advice: {
+          confidence: 4,
+          selfScore: 0,
+          cooldownHint: 0,
+          recheckSooner: false,
+          oscillatorHint: "disable",
+        },
+        modelDbId,
+        platform: "testprov",
+        modelId: "test-model",
+        keyId,
+      }),
+    ).toEqual([{ applied: "oscillator_toggled", modelDbId, magnitude: -1 }]);
+    expect(getSetting("rabbit_enabled")).toBe("false");
   });
 });

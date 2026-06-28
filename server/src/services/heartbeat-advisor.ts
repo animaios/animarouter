@@ -395,28 +395,55 @@ export function applyAdvice(params: ApplyAdviceParams): AdviceResult[] {
     });
   }
 
-  if (
-    advice.oscillatorHint &&
-    advice.oscillatorHint !== "no_opinion" &&
-    advice.confidence >= 7
-  ) {
-    setSetting(
-      "oscillator_enabled",
-      String(advice.oscillatorHint === "enable"),
-    );
-    results.push({
-      applied: "oscillator_toggled",
-      modelDbId: params.modelDbId,
-      magnitude: advice.oscillatorHint === "enable" ? 1 : -1,
-    });
+  if (advice.oscillatorHint === "enable") {
+    const rabbitEnabled = getFeatureSetting("rabbit_enabled") as boolean;
+    if (!rabbitEnabled && advice.confidence >= 7) {
+      setSetting("rabbit_enabled", "true");
+      results.push({
+        applied: "oscillator_toggled",
+        modelDbId: params.modelDbId,
+        magnitude: 1,
+      });
+    }
+  } else if (advice.oscillatorHint === "disable") {
+    const rabbitEnabled = getFeatureSetting("rabbit_enabled") as boolean;
+    if (rabbitEnabled && advice.confidence >= 4) {
+      setSetting("rabbit_enabled", "false");
+      results.push({
+        applied: "oscillator_toggled",
+        modelDbId: params.modelDbId,
+        magnitude: -1,
+      });
+    }
   }
 
-  if (advice.injectionModel || advice.injectionBrevity) {
-    results.push({
-      applied: "injection_adjusted",
-      modelDbId: params.modelDbId,
-      magnitude: advice.confidence,
-    });
+  if (advice.confidence >= 6) {
+    const injectionModelDbId = advice.injectionModel
+      ? resolveAdviceModelDbId(advice.injectionModel)
+      : undefined;
+    if (injectionModelDbId) {
+      setSetting("oscillator_injection_selection", String(injectionModelDbId));
+      results.push({
+        applied: "injection_adjusted",
+        modelDbId: injectionModelDbId,
+        magnitude: injectionModelDbId,
+      });
+    }
+
+    const injectionSentences = injectionBrevitySentenceLimit(
+      advice.injectionBrevity,
+    );
+    if (injectionSentences != null) {
+      setSetting(
+        "oscillator_injection_max_sentences",
+        String(injectionSentences),
+      );
+      results.push({
+        applied: "injection_adjusted",
+        modelDbId: params.modelDbId,
+        magnitude: injectionSentences,
+      });
+    }
   }
 
   if (results.length === 0) {
@@ -427,6 +454,71 @@ export function applyAdvice(params: ApplyAdviceParams): AdviceResult[] {
     });
   }
   return results;
+}
+
+function resolveAdviceModelDbId(modelRef: string): number | undefined {
+  const trimmed = modelRef.trim().slice(0, 80);
+  if (!trimmed) return undefined;
+
+  const numeric = Number(trimmed);
+  if (Number.isInteger(numeric) && numeric > 0) {
+    return (
+      getDb()
+        .prepare("SELECT id FROM models WHERE enabled = 1 AND id = ?")
+        .get(numeric) as { id: number } | undefined
+    )?.id;
+  }
+
+  const rankMatch = trimmed.match(/^intelligence_rank\s*:\s*(\d+)$/i);
+  if (rankMatch) {
+    return (
+      getDb()
+        .prepare(
+          "SELECT id FROM models WHERE enabled = 1 AND intelligence_rank = ? ORDER BY id ASC LIMIT 1",
+        )
+        .get(Number(rankMatch[1])) as { id: number } | undefined
+    )?.id;
+  }
+
+  const providerModel = splitProviderModelRef(trimmed);
+  if (!providerModel) return undefined;
+  return (
+    getDb()
+      .prepare(
+        "SELECT id FROM models WHERE enabled = 1 AND platform = ? AND model_id = ? ORDER BY id ASC LIMIT 1",
+      )
+      .get(providerModel.provider, providerModel.model) as
+      | { id: number }
+      | undefined
+  )?.id;
+}
+
+function splitProviderModelRef(
+  ref: string,
+): { provider: string; model: string } | undefined {
+  const colonIndex = ref.indexOf(":");
+  if (colonIndex > 0) {
+    const provider = ref.slice(0, colonIndex).trim();
+    const model = ref.slice(colonIndex + 1).trim();
+    if (!provider || !model) return undefined;
+    return { provider, model };
+  }
+
+  const slashIndex = ref.indexOf("/");
+  if (slashIndex <= 0) return undefined;
+  const provider = ref.slice(0, slashIndex).trim();
+  const model = ref.slice(slashIndex + 1).trim();
+  if (!provider || !model) return undefined;
+  return { provider, model };
+}
+
+function injectionBrevitySentenceLimit(
+  brevity: RoutingAdvice["injectionBrevity"],
+): number | undefined {
+  if (brevity === "shorter") return 1;
+  if (brevity === "default") return 2;
+  if (brevity === "longer") return 3;
+  return undefined;
 }
 
 function buildStatsByModel(rows: RequestRow[]) {
