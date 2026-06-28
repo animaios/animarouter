@@ -1,41 +1,93 @@
-import { useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  AreaChart, Area,
-} from 'recharts'
-import { apiFetch } from '@/lib/api'
-import type { AnalyticsSummary, PlatformStats, ModelStats, ErrorEntry, ErrorDistribution, ModelTimelineResponse } from '../../../shared/types'
-import { Button } from '@/components/ui/button'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { PageHeader } from '@/components/page-header'
-import { LiveEvents } from '@/components/live-events';
-import { Tooltip as HoverTooltip } from '@/components/tooltip'
-import { formatSqliteUtcToLocalTime, formatIsoUtcToLocalChart } from '@/lib/utils'
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { LiveEvents } from "@/components/live-events";
+import { PageHeader } from "@/components/page-header";
+import { Tooltip as HoverTooltip } from "@/components/tooltip";
+import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { apiFetch } from "@/lib/api";
+import {
+  formatIsoUtcToLocalChart,
+  formatSqliteUtcToLocalTime,
+} from "@/lib/utils";
+import type {
+  AnalyticsSummary,
+  ErrorDistribution,
+  ErrorEntry,
+  ModelStats,
+  ModelTimelineResponse,
+  PlatformStats,
+} from "../../../shared/types";
 
-type TimeRange = '15m' | '1h' | '24h' | '7d' | '30d'
-type ChartInterval = 'minute' | '5min' | 'hour' | 'day'
+type TimeRange = "15m" | "1h" | "24h" | "7d" | "30d";
+type ChartInterval = "minute" | "5min" | "hour" | "day";
 
 function formatTokens(n?: number): string {
-  if (!n) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
+  if (!n) return "0";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
-function Stat({ label, value, hint, className }: { label: string; value: string | number; hint?: string; className?: string }) {
+function Stat({
+  label,
+  value,
+  hint,
+  className,
+}: {
+  label: string;
+  value: string | number;
+  hint?: string;
+  className?: string;
+}) {
   const card = (
     <div className="rounded-3xl border bg-card px-4 py-3">
-      <p className="text-[11px] text-muted-foreground uppercase tracking-wider">{label}</p>
-      <p className={`text-xl font-semibold tabular-nums mt-1 ${className ?? ''}`}>{value}</p>
+      <p className="text-[11px] text-muted-foreground uppercase tracking-wider">
+        {label}
+      </p>
+      <p
+        className={`text-xl font-semibold tabular-nums mt-1 ${className ?? ""}`}
+      >
+        {value}
+      </p>
     </div>
-  )
+  );
   // Same portal tooltip as the routing strategy chips. Opens BELOW the card:
   // the stats row sits right under the sticky navbar.
-  return hint ? <HoverTooltip text={hint} side="bottom" className="block">{card}</HoverTooltip> : card
+  return hint ? (
+    <HoverTooltip text={hint} side="bottom" className="block">
+      {card}
+    </HoverTooltip>
+  ) : (
+    card
+  );
 }
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+function Panel({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="rounded-3xl border bg-card">
       <div className="px-4 py-3 border-b">
@@ -43,91 +95,118 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
       </div>
       <div className="p-4">{children}</div>
     </div>
-  )
+  );
 }
 
-const axisStyle = { fontSize: 11, fill: 'var(--muted-foreground)' } as const
-const gridStyle = 'var(--border)'
-const primaryFill = 'var(--foreground)'
-const EMPTY_MODEL_TIMELINE: ModelTimelineResponse = { series: [], points: [] }
+const axisStyle = { fontSize: 11, fill: "var(--muted-foreground)" } as const;
+const gridStyle = "var(--border)";
+const primaryFill = "var(--foreground)";
+const EMPTY_MODEL_TIMELINE: ModelTimelineResponse = { series: [], points: [] };
 const modelAreaColors = [
-  '#2563eb',
-  '#16a34a',
-  '#dc2626',
-  '#9333ea',
-  '#ea580c',
-  '#0891b2',
-  '#ca8a04',
-  '#64748b',
-  '#db2777',
-]
+  "#2563eb",
+  "#16a34a",
+  "#dc2626",
+  "#9333ea",
+  "#ea580c",
+  "#0891b2",
+  "#ca8a04",
+  "#64748b",
+  "#db2777",
+];
 
 function rangeToInterval(range: TimeRange): ChartInterval {
-  return range === '15m' ? 'minute' :
-    range === '1h' ? '5min' :
-    range === '24h' ? 'hour' : 'day'
+  return range === "15m"
+    ? "minute"
+    : range === "1h"
+      ? "5min"
+      : range === "24h"
+        ? "hour"
+        : "day";
 }
 
-function getModelSeriesName(series: ModelTimelineResponse['series'][number]): string {
-  return series.platform ? `${series.displayName} (${series.platform})` : series.displayName
+function getModelSeriesName(
+  series: ModelTimelineResponse["series"][number],
+): string {
+  return series.platform
+    ? `${series.displayName} (${series.platform})`
+    : series.displayName;
 }
 
 export default function AnalyticsPage() {
-  const [range, setRange] = useState<TimeRange>('24h')
+  const [range, setRange] = useState<TimeRange>("24h");
 
   const { data: summary } = useQuery({
-    queryKey: ['analytics', 'summary', range],
-    queryFn: () => apiFetch<AnalyticsSummary>(`/api/analytics/summary?range=${range}`),
-  })
+    queryKey: ["analytics", "summary", range],
+    queryFn: () =>
+      apiFetch<AnalyticsSummary>(`/api/analytics/summary?range=${range}`),
+  });
 
   const { data: byPlatform = [] } = useQuery({
-    queryKey: ['analytics', 'by-platform', range],
-    queryFn: () => apiFetch<PlatformStats[]>(`/api/analytics/by-platform?range=${range}`),
-  })
+    queryKey: ["analytics", "by-platform", range],
+    queryFn: () =>
+      apiFetch<PlatformStats[]>(`/api/analytics/by-platform?range=${range}`),
+  });
 
   const { data: modelTimeline = EMPTY_MODEL_TIMELINE } = useQuery({
-    queryKey: ['analytics', 'model-timeline', range],
-    queryFn: () => apiFetch<ModelTimelineResponse>(`/api/analytics/model-timeline?range=${range}`),
-  })
-
-  const formattedModelTimeline = useMemo(() =>
-    modelTimeline.points.map((d) => ({
-      ...d,
-      timestamp: formatIsoUtcToLocalChart(
-        String(d.timestamp),
-        rangeToInterval(range),
+    queryKey: ["analytics", "model-timeline", range],
+    queryFn: () =>
+      apiFetch<ModelTimelineResponse>(
+        `/api/analytics/model-timeline?range=${range}`,
       ),
-    })),
+  });
+
+  const formattedModelTimeline = useMemo(
+    () =>
+      modelTimeline.points.map((d): Record<string, string | number> => {
+        const base: Record<string, string | number> = { ...d };
+        return {
+          ...base,
+          timestamp: formatIsoUtcToLocalChart(
+            String(d.timestamp),
+            rangeToInterval(range),
+          ),
+        };
+      }),
     [modelTimeline.points, range],
   );
-  const hasModelTimelineData = modelTimeline.series.length > 0 &&
-    formattedModelTimeline.some((d) => Number(d.totalRequests ?? 0) > 0)
+  const hasModelTimelineData =
+    modelTimeline.series.length > 0 &&
+    formattedModelTimeline.some((d) => Number(d["totalRequests"] ?? 0) > 0);
 
   const { data: byModel = [] } = useQuery({
-    queryKey: ['analytics', 'by-model', range],
-    queryFn: () => apiFetch<ModelStats[]>(`/api/analytics/by-model?range=${range}`),
-  })
+    queryKey: ["analytics", "by-model", range],
+    queryFn: () =>
+      apiFetch<ModelStats[]>(`/api/analytics/by-model?range=${range}`),
+  });
 
   // Only show the Pinned column when at least one model has pinned requests.
-  const showPinnedCol = useMemo(() => byModel.some(m => m.pinnedRequests > 0), [byModel])
+  const showPinnedCol = useMemo(
+    () => byModel.some((m) => m.pinnedRequests > 0),
+    [byModel],
+  );
 
   const { data: errors = [] } = useQuery({
-    queryKey: ['analytics', 'errors', range],
-    queryFn: () => apiFetch<ErrorEntry[]>(`/api/analytics/errors?range=${range}`),
-  })
+    queryKey: ["analytics", "errors", range],
+    queryFn: () =>
+      apiFetch<ErrorEntry[]>(`/api/analytics/errors?range=${range}`),
+  });
 
   const { data: errorDist } = useQuery({
-    queryKey: ['analytics', 'error-distribution', range],
-    queryFn: () => apiFetch<ErrorDistribution>(`/api/analytics/error-distribution?range=${range}`),
-  })
+    queryKey: ["analytics", "error-distribution", range],
+    queryFn: () =>
+      apiFetch<ErrorDistribution>(
+        `/api/analytics/error-distribution?range=${range}`,
+      ),
+  });
 
   // Pinned = the client named a specific model instead of auto-routing.
   // Honored = that model actually served it (the rest failed over).
-  const pinned = summary?.pinnedRequests ?? 0
-  const pinHonored = summary?.pinHonoredRequests ?? 0
-  const requestsHint = pinned > 0
-    ? `${pinned} of these requests pinned a specific model by name. ${pinHonored} were served by the pinned model; ${pinned - pinHonored} failed over to a different one. The rest were auto-routed.`
-    : 'All requests in this period were auto-routed; no client pinned a specific model by name.'
+  const pinned = summary?.pinnedRequests ?? 0;
+  const pinHonored = summary?.pinHonoredRequests ?? 0;
+  const requestsHint =
+    pinned > 0
+      ? `${pinned} of these requests pinned a specific model by name. ${pinHonored} were served by the pinned model; ${pinned - pinHonored} failed over to a different one. The rest were auto-routed.`
+      : "All requests in this period were auto-routed; no client pinned a specific model by name.";
 
   return (
     <div>
@@ -136,10 +215,10 @@ export default function AnalyticsPage() {
         description="Request volume, latency, token usage, and failures."
         actions={
           <div className="flex gap-1 rounded-lg border p-0.5">
-            {(['15m', '1h', '24h', '7d', '30d'] as TimeRange[]).map(r => (
+            {(["15m", "1h", "24h", "7d", "30d"] as TimeRange[]).map((r) => (
               <Button
                 key={r}
-                variant={range === r ? 'secondary' : 'ghost'}
+                variant={range === r ? "secondary" : "ghost"}
                 size="xs"
                 onClick={() => setRange(r)}
               >
@@ -155,25 +234,59 @@ export default function AnalyticsPage() {
 
         {/* Summary stats */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          <Stat label="Requests" value={summary?.totalRequests ?? 0} hint={requestsHint} />
+          <Stat
+            label="Requests"
+            value={summary?.totalRequests ?? 0}
+            hint={requestsHint}
+          />
           <Stat label="Success rate" value={`${summary?.successRate ?? 0}%`} />
-          <Stat label="Input tokens" value={formatTokens(summary?.totalInputTokens)} />
-          <Stat label="Output tokens" value={formatTokens(summary?.totalOutputTokens)} />
-          <Stat label="Avg latency" value={`${summary?.avgLatencyMs ?? 0} ms`} />
+          <Stat
+            label="Input tokens"
+            value={formatTokens(summary?.totalInputTokens)}
+          />
+          <Stat
+            label="Output tokens"
+            value={formatTokens(summary?.totalOutputTokens)}
+          />
+          <Stat
+            label="Avg latency"
+            value={`${summary?.avgLatencyMs ?? 0} ms`}
+          />
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <Panel title="Requests by provider">
             {byPlatform.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No data yet
+              </p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={byPlatform} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
+                <BarChart
+                  data={byPlatform}
+                  margin={{ top: 6, right: 6, left: -12, bottom: 0 }}
+                >
                   <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                  <XAxis dataKey="platform" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
+                  <XAxis
+                    dataKey="platform"
+                    tick={axisStyle}
+                    tickLine={false}
+                    axisLine={{ stroke: gridStyle }}
+                  />
                   <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="requests" fill={primaryFill} radius={[3, 3, 0, 0]} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "var(--popover)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                  />
+                  <Bar
+                    dataKey="requests"
+                    fill={primaryFill}
+                    radius={[3, 3, 0, 0]}
+                  />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -181,15 +294,42 @@ export default function AnalyticsPage() {
 
           <Panel title="Avg latency by provider">
             {byPlatform.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No data yet
+              </p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={byPlatform} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
+                <BarChart
+                  data={byPlatform}
+                  margin={{ top: 6, right: 6, left: -12, bottom: 0 }}
+                >
                   <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                  <XAxis dataKey="platform" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
-                  <YAxis unit="ms" tick={axisStyle} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="avgLatencyMs" name="Latency (ms)" fill="var(--muted-foreground)" radius={[3, 3, 0, 0]} />
+                  <XAxis
+                    dataKey="platform"
+                    tick={axisStyle}
+                    tickLine={false}
+                    axisLine={{ stroke: gridStyle }}
+                  />
+                  <YAxis
+                    unit="ms"
+                    tick={axisStyle}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "var(--popover)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                  />
+                  <Bar
+                    dataKey="avgLatencyMs"
+                    name="Latency (ms)"
+                    fill="var(--muted-foreground)"
+                    radius={[3, 3, 0, 0]}
+                  />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -198,17 +338,40 @@ export default function AnalyticsPage() {
           <div className="lg:col-span-2">
             <Panel title="Model usage over time">
               {!hasModelTimelineData ? (
-                <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+                <p className="text-sm text-muted-foreground text-center py-8">
+                  No data yet
+                </p>
               ) : (
                 <>
                   <ResponsiveContainer width="100%" height={240}>
-                    <AreaChart data={formattedModelTimeline} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
+                    <AreaChart
+                      data={formattedModelTimeline}
+                      margin={{ top: 6, right: 6, left: -12, bottom: 0 }}
+                    >
                       <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                      <XAxis dataKey="timestamp" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
-                      <YAxis allowDecimals={false} tick={axisStyle} tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                      <XAxis
+                        dataKey="timestamp"
+                        tick={axisStyle}
+                        tickLine={false}
+                        axisLine={{ stroke: gridStyle }}
+                      />
+                      <YAxis
+                        allowDecimals={false}
+                        tick={axisStyle}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "var(--popover)",
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          fontSize: 12,
+                        }}
+                      />
                       {modelTimeline.series.map((series, index) => {
-                        const color = modelAreaColors[index % modelAreaColors.length]
+                        const color =
+                          modelAreaColors[index % modelAreaColors.length];
                         return (
                           <Area
                             key={series.key}
@@ -222,20 +385,29 @@ export default function AnalyticsPage() {
                             strokeWidth={1.2}
                             dot={false}
                           />
-                        )
+                        );
                       })}
                     </AreaChart>
                   </ResponsiveContainer>
                   <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground">
                     {modelTimeline.series.map((series, index) => {
-                      const color = modelAreaColors[index % modelAreaColors.length]
-                      const name = getModelSeriesName(series)
+                      const color =
+                        modelAreaColors[index % modelAreaColors.length];
+                      const name = getModelSeriesName(series);
                       return (
-                        <span key={series.key} className="inline-flex max-w-full items-center gap-1.5">
-                          <span className="size-2 rounded-sm shrink-0" style={{ backgroundColor: color }} />
-                          <span className="max-w-[220px] truncate" title={name}>{name}</span>
+                        <span
+                          key={series.key}
+                          className="inline-flex max-w-full items-center gap-1.5"
+                        >
+                          <span
+                            className="size-2 rounded-sm shrink-0"
+                            style={{ backgroundColor: color }}
+                          />
+                          <span className="max-w-[220px] truncate" title={name}>
+                            {name}
+                          </span>
                         </span>
-                      )
+                      );
                     })}
                   </div>
                 </>
@@ -246,7 +418,9 @@ export default function AnalyticsPage() {
           <div className="lg:col-span-2">
             <Panel title="Per-model breakdown">
               {byModel.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-8">No data yet</p>
+                <p className="text-sm text-muted-foreground text-center py-8">
+                  No data yet
+                </p>
               ) : (
                 <div className="max-h-[360px] overflow-y-auto -mx-4">
                   <Table>
@@ -255,26 +429,56 @@ export default function AnalyticsPage() {
                         <TableHead className="pl-4">Model</TableHead>
                         <TableHead>Provider</TableHead>
                         <TableHead className="text-right">Requests</TableHead>
-                        {showPinnedCol && <TableHead className="text-right">Pinned</TableHead>}
+                        {showPinnedCol && (
+                          <TableHead className="text-right">Pinned</TableHead>
+                        )}
                         <TableHead className="text-right">Success</TableHead>
                         <TableHead className="text-right">Latency</TableHead>
-                        <TableHead className="text-right"><HoverTooltip text="Output tokens + reasoning tokens per second. Reasoning tokens are included for fair comparison across model types."><span className="underline decoration-dotted underline-offset-2 cursor-help">Speed</span></HoverTooltip></TableHead>
+                        <TableHead className="text-right">
+                          <HoverTooltip text="Output tokens + reasoning tokens per second. Reasoning tokens are included for fair comparison across model types.">
+                            <span className="underline decoration-dotted underline-offset-2 cursor-help">
+                              Speed
+                            </span>
+                          </HoverTooltip>
+                        </TableHead>
                         <TableHead className="text-right">In tokens</TableHead>
-                        <TableHead className="text-right pr-4">Out tokens</TableHead>
+                        <TableHead className="text-right pr-4">
+                          Out tokens
+                        </TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {byModel.map((m, i: number) => (
                         <TableRow key={i}>
-                          <TableCell className="pl-4 text-sm font-medium">{m.displayName}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{m.platform}</TableCell>
-                          <TableCell className="text-right tabular-nums">{m.requests}</TableCell>
-                          {showPinnedCol && <TableCell className="text-right tabular-nums">{m.pinnedRequests}</TableCell>}
-                          <TableCell className="text-right tabular-nums">{m.successRate}%</TableCell>
-                          <TableCell className="text-right tabular-nums">{m.avgLatencyMs} ms</TableCell>
-                          <TableCell className="text-right tabular-nums">{m.tokPerSec > 0 ? `${m.tokPerSec} tok/s` : '—'}</TableCell>
-                          <TableCell className="text-right tabular-nums">{formatTokens(m.totalInputTokens)}</TableCell>
-                          <TableCell className="text-right tabular-nums pr-4">{formatTokens(m.totalOutputTokens)}</TableCell>
+                          <TableCell className="pl-4 text-sm font-medium">
+                            {m.displayName}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {m.platform}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {m.requests}
+                          </TableCell>
+                          {showPinnedCol && (
+                            <TableCell className="text-right tabular-nums">
+                              {m.pinnedRequests}
+                            </TableCell>
+                          )}
+                          <TableCell className="text-right tabular-nums">
+                            {m.successRate}%
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {m.avgLatencyMs} ms
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {m.tokPerSec > 0 ? `${m.tokPerSec} tok/s` : "—"}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {formatTokens(m.totalInputTokens)}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums pr-4">
+                            {formatTokens(m.totalOutputTokens)}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -286,15 +490,36 @@ export default function AnalyticsPage() {
 
           <Panel title="Errors by provider">
             {!errorDist?.byPlatform?.length ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No errors</p>
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No errors
+              </p>
             ) : (
               <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={errorDist.byPlatform} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
+                <BarChart
+                  data={errorDist.byPlatform}
+                  margin={{ top: 6, right: 6, left: -12, bottom: 0 }}
+                >
                   <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
-                  <XAxis dataKey="platform" tick={axisStyle} tickLine={false} axisLine={{ stroke: gridStyle }} />
+                  <XAxis
+                    dataKey="platform"
+                    tick={axisStyle}
+                    tickLine={false}
+                    axisLine={{ stroke: gridStyle }}
+                  />
                   <YAxis tick={axisStyle} tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ backgroundColor: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
-                  <Bar dataKey="count" fill="var(--destructive)" radius={[3, 3, 0, 0]} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "var(--popover)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                  />
+                  <Bar
+                    dataKey="count"
+                    fill="var(--destructive)"
+                    radius={[3, 3, 0, 0]}
+                  />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -302,7 +527,9 @@ export default function AnalyticsPage() {
 
           <Panel title="Recent errors">
             {errors.length === 0 ? (
-              <p className="text-sm text-muted-foreground text-center py-8">No errors</p>
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No errors
+              </p>
             ) : (
               <div className="max-h-[240px] overflow-y-auto -mx-4">
                 <Table>
@@ -316,10 +543,17 @@ export default function AnalyticsPage() {
                   <TableBody>
                     {errors.slice(0, 20).map((e) => (
                       <TableRow key={e.id}>
-                        <TableCell className="pl-4 text-xs">{e.platform}</TableCell>
-                        <TableCell className="text-xs max-w-[200px] truncate">{e.error}</TableCell>
+                        <TableCell className="pl-4 text-xs">
+                          {e.platform}
+                        </TableCell>
+                        <TableCell className="text-xs max-w-[200px] truncate">
+                          {e.error}
+                        </TableCell>
                         <TableCell className="text-right text-xs text-muted-foreground tabular-nums pr-4">
-                          {formatSqliteUtcToLocalTime(e.createdAt, { hour: '2-digit', minute: '2-digit' })}
+                          {formatSqliteUtcToLocalTime(e.createdAt, {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -331,5 +565,5 @@ export default function AnalyticsPage() {
         </div>
       </div>
     </div>
-  )
+  );
 }

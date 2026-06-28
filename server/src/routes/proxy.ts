@@ -26,6 +26,7 @@ import {
   type ExecuteOscillatorResult,
   type OscillatorModelCall,
   type OscillatorStepLatencies,
+  type OscillatorStreamChunk,
 } from '../services/rabbit-shake.js';
 import type { BaseProvider } from '../providers/base.js';
 
@@ -986,6 +987,333 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   }
   const shouldTryRabbitOscillator =
     rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
+  const shouldTryRabbitStreaming =
+    rabbitDecision.mode === 'oscillator' && stream && !hasImage && !wantsTools && !isPinned;
+
+  // ── Rabbit streaming oscillator ────────────────────────────────────
+  // Streams the anchor (final) step to the client in real-time via SSE.
+  // Foundation and injection steps consume their streams silently (the
+  // oscillator needs full text to build context bridges). If the
+  // oscillator fails altogether the error propagates to the outer retry
+  // loop as a normal streaming fallback.
+  async function handleRabbitStreaming(): Promise<void> {
+    const rabbitStepLatencies: OscillatorStepLatencies = {};
+    let headerSent = false;
+    let ttfbMs: number | null = null;
+    let anchorChunkId = `chatcmpl-${Date.now()}`;
+    let anchorCreated = Math.floor(Date.now() / 1000);
+    let anchorModel = AUTO_MODEL_ID;
+
+    const flushHeaders = () => {
+      if (headerSent) return;
+      ttfbMs = Date.now() - start;
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Rabbit-Status', 'streaming');
+      headerSent = true;
+    };
+
+    const writeSSE = (data: unknown) => {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* socket gone */ }
+    };
+
+    const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
+      const stepInputTokens = stepMessages.reduce((sum, m) =>
+        sum + Math.ceil(contentToString(m.content).length / 4), 0);
+      const expectedOutputTokens = step === 'injection' ? 150 : (max_tokens ?? 1000);
+      const stepRoute = routeRequest(
+        stepInputTokens + expectedOutputTokens,
+        undefined,
+        candidate.modelDbId,
+        false,
+        false,
+        skipAllModelsExcept(candidate.modelDbId),
+        { pinMode: true, stickySessionKey: sessionKey || undefined },
+      );
+      const stepStart = Date.now();
+
+      try {
+        const stepMaxTokens = step === 'injection'
+          ? Math.min(max_tokens ?? 150, 150)
+          : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
+        const stepOptions = {
+          temperature,
+          max_tokens: stepMaxTokens,
+          top_p,
+          reasoning_effort,
+          thinking,
+        };
+        const relayTransport = getRelayTransport(stepRoute.transportId);
+        const useProxyTransport = !!relayTransport
+          && (getFeatureSetting('proxy_transport_enabled') as boolean)
+          && isRelayTransportConfigured(stepRoute.transportId);
+
+        const gen = useProxyTransport
+          ? relayTransport!.streamChatCompletion({
+              providerBaseUrl: resolveProviderBaseUrl(stepRoute.provider),
+              apiKey: stepRoute.apiKey,
+              body: { model: stepRoute.modelId, messages: stepMessages, ...stepOptions },
+              sessionId: sessionKey || undefined,
+            })
+          : stepRoute.provider.streamChatCompletion(
+              stepRoute.apiKey, stepMessages, stepRoute.modelId, stepOptions,
+            );
+
+        let accumulated = '';
+
+        for await (const chunk of gen) {
+          const anyChunk = chunk as Record<string, any>;
+
+          // In-band upstream error frame
+          if (anyChunk.error && !anyChunk.choices) {
+            throw new Error(`in-band provider error from ${stepRoute.displayName}: ${anyChunk.error.message ?? JSON.stringify(anyChunk.error).slice(0, 200)}`);
+          }
+
+          if (anyChunk.id) {
+            anchorChunkId = anyChunk.id;
+            anchorModel = anyChunk.model ?? anchorModel;
+            if (anyChunk.created) anchorCreated = anyChunk.created;
+          }
+
+          const choice = anyChunk.choices?.[0];
+          if (!choice) continue;
+
+          const text = typeof choice.delta?.content === 'string' ? choice.delta.content : '';
+          if (text) accumulated += text;
+
+          // Stream anchor (final) step chunks to the client in real-time
+          if (step === 'anchor' && text) {
+            flushHeaders();
+            writeSSE({
+              id: anchorChunkId,
+              object: 'chat.completion.chunk',
+              created: anchorCreated,
+              model: anchorModel,
+              choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+            });
+            publish({ type: 'stream.chunk', id: requestId, text, at: Date.now() });
+          }
+        }
+
+        if (!accumulated.trim()) {
+          throw new Error(`empty Rabbit oscillator stream from ${stepRoute.displayName} (step: ${step})`);
+        }
+
+        // Accounting
+        const promptTokens = stepInputTokens;
+        const completionTokens = Math.ceil(accumulated.length / 4);
+        recordRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId);
+        recordTokens(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, promptTokens + completionTokens);
+        recordSuccess(stepRoute.modelDbId);
+        logRequest(
+          stepRoute.platform, stepRoute.modelId, stepRoute.keyId, 'success',
+          promptTokens, completionTokens, Date.now() - stepStart,
+          null, step === 'anchor' ? ttfbMs : null, pinnedModelId, 0,
+        );
+        clearExhausted(stepRoute.keyId, stepRoute.modelId);
+        return accumulated;
+      } catch (err: any) {
+        const safeError = sanitizeProviderErrorMessage(err.message);
+        logRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, 'error', stepInputTokens, 0, Date.now() - stepStart, safeError, null, pinnedModelId);
+        const tier = classifyError(err);
+        if (tier) recordFailure(stepRoute.modelDbId, tier);
+        throw err;
+      } finally {
+        rabbitStepLatencies[step] = Date.now() - stepStart;
+        stepRoute.release();
+      }
+    };
+
+        // Run the oscillator pipeline
+        const oscillatorSessionKey = sessionKey || requestId;
+        const oscillatorStart = Date.now();
+
+        // Track streaming state for SSE events
+        let currentStreamStep: 'foundation' | 'injection' | 'anchor' | null = null;
+        let stepStarted = false;
+
+        const handleStreamChunk = (chunk: OscillatorStreamChunk) => {
+          const { step, delta, accumulated, stepComplete, final } = chunk;
+          const now = Date.now();
+
+          // Detect step transition
+          if (step !== currentStreamStep) {
+            currentStreamStep = step;
+            stepStarted = false;
+          }
+
+          // Emit stream_start on first chunk of a step
+          if (!stepStarted) {
+            publish({
+              type: 'oscillator.stream_start',
+              sessionKey: oscillatorSessionKey,
+              step,
+              timestamp: now,
+            });
+            stepStarted = true;
+          }
+
+          // Emit stream_delta for each chunk with content
+          if (delta) {
+            publish({
+              type: 'oscillator.stream_delta',
+              sessionKey: oscillatorSessionKey,
+              step,
+              delta,
+              accumulated,
+              timestamp: now,
+            });
+          }
+
+          // Emit stream_step_complete when step finishes
+          if (stepComplete) {
+            publish({
+              type: 'oscillator.stream_step_complete',
+              sessionKey: oscillatorSessionKey,
+              step,
+              fullText: accumulated,
+              timestamp: now,
+            });
+            stepStarted = false; // Reset for next step
+          }
+
+          // Emit stream_complete or stream_error when final result is available
+          if (final) {
+            if (final.status === 'completed') {
+              publish({
+                type: 'oscillator.stream_complete',
+                sessionKey: oscillatorSessionKey,
+                result: final,
+                timestamp: now,
+              });
+            } else {
+              const failedStep = final.failedStep;
+              const stepMap: Record<string, 'foundation' | 'injection' | 'anchor'> = {
+                foundation: 'foundation',
+                injection: 'injection',
+                anchor: 'anchor',
+                validation: 'anchor',
+              };
+              const errorStep = stepMap[failedStep ?? 'foundation'] ?? 'foundation';
+              publish({
+                type: 'oscillator.stream_error',
+                sessionKey: oscillatorSessionKey,
+                step: errorStep,
+                error: final.error ?? 'Unknown error',
+                fallback: final.status === 'foundation_fallback' || final.status === 'single_model_fallback',
+                timestamp: now,
+              });
+            }
+          }
+        };
+
+        const oscillator = await executeOscillator({
+          messages,
+          sessionKey: oscillatorSessionKey,
+          callModel,
+          config: rabbitDecision.config,
+          handoffMode,
+          stream: true,
+                    onChunk: handleStreamChunk,
+                  });
+              const oscillatorTotalLatencyMs = Date.now() - oscillatorStart;
+
+              try {
+                logOscillatorResult({
+                  sessionKey: oscillatorSessionKey,
+                  result: oscillator,
+                  totalLatencyMs: oscillatorTotalLatencyMs,
+                  stepLatencies: rabbitStepLatencies,
+                });
+              } catch (err) {
+                console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
+              }
+
+              // NOTE: For streaming, we publish events via handleStreamChunk (new streaming events)
+              // NOT via publishRabbitOscillatorEvents (old events). Old events are for non-streaming only.
+
+              if (oscillator.status === 'single_model_fallback') {
+      // All foundation attempts failed — throw so the outer retry loop takes over
+      throw new Error(oscillator.error ?? 'All Rabbit streaming foundation models failed');
+    }
+
+    // For "foundation_fallback", the anchor step didn\'t run, so the
+    // foundation text hasn\'t been streamed. Emit it now.
+    const finalText = oscillator.text ?? '';
+    const completionTokens = Math.ceil(finalText.length / 4);
+    const finalModel = oscillator.foundation?.modelId ?? AUTO_MODEL_ID;
+
+    res.setHeader('X-Routed-Via',
+      oscillator.foundation ? `${oscillator.foundation.platform}/${oscillator.foundation.modelId}` : 'rabbit');
+    res.setHeader('X-Rabbit-Status', oscillator.status);
+
+    flushHeaders();
+
+    if (oscillator.status === 'foundation_fallback' && finalText) {
+      // Foundation succeeded but injection/anchor failed — stream the
+      // foundation text as a single chunk.
+      writeSSE({
+        id: anchorChunkId,
+        object: 'chat.completion.chunk',
+        created: anchorCreated,
+        model: finalModel,
+        choices: [{ index: 0, delta: { content: finalText }, finish_reason: null }],
+      });
+    }
+
+    // Terminal finish chunk
+    writeSSE({
+      id: anchorChunkId,
+      object: 'chat.completion.chunk',
+      created: anchorCreated,
+      model: finalModel,
+      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    });
+    res.write('data: [DONE]\n\n');
+    try { res.end(); } catch { /* socket gone */ }
+
+    if (oscillator.foundation) {
+      const finalModelKey = `${oscillator.foundation.platform}:${oscillator.foundation.modelId}`;
+      setStickyModel(messages, oscillator.foundation.modelDbId, sessionIdHeader);
+      if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
+    }
+
+    publish({
+      type: 'request.done',
+      id: requestId,
+      model: finalModel,
+      provider: oscillator.foundation?.platform ?? 'rabbit',
+      keyId: 0,
+      latencyMs: oscillatorTotalLatencyMs,
+      tokens: { in: estimatedInputTokens, out: completionTokens },
+      at: Date.now(),
+    });
+  }
+
+  let rabbitStreamingHeadersSent = false;
+
+  if (shouldTryRabbitStreaming) {
+    try {
+      await handleRabbitStreaming();
+      return;
+    } catch (rabbitStreamErr: any) {
+      console.warn('[Proxy] Rabbit streaming failed, falling back to standard retry loop:', rabbitStreamErr.message);
+      // If headers were already sent, we can't fall back to a new streaming
+      // attempt — the client has already received partial SSE data.
+      rabbitStreamingHeadersSent = res.headersSent;
+      if (rabbitStreamingHeadersSent) {
+        try {
+          const payload = { error: { message: `Rabbit streaming failed: ${sanitizeProviderErrorMessage(rabbitStreamErr.message)}`, type: 'stream_error' } };
+          res.write(`data: ${JSON.stringify(payload)}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        } catch { /* socket gone */ }
+        publish({ type: 'request.error', id: requestId, error: sanitizeProviderErrorMessage(rabbitStreamErr.message), at: Date.now() });
+        return;
+      }
+    }
+  }
 
   if (shouldTryRabbitOscillator) {
     const rabbitStepLatencies: OscillatorStepLatencies = {};
