@@ -9,6 +9,7 @@ import {
   executeOscillator,
   getOscillatorConfig,
   getRabbitCandidates,
+  getRabbitOscillatorDecision,
   getRabbitWeights,
   isComplexReasoningPrompt,
   isRabbitLoadShedActive,
@@ -566,6 +567,75 @@ describe("Rabbit Shake routing helpers", () => {
     expect(isRabbitLoadShedActive(config({ loadShedThreshold: 0 }), 999)).toBe(
       false,
     );
+  });
+
+  it("returns a proxy-facing single-model decision when Rabbit is load-shed", () => {
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
+        promptText: "Analyze this architecture and explain the tradeoffs.",
+        currentConcurrent: 22,
+        config: config({ loadShedThreshold: 21 }),
+      }),
+    ).toMatchObject({
+      mode: "single_model",
+      loadShedActive: true,
+      skipReason: "load_shed",
+    });
+  });
+
+  it("returns oscillator mode only for enabled complex unpinned Rabbit requests under the load threshold", () => {
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
+        promptText: "Analyze this architecture and explain the tradeoffs.",
+        currentConcurrent: 21,
+        config: config({ loadShedThreshold: 21 }),
+      }),
+    ).toMatchObject({
+      mode: "oscillator",
+      loadShedActive: false,
+    });
+  });
+
+  it("explains non-load-shed Rabbit oscillator skips for normal single-model fallback", () => {
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "smartest",
+        promptText: "Analyze this architecture.",
+        config: config(),
+      }).skipReason,
+    ).toBe("non_rabbit_strategy");
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
+        promptText: "Analyze this architecture.",
+        config: config({ enabled: false }),
+      }).skipReason,
+    ).toBe("disabled");
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
+        promptText: "Analyze this architecture.",
+        pinnedModelDbId: 1,
+        config: config(),
+      }).skipReason,
+    ).toBe("pinned_model");
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
+        promptText: "Analyze this architecture.",
+        pinnedModelDbId: 0,
+        config: config(),
+      }).skipReason,
+    ).toBe("pinned_model");
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
+        promptText: "hello",
+        config: config(),
+      }).skipReason,
+    ).toBe("simple_prompt");
   });
 
   it("treats null prompt text as non-complex instead of throwing", () => {

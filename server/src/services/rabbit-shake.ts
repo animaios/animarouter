@@ -55,6 +55,24 @@ export interface RabbitEligibilityInput {
   config?: OscillatorConfig;
 }
 
+export type RabbitOscillatorSkipReason =
+  | "non_rabbit_strategy"
+  | "disabled"
+  | "pinned_model"
+  | "load_shed"
+  | "simple_prompt";
+
+export interface RabbitOscillatorDecision {
+  mode: "oscillator" | "single_model";
+  config: OscillatorConfig;
+  loadShedActive: boolean;
+  skipReason?: RabbitOscillatorSkipReason;
+}
+
+export interface RabbitOscillatorDecisionInput extends RabbitEligibilityInput {
+  currentConcurrent?: number;
+}
+
 export interface MeowDetectionResult {
   detected: boolean;
   reason?:
@@ -245,6 +263,58 @@ export function isRabbitOscillatorEligible(
     !input.loadShedActive &&
     isComplexReasoningPrompt(input.promptText)
   );
+}
+
+export function getRabbitOscillatorDecision(
+  input: RabbitOscillatorDecisionInput,
+): RabbitOscillatorDecision {
+  const config = input.config ?? getOscillatorConfig();
+  const loadShedActive =
+    input.loadShedActive ??
+    isRabbitLoadShedActive(config, input.currentConcurrent);
+
+  if (input.strategy !== "rabbit") {
+    return {
+      mode: "single_model",
+      config,
+      loadShedActive,
+      skipReason: "non_rabbit_strategy",
+    };
+  }
+  if (!config.enabled) {
+    return {
+      mode: "single_model",
+      config,
+      loadShedActive,
+      skipReason: "disabled",
+    };
+  }
+  if (input.pinnedModelDbId != null) {
+    return {
+      mode: "single_model",
+      config,
+      loadShedActive,
+      skipReason: "pinned_model",
+    };
+  }
+  if (loadShedActive) {
+    return {
+      mode: "single_model",
+      config,
+      loadShedActive,
+      skipReason: "load_shed",
+    };
+  }
+  if (!isComplexReasoningPrompt(input.promptText)) {
+    return {
+      mode: "single_model",
+      config,
+      loadShedActive,
+      skipReason: "simple_prompt",
+    };
+  }
+
+  return { mode: "oscillator", config, loadShedActive };
 }
 
 function matchesCustomPattern(text: string, pattern: string): boolean {
