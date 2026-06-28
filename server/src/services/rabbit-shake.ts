@@ -289,7 +289,7 @@ export function getRabbitOscillatorDecision(
       skipReason: "disabled",
     };
   }
-  if (input.pinnedModelDbId) {
+  if (input.pinnedModelDbId != null) {
     return {
       mode: "single_model",
       config,

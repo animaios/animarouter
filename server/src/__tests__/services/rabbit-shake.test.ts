@@ -624,6 +624,14 @@ describe("Rabbit Shake routing helpers", () => {
     expect(
       getRabbitOscillatorDecision({
         strategy: "rabbit",
+        promptText: "Analyze this architecture.",
+        pinnedModelDbId: 0,
+        config: config(),
+      }).skipReason,
+    ).toBe("pinned_model");
+    expect(
+      getRabbitOscillatorDecision({
+        strategy: "rabbit",
         promptText: "hello",
         config: config(),
       }).skipReason,
