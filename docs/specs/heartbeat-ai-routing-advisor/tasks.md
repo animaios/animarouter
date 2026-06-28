@@ -50,7 +50,7 @@
 
 ---
 
-## Phase 8: Context Bridge & Sanitization (Rabbit Shake)
+## Phase 8: Context Bridge & Sanitization (Iterative Refinement)
 
 - [x] **T8.1** Create `server/src/services/context-bridge.ts` with `PROVIDER_SANITIZERS` registry for token patterns (reusing `parseTokenDialect` from `tool-call-rescue.ts`)
 - [x] **T8.2** Implement `sanitizeForCrossProvider(responseText, sourceProvider)` — strips `<|...|>` tokens, structural blocks, maps system markers to plain text
@@ -58,28 +58,28 @@
 - [x] **T8.4** Unit tests for `sanitizeForCrossProvider` — each provider's tokens, structural blocks, generic `<|...|>` fallback
 - [x] **T8.5** Unit tests for `buildContextBridge` — standard handoff, oscillator handoff, no artifact leakage
 
-## Phase 9: Rabbit Routing Strategy
+## Phase 9: Iterative Refinement Routing Strategy
 
-- [x] **T9.1** Add `rabbit` to the routing strategy model (`RoutingStrategy`, validation, API schema) and label it **Rabbit** in the dashboard strategy selector
-- [x] **T9.2** Add `rabbit_enabled` and optional `rabbit_weights` settings. Default Rabbit weights must match the existing Smartest preset: intelligence 45%, reliability 30%, latency 15%, speed 10%
-- [x] **T9.3** Create `server/src/services/rabbit-shake.ts` with `OscillatorConfig` type and Rabbit eligibility helpers
-- [x] **T9.4** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by Rabbit / Smartest-weight score, `top_rank` = rank=1 first, numeric override first)
+- [x] **T9.1** Add `iterative_refinement` to the routing strategy model (`RoutingStrategy`, validation, API schema) and label it **Iterative Refinement** in the dashboard strategy selector
+- [x] **T9.2** Add optional `iterative_refinement_weights` settings. Default Iterative Refinement weights must match the existing Smartest preset: intelligence 45%, reliability 30%, latency 15%, speed 10%
+- [x] **T9.3** Create `server/src/services/iterative-refinement-shake.ts` with `OscillatorConfig` type and Iterative Refinement eligibility helpers
+- [x] **T9.4** Implement `resolveFoundationCandidates(config)` — returns an ordered model-agnostic candidate list by `foundationSelection` (`auto` = eligible models by Iterative Refinement / Smartest-weight score, `top_rank` = rank=1 first, numeric override first)
 - [x] **T9.5** Implement `resolveInjectionModel(config, foundationModelDbId)` — selects a divergent eligible model by `injectionSelection` (`divergent` = diff provider from selected foundation, `top_rank`, `different_tier`) without hardcoded model/provider names
 - [x] **T9.6** Implement `executeOscillator()` — 3-step pipeline: Foundation → Context Bridge → Injection → Context Bridge → Anchor
 - [x] **T9.7** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal Smartest-weight single-model path; Step 2/3 fail → return selected Foundation)
 - [x] **T9.8** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
-- [x] **T9.9** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator; when load-shed, continue with normal Rabbit / Smartest-weight single-model routing
-- [x] **T9.10** Unit tests for Rabbit strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
+- [x] **T9.9** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator; when load-shed, continue with normal Iterative Refinement / Smartest-weight single-model routing
+- [x] **T9.10** Unit tests for Iterative Refinement strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
 - [x] **T9.11** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
 
 ## Phase 10: Oscillator Integration
 
-- [x] **T10.1** Wire Rabbit strategy into `proxy.ts` request handler — when routing strategy is `rabbit`, use Rabbit / Smartest-weight ordering and call `executeOscillator` only for eligible complex reasoning requests
-- [x] **T10.2** Ensure non-eligible Rabbit requests, pinned-model requests, load-shed requests, and all-Step-1-failed requests fall back to normal best-eligible Smartest-weight single-model routing
+- [x] **T10.1** Wire Iterative Refinement strategy into `proxy.ts` request handler — when routing strategy is `iterative_refinement`, use Iterative Refinement / Smartest-weight ordering and call `executeOscillator` only for eligible complex reasoning requests
+- [x] **T10.2** Ensure non-eligible Iterative Refinement requests, pinned-model requests, load-shed requests, and all-Step-1-failed requests fall back to normal best-eligible Smartest-weight single-model routing
 - [x] **T10.3** Add oscillator metrics logging to `logOscillatorResult()` for heartbeat advisor payload
 - [x] **T10.4** Add `oscillator_results` SQLite table + `logOscillatorResult()` persistence
 - [x] **T10.5** Implement `collectOscillatorStats(windowMs)` for advisory payload (§10.2)
-- [x] **T10.6** Add Rabbit / oscillator feature settings (T9 config keys) to DB seed + `feature-settings.ts`
+- [x] **T10.6** Add Iterative Refinement / oscillator feature settings (T9 config keys) to DB seed + `feature-settings.ts`
 - [x] **T10.7** Add oscillator SSE events (`oscillator.started`, `.step_complete`, `.complete`, `.failed`, `.load_shed`, `.meow_detected`)
 
 ## Phase 11: Advisor ↔ Oscillator Feedback Loop
@@ -87,4 +87,4 @@
 - [x] **T11.1** Extend `RoutingAdvice` with `oscillatorHint`, `injectionModel`, `injectionBrevity` fields
 - [x] **T11.2** Update `applyAdvice()` to handle `oscillatorHint` (enable/disable with confidence thresholds) and `injectionModel` suggestions
 - [x] **T11.3** Update advisory system prompt to include oscillator control fields
-- [x] **T11.4** Integration test: advisor recommends Rabbit / oscillator control change → `rabbit_enabled` or oscillator eligibility override applied → verified on next cycle
+- [x] **T11.4** Integration test: advisor recommends Iterative Refinement / oscillator control change → strategy selection or oscillator eligibility override applied → verified on next cycle

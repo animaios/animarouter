@@ -79,24 +79,24 @@ describe('bandit router', () => {
   });
 
   it('strategy persists to and from settings; defaults to balanced', () => {
-    expect(getRoutingStrategy()).toBe('balanced');
-    setRoutingStrategy('smartest');
-    expect(getRoutingStrategy()).toBe('smartest');
-    setRoutingStrategy('rabbit');
-    expect(getRoutingStrategy()).toBe('rabbit');
-    setRoutingStrategy('priority');
-    expect(getRoutingStrategy()).toBe('priority');
-  });
-
-  it('rabbit uses the Smartest weight vector', () => {
-    setRoutingStrategy('rabbit');
-    expect(getRoutingScores().weights).toEqual({
-      reliability: 0.30,
-      speed: 0.10,
-      intelligence: 0.45,
-      latency: 0.15,
+      expect(getRoutingStrategy()).toBe('balanced');
+      setRoutingStrategy('smartest');
+      expect(getRoutingStrategy()).toBe('smartest');
+      setRoutingStrategy('iterative_refinement');
+      expect(getRoutingStrategy()).toBe('iterative_refinement');
+      setRoutingStrategy('priority');
+      expect(getRoutingStrategy()).toBe('priority');
     });
-  });
+
+    it('iterative_refinement uses the Smartest weight vector', () => {
+      setRoutingStrategy('iterative_refinement');
+      expect(getRoutingScores().weights).toEqual({
+        reliability: 0.30,
+        speed: 0.10,
+        intelligence: 0.45,
+        latency: 0.15,
+      });
+    });
 
   it('priority strategy follows the manual chain order deterministically', () => {
     addModel({ platform: 'google', modelId: 'a', name: 'A', intelligenceRank: 9, sizeLabel: 'Small', budget: '~10M', priority: 1 });

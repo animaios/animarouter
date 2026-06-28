@@ -218,103 +218,111 @@ export const MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT = '2026-06-27T00:00:00.000Z';
 export const MANUAL_BENCHMARK_OVERRIDES: BenchmarkRow[] = [
   ['%glm-5-1%', 100],
   ['%kimi-k2-6%', 93],
-  ['%nemotron-3-ultra%', 88],
+  ['%nemotron-3-ultra%', 89],
   ['%minimax-m2-7%', 85],
-  ['%deepseek-v4-flash%', 84],
-  ['%minimax-m3%', 78],
-  ['%step-3-7-flash%', 72],
+  ['%deepseek-v4-flash%', 62],
+  ['%minimax-m3%', 98],
+  ['%opencode/mimo-v2.5-free%', 74],
+  ['%laguna-m-1%', 74],
+  ['%step-3-7-flash%', 65],
 ];
+type BenchmarkRow = [string, number]; // [model_id_pattern, aa_index_score]
 
-// ─── BENCHMARK SCORE TABLE ──────────────────────────────────────────────────
+// ─── BENCHMARK SCORE TABLE ───────────────────────────────────────────────
 // Patterns are matched via canonical_model_key lookup.
 // Order matters for overlapping patterns — more specific patterns should
 // come first (e.g. 'gemini-3.1-pro%' before 'gemini-3%').
 const BENCHMARK_SCORES: BenchmarkRow[] = [
-  // ── Frontier (AA ≥ 45) ──
-  ['%nemotron-3-ultra%', 88],
-  ['%kimi-k2.6%', 93],
-  ['%kimi-k2.5%', 54],
-  ['%kimi-k2-thinking%', 55],
-  ['%deepseek-v4-pro%', 60],
-  ['%deepseek-v4-flash%', 84],
+  // ── Frontier (Anchor Tier: Raw Reasoning & Heavy Agents) ──
   ['%glm-5.1%', 100],
-  ['%glm-5%', 48],
+  ['%minimax-m3%', 98],
+  ['%kimi-k2.6%', 93],
+  ['%moonshotai/kimi-k2.6%', 93],
+  ['%nemotron-3-ultra%', 88],
   ['%minimax-m2.7%', 85],
-  ['%minimax-m3%', 78],
-  ['%step-3.7-flash%', 72],
+  ['%deepseek-v4-pro%', 60],
   ['%qwen3.6-max%', 57],
   ['%qwen-3.6-max%', 57],
-  ['%qwen3.6-plus%', 42],
+  ['%gemini-3.1-pro%', 60],
+  ['%gpt-5%', 55],
+  ['%kimi-k2-thinking%', 55],
+  ['%kimi-k2.5%', 54],
+  ['%moonshotai/kimi-k2.5%', 54],
+  ['%mimo-v2.5%', 54],
+  ['%gpt-4.1%', 52],
+  ['%glm-5%', 48],
+  ['%gemini-3-flash%', 48],
   ['%qwen3-coder-next%', 46],
   ['%qwen3-coder%480b%', 44],
-  ['%gemini-3.1-pro%', 60],
-  ['%gemini-3.5-flash%', 55],
-  ['%gemini-3-flash%', 48],
-  ['%gpt-4.1%', 52],
-  ['%gpt-5%', 55],
+  ['%qwen3.6-plus%', 42],
 
-  // ── Large (AA 26–44) ──
+  // ── High-Efficiency / Flash Tier (Fast Actions & Low Latency Agents) ──
+  ['%opencode/mimo-v2.5-free%', 74],
+  ['%laguna-m-1%', 74],
+  ['%step-3.7-flash%', 65],
+  ['%deepseek-v4-flash%', 62],
+  ['%gemini-3.5-flash%', 55],
+
+  // ── Large (Legacy / Specialty Contexts) ──
   ['%minimax-m2.5%', 40],
   ['%qwen3-next-80b%', 44],
   ['%qwen-3-235b%', 42],
   ['%qwen3-235b%', 42],
+  ['%glm-4.7%', 42],
+  ['%gemma-4-31b%', 39],
+  ['%gemma4:31b%', 39],
+  ['%glm-4.7-flash%', 39],
   ['%gpt-oss-120b%', 38],
   ['%gpt-oss:120b%', 38],
-  ['%glm-4.7%', 42],
-  ['%glm-4.7-flash%', 39],
   ['%nemotron-3-super%', 36],
   ['%nemotron-3-120b%', 36],
   ['%gemini-2.5-pro%', 35],
-  ['%deepseek-v3.2%', 32],
-  ['%deepseek-v3.1%', 28],
-  ['%trinity-large%', 32],
   ['%mistral-medium%', 35],
-  ['%magistral-medium%', 33],
-  ['%gemma-4-31b%', 39],
-  ['%gemma4:31b%', 39],
-  ['%gemma-4-26b%', 31],
   ['%gemini-3.1-flash-lite%', 34],
+  ['%magistral-medium%', 33],
+  ['%deepseek-v3.2%', 32],
+  ['%trinity-large%', 32],
+  ['%gemma-4-26b%', 31],
   ['%step-3.5-flash%', 30],
   ['%command-a-03-2025%', 30],
+  ['%deepseek-v3.1%', 28],
   ['%command-r-plus%', 28],
 
-  // ── Medium (AA 13–25) ──
+  // ── Medium ──
   ['%qwen3-30b%', 25],
   ['%qwen3-32b%', 25],
+  ['%glm-4.6v-flash%', 24],
   ['%mistral-large%', 23],
+  ['%glm-4.5-air%', 23],
   ['%gpt-oss-20b%', 22],
   ['%gpt-oss:20b%', 22],
-  ['%gpt-oss-safeguard-20b%', 18],
-  ['%glm-4.5-air%', 23],
-  ['%glm-4.5-flash%', 20],
-  ['%glm-4.6v-flash%', 24],
   ['%devstral%', 22],
-  ['%deepseek-r1-distill%', 17],
+  ['%gemini-2.5-flash%', 21],
+  ['%glm-4.5-flash%', 20],
+  ['%gpt-oss-safeguard-20b%', 18],
   ['%llama-4-maverick%', 18],
+  ['%north-mini-code%', 18],
+  ['%deepseek-r1-distill%', 17],
+  ['%gemini-2.5-flash-lite%', 17],
+  ['%gpt-4o%', 17],
+  ['%nemotron-nano-12b-v2-vl%', 16],
+  ['%nemotron-3-nano%', 15],
   ['%llama-4-scout%', 14],
   ['%llama-3.3-70b%', 14],
   ['%llama-3.1-70b%', 14],
   ['%llama-3.3-70b-instruct-fp8-fast%', 14],
-  ['%gemini-2.5-flash%', 21],
-  ['%gemini-2.5-flash-lite%', 17],
-  ['%gpt-4o%', 17],
-  ['%nemotron-3-nano%', 15],
   ['%nemotron-nano-9b%', 13],
-  ['%nemotron-nano-12b-v2-vl%', 16],
-  ['%north-mini-code%', 18],
   ['%command-r-08-2024%', 7],
-  ['%moonshotai/kimi-k2.6%', 93],
-  ['%moonshotai/kimi-k2.5%', 54],
 
-  // ── Small (AA ≤ 12) ──
+  // ── Small ──
   ['%llama-3.1-8b%', 9],
   ['%llama3.1-8b%', 9],
   ['%meta-llama-3.1-8b%', 9],
   ['%gemma-3-12b%', 9],
   ['%ministral-8b%', 8],
+  ['%codestral%', 8],
   ['%granite-4.0-h-micro%', 6],
   ['%lfm-2.5-1.2b%', 3],
-  ['%codestral%', 8],
 
   // ── Stealth / No Score ──
   // Cogito, Owl Alpha, Poolside Laguna, big-pickle, dolphin-mistral,
@@ -322,14 +330,14 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
   // They stay NULL (benchmark_score = 0 treated as "unscored").
 ];
 
-// ─── TIER DERIVATION ────────────────────────────────────────────────────────
+// ─── TIER DERIVATION ────────────────────────────────────────────────────────────
 // Map an AA Intelligence Index score to the same tier bands the router uses.
 // This lets auto-synced models land in the right tier without manual curation.
 export const TIER_BANDS = {
-  frontier: 45,
-  large: 26,
-  medium: 13,
-  // small = everything below 13
+  frontier: 42,
+  large: 28,
+  medium: 7,
+  // small = everything below 7
 } as const;
 
 export function scoreToTier(score: number): string {

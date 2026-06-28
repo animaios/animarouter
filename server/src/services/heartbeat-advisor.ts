@@ -7,7 +7,7 @@ import type {
 import { getDb, getSetting, setSetting } from "../db/index.js";
 import { getAllStatesView, getBoost, setBoost } from "./degradation.js";
 import { getFeatureSetting } from "./feature-settings.js";
-import { collectOscillatorStats } from "./rabbit-shake.js";
+import { collectOscillatorStats } from "./iterative-refinement-shake.js";
 import {
   getProviderDailyRequestCap,
   providerDailyRequestCount,
@@ -307,7 +307,7 @@ export function buildAdvisoryMessages(
       {
         role: "system",
         content:
-          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint only for Rabbit oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
+                  'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint for Iterative Refinement oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
       },
       {
         role: "user",
@@ -396,26 +396,21 @@ export function applyAdvice(params: ApplyAdviceParams): AdviceResult[] {
   }
 
   if (advice.oscillatorHint === "enable") {
-    const rabbitEnabled = getFeatureSetting("rabbit_enabled") as boolean;
-    if (!rabbitEnabled && advice.confidence >= 7) {
-      setSetting("rabbit_enabled", "true");
+      // Iterative Refinement is enabled by selecting the strategy; no separate toggle needed
+      // The oscillator settings are already configured via iterative_refinement_weights and oscillator_* settings
       results.push({
         applied: "oscillator_toggled",
         modelDbId: params.modelDbId,
         magnitude: 1,
       });
-    }
-  } else if (advice.oscillatorHint === "disable") {
-    const rabbitEnabled = getFeatureSetting("rabbit_enabled") as boolean;
-    if (rabbitEnabled && advice.confidence >= 4) {
-      setSetting("rabbit_enabled", "false");
+    } else if (advice.oscillatorHint === "disable") {
+      // Cannot disable oscillator without switching strategy; log as no_opinion
       results.push({
-        applied: "oscillator_toggled",
+        applied: "no_opinion",
         modelDbId: params.modelDbId,
-        magnitude: -1,
+        magnitude: 0,
       });
     }
-  }
 
   if (advice.confidence >= 6) {
     const injectionModelDbId = advice.injectionModel

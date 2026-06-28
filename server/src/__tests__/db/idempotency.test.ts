@@ -447,14 +447,16 @@ describe('Migration idempotency', () => {
     const db = initDb(':memory:');
 
     const expected: Array<{ label: string; score: number; modelKeys: string[]; groupKeys: string[] }> = [
-      { label: 'glm-5-1', score: 100, modelKeys: ['glm-5-1', 'glm-5-1-fp8'], groupKeys: ['glm-5-1', 'glm-5-1-fp8'] },
-      { label: 'kimi-k2-6', score: 93, modelKeys: ['@cf/moonshotai/kimi-k2-6', 'kimi-k2-6', 'kimi-k2-6:free'], groupKeys: ['@cf/moonshotai/kimi-k2-6', 'kimi-k2-6', 'kimi-k2-6:free'] },
-      { label: 'nemotron-3-ultra', score: 88, modelKeys: ['nemotron-3-ultra-550b-a55b:free', 'nemotron-3-ultra-free'], groupKeys: ['nemotron-3-ultra-550b-a55b', 'nemotron-3-ultra-free'] },
-      { label: 'minimax-m2-7', score: 85, modelKeys: ['minimax-m2-7'], groupKeys: ['minimax-m2-7'] },
-      { label: 'deepseek-v4-flash', score: 84, modelKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free'], groupKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek/deepseek-v4-flash'] },
-      { label: 'minimax-m3', score: 78, modelKeys: ['minimax-m3-free'], groupKeys: ['minimax-m3'] },
-      { label: 'step-3-7-flash', score: 72, modelKeys: ['step-3-7-flash:free'], groupKeys: ['step-3-7-flash:free'] },
-    ];
+              { label: 'glm-5-1', score: 100, modelKeys: ['glm-5-1', 'glm-5-1-fp8'], groupKeys: ['glm-5-1', 'glm-5-1-fp8'] },
+              { label: 'kimi-k2-6', score: 93, modelKeys: ['@cf/moonshotai/kimi-k2-6', 'kimi-k2-6', 'kimi-k2-6:free'], groupKeys: ['@cf/moonshotai/kimi-k2-6', 'kimi-k2-6', 'kimi-k2-6:free'] },
+              { label: 'nemotron-3-ultra', score: 89, modelKeys: ['nemotron-3-ultra-550b-a55b:free', 'nemotron-3-ultra-free'], groupKeys: ['nemotron-3-ultra-550b-a55b', 'nemotron-3-ultra-free'] },
+              { label: 'minimax-m2-7', score: 85, modelKeys: ['minimax-m2-7'], groupKeys: ['minimax-m2-7'] },
+              { label: 'deepseek-v4-flash', score: 62, modelKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free'], groupKeys: ['deepseek-v4-flash', 'deepseek-v4-flash-free', 'deepseek/deepseek-v4-flash'] },
+              { label: 'minimax-m3', score: 98, modelKeys: ['minimax-m3-free'], groupKeys: ['minimax-m3'] },
+              { label: 'mimo-v2.5-free', score: 74, modelKeys: ['mimo-v2-5-free'], groupKeys: ['mimo-v2-5-free'] },
+              { label: 'laguna-m-1', score: 74, modelKeys: ['laguna-m-1:free'], groupKeys: ['laguna-m-1:free'] },
+              { label: 'step-3-7-flash', score: 65, modelKeys: ['step-3-7-flash:free'], groupKeys: ['step-3-7-flash:free'] },
+            ];
 
     for (const { label, score, modelKeys, groupKeys } of expected) {
       const modelPlaceholders = modelKeys.map(() => '?').join(', ');

@@ -31,7 +31,7 @@ export interface RoutingWeights {
 // Strategy is either the legacy manual chain ('priority'), one of the bandit
 // presets, or 'custom' (a user-tuned weight vector persisted in settings — see
 // router.ts). Each is just a weight vector — the engine is identical.
-export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'rabbit' | 'fastest' | 'reliable' | 'custom';
+export type RoutingStrategy = 'priority' | 'balanced' | 'smartest' | 'iterative_refinement' | 'fastest' | 'reliable' | 'custom';
 
 export const BANDIT_PRESETS: Record<Exclude<RoutingStrategy, 'priority' | 'custom'>, RoutingWeights> = {
   // Reliability leads; speed, intelligence, latency split the rest evenly.
@@ -39,9 +39,9 @@ export const BANDIT_PRESETS: Record<Exclude<RoutingStrategy, 'priority' | 'custo
   // Intelligence leads; latency gets a small edge over raw speed because smart
   // models tend to have higher TTFB and shouldn't be entirely penalized.
   smartest: { reliability: 0.30, speed: 0.10, intelligence: 0.45, latency: 0.15 },
-  // Rabbit starts as the Smartest-weighted routing strategy. The oscillator
-  // layer can build on this strategy without changing single-model fallback.
-  rabbit: { reliability: 0.30, speed: 0.10, intelligence: 0.45, latency: 0.15 },
+  // Iterative Refinement starts as the Smartest-weighted routing strategy. The oscillator
+    // layer can build on this strategy without changing single-model fallback.
+    iterative_refinement: { reliability: 0.30, speed: 0.10, intelligence: 0.45, latency: 0.15 },
   // Both throughput (speed) and responsiveness (latency) are heavily weighted.
   fastest: { reliability: 0.25, speed: 0.30, intelligence: 0.10, latency: 0.35 },
   // Reliability dominates; the remaining 40% splits evenly among the other three.

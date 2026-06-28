@@ -1597,82 +1597,75 @@ describe("Provider Health Heartbeat", () => {
       });
     });
 
-    it("applies Rabbit oscillator advice and preserves it on the next cycle", async () => {
-      setupProvider();
-      const db = getDb();
-      db.prepare(`
-        INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
-        VALUES ('other', 'injection-model', 'Injection Model', 2, 2, 1)
-      `).run();
-      const injectionModelDbId = (
-        db
-          .prepare(
-            "SELECT id FROM models WHERE platform = 'other' AND model_id = 'injection-model'",
-          )
-          .get() as { id: number }
-      ).id;
-      setSetting("heartbeat_advisor_enabled", "true");
-      setSetting("heartbeat_advisor_max_output_tokens", "8");
-      setSetting("rabbit_enabled", "false");
-      chatCompletion
-        .mockResolvedValueOnce({
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content:
-                  '{"confidence":8,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"enable","injectionModel":"other/injection-model","injectionBrevity":"shorter"}',
-              },
-            },
-          ],
-          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
-        })
-        .mockResolvedValueOnce({
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content:
-                  '{"confidence":0,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"no_opinion"}',
-              },
-            },
-          ],
-          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+    it("applies Iterative Refinement oscillator advice and preserves it on the next cycle", async () => {
+          setupProvider();
+          const db = getDb();
+          db.prepare(`
+            INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
+            VALUES ('other', 'injection-model', 'Injection Model', 2, 2, 1)
+          `).run();
+          const injectionModelDbId = (
+            db
+              .prepare(
+                "SELECT id FROM models WHERE platform = 'other' AND model_id = 'injection-model'",
+              )
+              .get() as { id: number }
+          ).id;
+          setSetting("heartbeat_advisor_enabled", "true");
+          setSetting("heartbeat_advisor_max_output_tokens", "8");
+          setRoutingStrategy("iterative_refinement");
+          chatCompletion
+            .mockResolvedValueOnce({
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content:
+                      '{"confidence":8,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"enable","injectionModel":"other/injection-model","injectionBrevity":"shorter"}',
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+            })
+            .mockResolvedValueOnce({
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content:
+                      '{"confidence":0,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"no_opinion"}',
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+            });
+
+          await pokeAllKeys();
+
+          // Strategy is iterative_refinement, so oscillatorHint:enable doesn't toggle a setting
+          // but injection model suggestions still apply
+          expect(getSetting("oscillator_injection_selection")).toBe(
+            String(injectionModelDbId),
+          );
+          expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+          expect(
+            publishedEvents.some(
+              (e) =>
+                e.type === "heartbeat.advisor_applied" &&
+                e.applied === "injection_adjusted" &&
+                e.magnitude === injectionModelDbId,
+            ),
+          ).toBe(true);
+
+          await pokeAllKeys();
+
+          expect(chatCompletion).toHaveBeenCalledTimes(2);
+          expect(getRoutingStrategy()).toBe("iterative_refinement");
+          expect(getSetting("oscillator_injection_selection")).toBe(
+            String(injectionModelDbId),
+          );
+          expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
         });
-
-      await pokeAllKeys();
-
-      expect(getSetting("rabbit_enabled")).toBe("true");
-      expect(getSetting("oscillator_injection_selection")).toBe(
-        String(injectionModelDbId),
-      );
-      expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
-      expect(
-        publishedEvents.some(
-          (e) =>
-            e.type === "heartbeat.advisor_applied" &&
-            e.applied === "oscillator_toggled" &&
-            e.magnitude === 1,
-        ),
-      ).toBe(true);
-      expect(
-        publishedEvents.some(
-          (e) =>
-            e.type === "heartbeat.advisor_applied" &&
-            e.applied === "injection_adjusted" &&
-            e.magnitude === injectionModelDbId,
-        ),
-      ).toBe(true);
-
-      await pokeAllKeys();
-
-      expect(chatCompletion).toHaveBeenCalledTimes(2);
-      expect(getSetting("rabbit_enabled")).toBe("true");
-      expect(getSetting("oscillator_injection_selection")).toBe(
-        String(injectionModelDbId),
-      );
-      expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
-    });
 
     it("keeps the legacy hi ping and emits no advisor events when disabled", async () => {
       setupProvider();

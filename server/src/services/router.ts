@@ -275,13 +275,14 @@ export function getAllPenalties(): Array<{
 }
 
 // ── Routing strategy (persisted) ────────────────────────────────────────────
+// —— Routing strategy (persisted) ———————————————————————————————————————————
 const STRATEGY_KEY = "routing_strategy";
 const CUSTOM_WEIGHTS_KEY = "routing_custom_weights";
 const VALID_STRATEGIES: RoutingStrategy[] = [
   "priority",
   "balanced",
   "smartest",
-  "rabbit",
+  "iterative_refinement",
   "fastest",
   "reliable",
   "custom",

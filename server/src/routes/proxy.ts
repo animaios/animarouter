@@ -21,13 +21,13 @@ import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../service
 import { getRelayTransport, isRelayTransportConfigured, computeWorkerIndex } from '../services/proxy-transport.js';
 import {
   executeOscillator,
-  getRabbitOscillatorDecision,
+  getIterativeRefinementOscillatorDecision,
   logOscillatorResult,
   type ExecuteOscillatorResult,
   type OscillatorModelCall,
   type OscillatorStepLatencies,
   type OscillatorStreamChunk,
-} from '../services/rabbit-shake.js';
+} from '../services/iterative-refinement-shake.js';
 import type { BaseProvider } from '../providers/base.js';
 
 
@@ -124,7 +124,7 @@ function getSessionKeyWithApiKey(apiKey: string | undefined, messages: ChatMessa
   return `${apiKey}:${sessionKey}`;
 }
 
-function promptTextForRabbit(messages: ChatMessage[]): string {
+function promptTextForIterativeRefinement(messages: ChatMessage[]): string {
   return messages
     .filter(m => m.role === 'user')
     .map(m => contentToString(m.content))
@@ -139,19 +139,19 @@ function oscillatorFailedStepNumber(step: ExecuteOscillatorResult['failedStep'])
   return undefined;
 }
 
-function rabbitModelKey(candidate: ExecuteOscillatorResult['foundation']): string {
-  return candidate ? `${candidate.platform}/${candidate.modelId}` : 'rabbit';
+function iterativeRefinementModelKey(candidate: ExecuteOscillatorResult['foundation']): string {
+  return candidate ? `${candidate.platform}/${candidate.modelId}` : 'iterative_refinement';
 }
 
-function publishRabbitOscillatorEvents(params: {
+function publishIterativeRefinementOscillatorEvents(params: {
   sessionKey: string;
   result: ExecuteOscillatorResult;
   totalLatencyMs: number;
   stepLatencies: OscillatorStepLatencies;
 }): void {
   const { sessionKey, result, totalLatencyMs, stepLatencies } = params;
-  const foundationModel = rabbitModelKey(result.foundation);
-  const injectionModel = rabbitModelKey(result.injection);
+  const foundationModel = iterativeRefinementModelKey(result.foundation);
+  const injectionModel = iterativeRefinementModelKey(result.injection);
   const step1Succeeded = result.status !== 'single_model_fallback';
   const step2Succeeded = result.status === 'completed' || (result.status === 'foundation_fallback' && result.failedStep !== 'injection');
   const step3Succeeded = result.status === 'completed' || (result.status === 'foundation_fallback' && result.failedStep === 'validation');
@@ -970,34 +970,34 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const providerFailures = new Map<string, Set<number>>();
   const fastFired = new Set<string>();
 
-  const rabbitConcurrentRequests = getProviderInFlightTotal();
-  const rabbitDecision = getRabbitOscillatorDecision({
+  const iterativeRefinementConcurrentRequests = getProviderInFlightTotal();
+  const iterativeRefinementDecision = getIterativeRefinementOscillatorDecision({
     strategy: getRoutingStrategy(),
-    promptText: promptTextForRabbit(messages),
+    promptText: promptTextForIterativeRefinement(messages),
     pinnedModelDbId: isAutoRouted ? undefined : (strictPinnedModelDbId ?? preferredModel ?? 0),
-    currentConcurrent: rabbitConcurrentRequests,
+    currentConcurrent: iterativeRefinementConcurrentRequests,
   });
-  if (rabbitDecision.skipReason === 'load_shed') {
+  if (iterativeRefinementDecision.skipReason === 'load_shed') {
     publish({
       type: 'oscillator.load_shed',
-      concurrentRequests: rabbitConcurrentRequests,
-      threshold: rabbitDecision.config.loadShedThreshold,
+      concurrentRequests: iterativeRefinementConcurrentRequests,
+      threshold: iterativeRefinementDecision.config.loadShedThreshold,
       at: Date.now(),
     });
   }
-  const shouldTryRabbitOscillator =
-    rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
-  const shouldTryRabbitStreaming =
-    rabbitDecision.mode === 'oscillator' && stream && !hasImage && !wantsTools && !isPinned;
+  const shouldTryIterativeRefinementOscillator =
+    iterativeRefinementDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
+  const shouldTryIterativeRefinementStreaming =
+    iterativeRefinementDecision.mode === 'oscillator' && stream && !hasImage && !wantsTools && !isPinned;
 
-  // ── Rabbit streaming oscillator ────────────────────────────────────
+  // ── Iterative Refinement streaming oscillator ────────────────────────────────────
   // Streams the anchor (final) step to the client in real-time via SSE.
   // Foundation and injection steps consume their streams silently (the
   // oscillator needs full text to build context bridges). If the
   // oscillator fails altogether the error propagates to the outer retry
   // loop as a normal streaming fallback.
-  async function handleRabbitStreaming(): Promise<void> {
-    const rabbitStepLatencies: OscillatorStepLatencies = {};
+  async function handleIterativeRefinementStreaming(): Promise<void> {
+    const iterativeRefinementStepLatencies: OscillatorStepLatencies = {};
     let headerSent = false;
     let ttfbMs: number | null = null;
     let anchorChunkId = `chatcmpl-${Date.now()}`;
@@ -1010,7 +1010,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Rabbit-Status', 'streaming');
+      res.setHeader('X-Iterative-Refinement-Status', 'streaming');
       headerSent = true;
     };
 
@@ -1097,7 +1097,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         }
 
         if (!accumulated.trim()) {
-          throw new Error(`empty Rabbit oscillator stream from ${stepRoute.displayName} (step: ${step})`);
+          throw new Error(`empty Iterative Refinement oscillator stream from ${stepRoute.displayName} (step: ${step})`);
         }
 
         // Accounting
@@ -1120,7 +1120,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         if (tier) recordFailure(stepRoute.modelDbId, tier);
         throw err;
       } finally {
-        rabbitStepLatencies[step] = Date.now() - stepStart;
+        iterativeRefinementStepLatencies[step] = Date.now() - stepStart;
         stepRoute.release();
       }
     };
@@ -1212,7 +1212,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           messages,
           sessionKey: oscillatorSessionKey,
           callModel,
-          config: rabbitDecision.config,
+          config: iterativeRefinementDecision.config,
           handoffMode,
           stream: true,
                     onChunk: handleStreamChunk,
@@ -1224,18 +1224,18 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
                   sessionKey: oscillatorSessionKey,
                   result: oscillator,
                   totalLatencyMs: oscillatorTotalLatencyMs,
-                  stepLatencies: rabbitStepLatencies,
+                  stepLatencies: iterativeRefinementStepLatencies,
                 });
               } catch (err) {
-                console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
+                console.warn('[Proxy] Failed to log Iterative Refinement oscillator result:', err);
               }
 
               // NOTE: For streaming, we publish events via handleStreamChunk (new streaming events)
-              // NOT via publishRabbitOscillatorEvents (old events). Old events are for non-streaming only.
+              // NOT via publishIterativeRefinementOscillatorEvents (old events). Old events are for non-streaming only.
 
               if (oscillator.status === 'single_model_fallback') {
       // All foundation attempts failed — throw so the outer retry loop takes over
-      throw new Error(oscillator.error ?? 'All Rabbit streaming foundation models failed');
+      throw new Error(oscillator.error ?? 'All Iterative Refinement streaming foundation models failed');
     }
 
     // For "foundation_fallback", the anchor step didn\'t run, so the
@@ -1245,8 +1245,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     const finalModel = oscillator.foundation?.modelId ?? AUTO_MODEL_ID;
 
     res.setHeader('X-Routed-Via',
-      oscillator.foundation ? `${oscillator.foundation.platform}/${oscillator.foundation.modelId}` : 'rabbit');
-    res.setHeader('X-Rabbit-Status', oscillator.status);
+      oscillator.foundation ? `${oscillator.foundation.platform}/${oscillator.foundation.modelId}` : 'iterative_refinement');
+    res.setHeader('X-Iterative-Refinement-Status', oscillator.status);
 
     flushHeaders();
 
@@ -1283,7 +1283,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       type: 'request.done',
       id: requestId,
       model: finalModel,
-      provider: oscillator.foundation?.platform ?? 'rabbit',
+      provider: oscillator.foundation?.platform ?? 'iterative_refinement',
       keyId: 0,
       latencyMs: oscillatorTotalLatencyMs,
       tokens: { in: estimatedInputTokens, out: completionTokens },
@@ -1291,32 +1291,32 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     });
   }
 
-  let rabbitStreamingHeadersSent = false;
+  let iterativeRefinementStreamingHeadersSent = false;
 
-  if (shouldTryRabbitStreaming) {
+  if (shouldTryIterativeRefinementStreaming) {
     try {
-      await handleRabbitStreaming();
+      await handleIterativeRefinementStreaming();
       return;
-    } catch (rabbitStreamErr: any) {
-      console.warn('[Proxy] Rabbit streaming failed, falling back to standard retry loop:', rabbitStreamErr.message);
+    } catch (iterativeRefinementStreamErr: any) {
+      console.warn('[Proxy] Iterative Refinement streaming failed, falling back to standard retry loop:', iterativeRefinementStreamErr.message);
       // If headers were already sent, we can't fall back to a new streaming
       // attempt — the client has already received partial SSE data.
-      rabbitStreamingHeadersSent = res.headersSent;
-      if (rabbitStreamingHeadersSent) {
+      iterativeRefinementStreamingHeadersSent = res.headersSent;
+      if (iterativeRefinementStreamingHeadersSent) {
         try {
-          const payload = { error: { message: `Rabbit streaming failed: ${sanitizeProviderErrorMessage(rabbitStreamErr.message)}`, type: 'stream_error' } };
+          const payload = { error: { message: `Iterative Refinement streaming failed: ${sanitizeProviderErrorMessage(iterativeRefinementStreamErr.message)}`, type: 'stream_error' } };
           res.write(`data: ${JSON.stringify(payload)}\n\n`);
           res.write('data: [DONE]\n\n');
           res.end();
         } catch { /* socket gone */ }
-        publish({ type: 'request.error', id: requestId, error: sanitizeProviderErrorMessage(rabbitStreamErr.message), at: Date.now() });
+        publish({ type: 'request.error', id: requestId, error: sanitizeProviderErrorMessage(iterativeRefinementStreamErr.message), at: Date.now() });
         return;
       }
     }
   }
 
-  if (shouldTryRabbitOscillator) {
-    const rabbitStepLatencies: OscillatorStepLatencies = {};
+  if (shouldTryIterativeRefinementOscillator) {
+    const iterativeRefinementStepLatencies: OscillatorStepLatencies = {};
     const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
       const stepInputTokens = stepMessages.reduce((sum, message) => {
         const text = contentToString(message.content);
@@ -1365,7 +1365,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
         const respMsg = result.choices?.[0]?.message;
         const text = contentToString(respMsg?.content ?? '').trim();
-        if (!text) throw new Error(`empty Rabbit oscillator completion from ${stepRoute.displayName}`);
+        if (!text) throw new Error(`empty Iterative Refinement oscillator completion from ${stepRoute.displayName}`);
 
         const promptTokens = result.usage?.prompt_tokens ?? stepInputTokens;
         const completionTokens = result.usage?.completion_tokens ?? Math.ceil(text.length / 4);
@@ -1395,7 +1395,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         if (tier) recordFailure(stepRoute.modelDbId, tier);
         throw err;
       } finally {
-        rabbitStepLatencies[step] = Date.now() - stepStart;
+        iterativeRefinementStepLatencies[step] = Date.now() - stepStart;
         stepRoute.release();
       }
     };
@@ -1406,7 +1406,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       messages,
       sessionKey: oscillatorSessionKey,
       callModel,
-      config: rabbitDecision.config,
+      config: iterativeRefinementDecision.config,
       handoffMode,
     });
     const oscillatorTotalLatencyMs = Date.now() - oscillatorStart;
@@ -1415,16 +1415,16 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         sessionKey: oscillatorSessionKey,
         result: oscillator,
         totalLatencyMs: oscillatorTotalLatencyMs,
-        stepLatencies: rabbitStepLatencies,
+        stepLatencies: iterativeRefinementStepLatencies,
       });
     } catch (err) {
-      console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
+      console.warn('[Proxy] Failed to log Iterative Refinement oscillator result:', err);
     }
-    publishRabbitOscillatorEvents({
+    publishIterativeRefinementOscillatorEvents({
       sessionKey: oscillatorSessionKey,
       result: oscillator,
       totalLatencyMs: oscillatorTotalLatencyMs,
-      stepLatencies: rabbitStepLatencies,
+      stepLatencies: iterativeRefinementStepLatencies,
     });
 
     if (oscillator.status !== 'single_model_fallback' && oscillator.text) {
@@ -1452,15 +1452,15 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
         res.setHeader('X-Routed-Via', `${oscillator.foundation.platform}/${oscillator.foundation.modelId}`);
       } else {
-        res.setHeader('X-Routed-Via', 'rabbit');
+        res.setHeader('X-Routed-Via', 'iterative_refinement');
       }
-      res.setHeader('X-Rabbit-Status', oscillator.status);
+      res.setHeader('X-Iterative-Refinement-Status', oscillator.status);
       res.json(response);
       publish({
         type: 'request.done',
         id: requestId,
         model: oscillator.foundation?.modelId ?? AUTO_MODEL_ID,
-        provider: oscillator.foundation?.platform ?? 'rabbit',
+        provider: oscillator.foundation?.platform ?? 'iterative_refinement',
         keyId: 0,
         latencyMs: Date.now() - start,
         tokens: { in: estimatedInputTokens, out: completionTokens },

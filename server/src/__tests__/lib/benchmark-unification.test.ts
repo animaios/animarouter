@@ -134,29 +134,29 @@ describe('validateComposite', () => {
   });
 });
 
-// ── scoreToTier ─────────────────────────────────────────────────────────────
+// ─── scoreToTier ─────────────────────────────────────────────────────────────
 describe('scoreToTier', () => {
-  it('returns Frontier for scores >= 45 (R8.2, D3 tier bands)', () => {
-    expect(scoreToTier(45)).toBe('Frontier');
+  it('returns Frontier for scores >= 42 (updated tier bands for new score scale)', () => {
+    expect(scoreToTier(42)).toBe('Frontier');
     expect(scoreToTier(60)).toBe('Frontier');
     expect(scoreToTier(100)).toBe('Frontier');
   });
 
-  it('returns Large for scores 26-44', () => {
-    expect(scoreToTier(26)).toBe('Large');
-    expect(scoreToTier(44)).toBe('Large');
+  it('returns Large for scores 28-41', () => {
+    expect(scoreToTier(28)).toBe('Large');
+    expect(scoreToTier(41)).toBe('Large');
     expect(scoreToTier(35)).toBe('Large');
   });
 
-  it('returns Medium for scores 13-25', () => {
-    expect(scoreToTier(13)).toBe('Medium');
-    expect(scoreToTier(25)).toBe('Medium');
+  it('returns Medium for scores 7-27', () => {
+    expect(scoreToTier(7)).toBe('Medium');
+    expect(scoreToTier(27)).toBe('Medium');
     expect(scoreToTier(20)).toBe('Medium');
   });
 
-  it('returns Small for scores < 13', () => {
+  it('returns Small for scores < 7', () => {
     expect(scoreToTier(0)).toBe('Small');
-    expect(scoreToTier(12)).toBe('Small');
+    expect(scoreToTier(6)).toBe('Small');
     expect(scoreToTier(1)).toBe('Small');
   });
 });
@@ -183,19 +183,21 @@ describe('scoreToIntelligenceRank', () => {
   });
 });
 
-// ── manual benchmark overrides ──────────────────────────────────────────────
+// ─── manual benchmark overrides ──────────────────────────────────────────────
 describe('manual benchmark overrides', () => {
   it('hardcodes curated intelligence scores for the top free-tier pool', () => {
     const cases: Array<[string, number]> = [
       ['z-ai/glm-5.1', 100],
       ['moonshotai/Kimi-K2.6', 93],
-      ['nvidia/nemotron-3-ultra-550b-a55b:free', 88],
-      ['nemotron-3-ultra-free', 88],
+      ['nvidia/nemotron-3-ultra-550b-a55b:free', 89],
+      ['nemotron-3-ultra-free', 89],
       ['minimaxai/minimax-m2.7', 85],
-      ['deepseek-ai/deepseek-v4-flash', 84],
-      ['deepseek-v4-flash-free', 84],
-      ['minimaxai/minimax-m3', 78],
-      ['stepfun-ai/step-3.7-flash', 72],
+      ['deepseek-ai/deepseek-v4-flash', 62],
+      ['deepseek-v4-flash-free', 62],
+      ['minimaxai/minimax-m3', 98],
+      ['opencode/mimo-v2.5-free', 74],
+      ['laguna-m-1', 74],
+      ['stepfun-ai/step-3.7-flash', 65],
     ];
 
     for (const [modelId, expectedScore] of cases) {
@@ -557,11 +559,11 @@ describe('loadSourceWeights', () => {
   });
 });
 
-// ── TIER_BANDS constant ────────────────────────────────────────────────────
+// ─── TIER_BANDS constant ────────────────────────────────────────────────────
 describe('TIER_BANDS', () => {
-  it('matches spec D3 tier bands', () => {
-    expect(TIER_BANDS.frontier).toBe(45);
-    expect(TIER_BANDS.large).toBe(26);
-    expect(TIER_BANDS.medium).toBe(13);
+  it('matches updated tier bands for new score scale (0-100)', () => {
+    expect(TIER_BANDS.frontier).toBe(42);
+    expect(TIER_BANDS.large).toBe(28);
+    expect(TIER_BANDS.medium).toBe(7);
   });
 });

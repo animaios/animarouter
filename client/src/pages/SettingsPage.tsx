@@ -41,8 +41,7 @@ const SETTING_ORDER: Record<string, readonly string[]> = {
   ],
   'Rate Limiting': ['proxy_rate_limit_rpm'],
   Routing: [
-    'rabbit_enabled',
-    'rabbit_weights',
+    'iterative_refinement_weights',
     'oscillator_foundation_selection',
     'oscillator_injection_selection',
     'oscillator_min_intelligence_gap',

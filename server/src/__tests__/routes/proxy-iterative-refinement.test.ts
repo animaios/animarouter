@@ -235,7 +235,7 @@ function buildStreamChunks(
 
 // ── Existing non-streaming tests ─────────────────────────────────────
 
-describe("Rabbit proxy integration", () => {
+describe("Iterative Refinement proxy integration", () => {
   let app: Express;
   let key: string;
 
@@ -247,27 +247,25 @@ describe("Rabbit proxy integration", () => {
   });
 
   beforeEach(() => {
-    const db = getDb();
-    db.exec(`
-      DELETE FROM fallback_config;
-      DELETE FROM api_keys;
-      DELETE FROM models;
-      DELETE FROM requests;
-      DELETE FROM oscillator_results;
-      DELETE FROM settings
-      WHERE key LIKE 'rabbit_%'
-         OR key LIKE 'oscillator_%'
-         OR key IN ('routing_strategy', 'model_grouping_enabled');
-    `);
-    setSetting("model_grouping_enabled", "false");
-    setRoutingStrategy("rabbit");
-    setSetting("rabbit_enabled", "true");
-    setSetting("oscillator_foundation_selection", "auto");
-    setSetting("oscillator_injection_selection", "divergent");
-    setSetting("oscillator_min_intelligence_gap", "0");
-    setSetting("oscillator_injection_max_sentences", "2");
-    setSetting("oscillator_load_shed_threshold", "21");
-    setSetting("oscillator_step_timeout_ms", "1000");
+      const db = getDb();
+      db.exec(`
+        DELETE FROM fallback_config;
+        DELETE FROM api_keys;
+        DELETE FROM models;
+        DELETE FROM requests;
+        DELETE FROM oscillator_results;
+        DELETE FROM settings
+        WHERE key LIKE 'oscillator_%'
+           OR key IN ('routing_strategy', 'model_grouping_enabled');
+      `);
+      setSetting("model_grouping_enabled", "false");
+      setRoutingStrategy("iterative_refinement");
+      setSetting("oscillator_foundation_selection", "auto");
+      setSetting("oscillator_injection_selection", "divergent");
+      setSetting("oscillator_min_intelligence_gap", "0");
+      setSetting("oscillator_injection_max_sentences", "2");
+      setSetting("oscillator_load_shed_threshold", "21");
+      setSetting("oscillator_step_timeout_ms", "1000");
 
     addModel({
       platform: "alpha",
@@ -295,7 +293,7 @@ describe("Rabbit proxy integration", () => {
     publishedEvents.length = 0;
   });
 
-  it("routes eligible non-streaming Rabbit requests through Foundation, Injection, and Anchor steps", async () => {
+  it("routes eligible non-streaming Iterative Refinement requests through Foundation, Injection, and Anchor steps", async () => {
     chatCompletion.mockImplementation(
       async (_apiKey: string, messages: ChatMessage[], modelId: string) => {
         if (
@@ -339,8 +337,8 @@ describe("Rabbit proxy integration", () => {
         );
         return {
           choices: [
-            { message: { role: "assistant", content: "Final Rabbit answer." } },
-          ],
+                      { message: { role: "assistant", content: "Final Iterative Refinement answer." } },
+                    ],
           usage: {
             prompt_tokens: 8,
             completion_tokens: 4,
@@ -366,8 +364,8 @@ describe("Rabbit proxy integration", () => {
     );
 
     expect(status).toBe(200);
-    expect(responseText(body)).toBe("Final Rabbit answer.");
-    expect(headers.get("x-rabbit-status")).toBe("completed");
+    expect(responseText(body)).toBe("Final Iterative Refinement answer.");
+    expect(headers.get("x-iterative-refinement-status")).toBe("completed");
     expect(chatCompletion.mock.calls.map((call) => call[2])).toEqual([
       "foundation",
       "injection",
@@ -410,7 +408,7 @@ describe("Rabbit proxy integration", () => {
     ]);
   });
 
-  it("uses normal single-model routing for simple Rabbit requests", async () => {
+  it("uses normal single-model routing for simple Iterative Refinement requests", async () => {
     chatCompletion.mockResolvedValue({
       choices: [
         { message: { role: "assistant", content: "Single model answer." } },
@@ -430,7 +428,7 @@ describe("Rabbit proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Single model answer.");
-    expect(headers.get("x-rabbit-status")).toBeNull();
+    expect(headers.get("x-iterative-refinement-status")).toBeNull();
     expect(chatCompletion).toHaveBeenCalledTimes(1);
   });
 
@@ -459,12 +457,12 @@ describe("Rabbit proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Pinned answer.");
-    expect(headers.get("x-rabbit-status")).toBeNull();
+    expect(headers.get("x-iterative-refinement-status")).toBeNull();
     expect(chatCompletion).toHaveBeenCalledTimes(1);
     expect(chatCompletion.mock.calls[0][2]).toBe("foundation");
   });
 
-  it("uses normal single-model routing when Rabbit is load-shed", async () => {
+  it("uses normal single-model routing when Iterative Refinement is load-shed", async () => {
     setSetting("oscillator_load_shed_threshold", "1");
     const heldRoutes: Array<ReturnType<typeof routeRequest>> = [];
 
@@ -499,7 +497,7 @@ describe("Rabbit proxy integration", () => {
 
       expect(status).toBe(200);
       expect(responseText(body)).toBe("Load-shed answer.");
-      expect(headers.get("x-rabbit-status")).toBeNull();
+      expect(headers.get("x-iterative-refinement-status")).toBeNull();
       expect(chatCompletion).toHaveBeenCalledTimes(1);
       expect(
         publishedEvents.find((event) => event.type === "oscillator.load_shed"),
@@ -512,7 +510,7 @@ describe("Rabbit proxy integration", () => {
     }
   });
 
-  it("emits a meow event when Rabbit anchor validation falls back", async () => {
+  it("emits a meow event when Iterative Refinement anchor validation falls back", async () => {
     chatCompletion.mockImplementation(
       async (
         _apiKey: string,
@@ -561,7 +559,7 @@ describe("Rabbit proxy integration", () => {
             {
               message: {
                 role: "assistant",
-                content: "Final Rabbit answer leaked \u003c|assistant|\u003e.",
+                content: "Final Iterative Refinement answer leaked \u003c|assistant|\u003e.",
               },
             },
           ],
@@ -591,7 +589,7 @@ describe("Rabbit proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Foundation base.");
-    expect(headers.get("x-rabbit-status")).toBe("foundation_fallback");
+    expect(headers.get("x-iterative-refinement-status")).toBe("foundation_fallback");
     expect(
       publishedEvents.find((event) => event.type === "oscillator.meow_detected"),
     ).toMatchObject({
@@ -600,7 +598,7 @@ describe("Rabbit proxy integration", () => {
     });
   });
 
-  it("does not emit step-complete for a failed Rabbit injection step", async () => {
+  it("does not emit step-complete for a failed Iterative Refinement injection step", async () => {
     chatCompletion.mockImplementation(
       async (
         _apiKey: string,
@@ -643,7 +641,7 @@ describe("Rabbit proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Foundation base.");
-    expect(headers.get("x-rabbit-status")).toBe("foundation_fallback");
+    expect(headers.get("x-iterative-refinement-status")).toBe("foundation_fallback");
     expect(
       publishedEvents
         .filter((event) => event.type === "oscillator.step_complete")
@@ -656,7 +654,7 @@ describe("Rabbit proxy integration", () => {
     });
   });
 
-  it("falls back to normal single-model routing when all Rabbit foundation candidates fail", async () => {
+  it("falls back to normal single-model routing when all Iterative Refinement foundation candidates fail", async () => {
     chatCompletion.mockImplementation(async () => {
       if (chatCompletion.mock.calls.length <= 2) {
         throw new Error("foundation failed");
@@ -695,7 +693,7 @@ describe("Rabbit proxy integration", () => {
 
     expect(status).toBe(200);
     expect(responseText(body)).toBe("Recovered fallback.");
-    expect(headers.get("x-rabbit-status")).toBeNull();
+    expect(headers.get("x-iterative-refinement-status")).toBeNull();
     expect(chatCompletion.mock.calls.map((call) => call[2])).toEqual([
       "foundation",
       "injection",
@@ -722,7 +720,7 @@ describe("Rabbit proxy integration", () => {
 
   // ── Streaming integration tests ──────────────────────────────────────
 
-  describe("Rabbit streaming integration", () => {
+  describe("Iterative Refinement streaming integration", () => {
     beforeEach(() => {
       streamStepCounter = 0;
     });
@@ -764,7 +762,7 @@ describe("Rabbit proxy integration", () => {
 
       expect(status).toBe(200);
       expect(headers.get("content-type")).toContain("text/event-stream");
-      expect(headers.get("x-rabbit-status")).toBe("streaming");
+      expect(headers.get("x-iterative-refinement-status")).toBe("streaming");
 
       // Verify anchor text chunks were streamed
       const textFrames = frames.filter(
@@ -874,7 +872,7 @@ describe("Rabbit proxy integration", () => {
       );
 
       expect(status).toBe(200);
-      expect(headers.get("x-rabbit-status")).toBe("streaming");
+      expect(headers.get("x-iterative-refinement-status")).toBe("streaming");
 
       // Verify anchor chunks streamed
       expect(frames.length).toBeGreaterThan(0);
@@ -963,7 +961,7 @@ describe("Rabbit proxy integration", () => {
 
         expect(status).toBe(200);
         expect(headers.get("content-type")).toContain("text/event-stream");
-        expect(headers.get("x-rabbit-status")).toBeNull();
+        expect(headers.get("x-iterative-refinement-status")).toBeNull();
 
         const loadShedEvent = publishedEvents.find(
           (e) => e.type === "oscillator.load_shed",
@@ -973,7 +971,7 @@ describe("Rabbit proxy integration", () => {
           threshold: 1,
         });
 
-        // No Rabbit oscillator events (only load_shed)
+        // No Iterative Refinement oscillator events (only load_shed)
         const oscillatorEvents = publishedEvents.filter((e) =>
           e.type.startsWith("oscillator."),
         );
@@ -1021,7 +1019,7 @@ describe("Rabbit proxy integration", () => {
       );
 
       expect(status).toBe(200);
-      expect(headers.get("x-rabbit-status")).toBe("streaming");
+      expect(headers.get("x-iterative-refinement-status")).toBe("streaming");
 
       // Both anchor text (with meow) and foundation fallback text are streamed
       const textFrames = frames.filter(
@@ -1175,7 +1173,7 @@ describe("Rabbit proxy integration", () => {
       );
 
       expect(status).toBe(200);
-      expect(headers.get("x-rabbit-status")).toBe("streaming");
+      expect(headers.get("x-iterative-refinement-status")).toBe("streaming");
 
       // Verify the order of oscillator streaming events is correct:
       // Should contain stream_start, stream_step_complete, and stream_complete

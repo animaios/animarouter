@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { REGISTRY } from "../../services/feature-settings.js";
 
 describe("feature settings registry", () => {
-  it("registers Rabbit oscillator settings with spec defaults and env overrides", () => {
+  it("registers Iterative Refinement oscillator settings with spec defaults and env overrides", () => {
     expect(
       REGISTRY.filter(
         (entry) =>
-          entry.key === "rabbit_enabled" || entry.key.startsWith("oscillator_"),
+          entry.key === "iterative_refinement_weights" || entry.key.startsWith("oscillator_"),
       ).map((entry) => ({
         key: entry.key,
         default: entry.default,
@@ -17,20 +17,12 @@ describe("feature settings registry", () => {
       })),
     ).toEqual([
       {
-        key: "rabbit_enabled",
-        default: false,
-        envVar: "RABBIT_ENABLED",
-        effect: "live",
-        group: "Routing",
-        parentToggle: undefined,
-      },
-      {
         key: "oscillator_foundation_selection",
         default: "auto",
         envVar: "OSCILLATOR_FOUNDATION_SELECTION",
         effect: "live",
         group: "Routing",
-        parentToggle: "rabbit_enabled",
+        parentToggle: undefined,
       },
       {
         key: "oscillator_injection_selection",
@@ -38,7 +30,7 @@ describe("feature settings registry", () => {
         envVar: "OSCILLATOR_INJECTION_SELECTION",
         effect: "live",
         group: "Routing",
-        parentToggle: "rabbit_enabled",
+        parentToggle: undefined,
       },
       {
         key: "oscillator_min_intelligence_gap",
@@ -46,7 +38,7 @@ describe("feature settings registry", () => {
         envVar: "OSCILLATOR_MIN_INTELLIGENCE_GAP",
         effect: "live",
         group: "Routing",
-        parentToggle: "rabbit_enabled",
+        parentToggle: undefined,
       },
       {
         key: "oscillator_injection_max_sentences",
@@ -54,7 +46,7 @@ describe("feature settings registry", () => {
         envVar: "OSCILLATOR_INJECTION_MAX_SENTENCES",
         effect: "live",
         group: "Routing",
-        parentToggle: "rabbit_enabled",
+        parentToggle: undefined,
       },
       {
         key: "oscillator_load_shed_threshold",
@@ -62,7 +54,7 @@ describe("feature settings registry", () => {
         envVar: "OSCILLATOR_LOAD_SHED_THRESHOLD",
         effect: "live",
         group: "Routing",
-        parentToggle: "rabbit_enabled",
+        parentToggle: undefined,
       },
       {
         key: "oscillator_step_timeout_ms",
@@ -70,18 +62,18 @@ describe("feature settings registry", () => {
         envVar: "OSCILLATOR_STEP_TIMEOUT_MS",
         effect: "live",
         group: "Routing",
-        parentToggle: "rabbit_enabled",
+        parentToggle: undefined,
       },
     ]);
 
     expect(
-      REGISTRY.find((entry) => entry.key === "rabbit_weights"),
+      REGISTRY.find((entry) => entry.key === "iterative_refinement_weights"),
     ).toMatchObject({
       default: "",
-      envVar: "RABBIT_WEIGHTS",
+      envVar: "ITERATIVE_REFINEMENT_WEIGHTS",
       effect: "live",
       group: "Routing",
-      parentToggle: "rabbit_enabled",
+      parentToggle: undefined,
     });
   });
 });

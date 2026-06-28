@@ -9,7 +9,7 @@
  */
 import type { Response } from "express";
 import { LogThrottle } from "../lib/log-throttle.js";
-import type { ExecuteOscillatorResult } from "../services/rabbit-shake.js";
+import type { ExecuteOscillatorResult } from "../services/iterative-refinement-shake.js";
 
 /** Base event shape without dedup metadata — what publishers construct. */
 export type LiveEventBase =
@@ -220,7 +220,7 @@ export type LiveEventBase =
       at: number;
     }
   | { type: "stream.chunk"; id: string; text: string; at: number }
-    // Rabbit Oscillator streaming events
+    // Iterative Refinement streaming events
     | { type: "oscillator.stream_start"; sessionKey: string; step: "foundation" | "injection" | "anchor"; timestamp: number }
     | { type: "oscillator.stream_delta"; sessionKey: string; step: "foundation" | "injection" | "anchor"; delta: string; accumulated: string; timestamp: number }
     | { type: "oscillator.stream_step_complete"; sessionKey: string; step: "foundation" | "injection" | "anchor"; fullText: string; timestamp: number }
