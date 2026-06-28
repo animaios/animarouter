@@ -469,7 +469,7 @@ function resolveAdviceModelDbId(modelRef: string): number | undefined {
     )?.id;
   }
 
-  const rankMatch = trimmed.match(/^intelligence_rank:(\d+)$/i);
+  const rankMatch = trimmed.match(/^intelligence_rank\s*:\s*(\d+)$/i);
   if (rankMatch) {
     return (
       getDb()
@@ -498,18 +498,18 @@ function splitProviderModelRef(
 ): { provider: string; model: string } | undefined {
   const colonIndex = ref.indexOf(":");
   if (colonIndex > 0) {
-    return {
-      provider: ref.slice(0, colonIndex),
-      model: ref.slice(colonIndex + 1),
-    };
+    const provider = ref.slice(0, colonIndex).trim();
+    const model = ref.slice(colonIndex + 1).trim();
+    if (!provider || !model) return undefined;
+    return { provider, model };
   }
 
   const slashIndex = ref.indexOf("/");
   if (slashIndex <= 0) return undefined;
-  return {
-    provider: ref.slice(0, slashIndex),
-    model: ref.slice(slashIndex + 1),
-  };
+  const provider = ref.slice(0, slashIndex).trim();
+  const model = ref.slice(slashIndex + 1).trim();
+  if (!provider || !model) return undefined;
+  return { provider, model };
 }
 
 function injectionBrevitySentenceLimit(

@@ -265,7 +265,7 @@ describe("Heartbeat AI routing advisor", () => {
         cooldownHint: 0,
         recheckSooner: false,
         oscillatorHint: "enable",
-        injectionModel: "other/test-model",
+        injectionModel: " other / test-model ",
         injectionBrevity: "shorter",
       },
       modelDbId,
@@ -284,6 +284,29 @@ describe("Heartbeat AI routing advisor", () => {
       String(injectionModelDbId),
     );
     expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+
+    const rankResults = applyAdvice({
+      advice: {
+        confidence: 6,
+        selfScore: 0,
+        cooldownHint: 0,
+        recheckSooner: false,
+        injectionModel: "intelligence_rank : 2",
+      },
+      modelDbId,
+      platform: "testprov",
+      modelId: "test-model",
+      keyId,
+    });
+
+    expect(rankResults).toContainEqual({
+      applied: "injection_adjusted",
+      modelDbId: injectionModelDbId,
+      magnitude: injectionModelDbId,
+    });
+    expect(getSetting("oscillator_injection_selection")).toBe(
+      String(injectionModelDbId),
+    );
   });
 
   it("uses a lower confidence threshold for Rabbit disable advice", () => {
