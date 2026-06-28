@@ -115,6 +115,40 @@ describe("Heartbeat AI routing advisor", () => {
     });
   });
 
+  it("parses compact Rabbit oscillator advice aliases", () => {
+    expect(
+      parseAdviceResponse(
+        "c:6 self:0 cooldown:0 recheck:false o:d i:other/test-model b:l",
+      ),
+    ).toMatchObject({
+      confidence: 6,
+      selfScore: 0,
+      cooldownHint: 0,
+      recheckSooner: false,
+      oscillatorHint: "disable",
+      injectionModel: "other/test-model",
+      injectionBrevity: "longer",
+    });
+
+    expect(
+      parseAdviceResponse("o:\"enabled\" i:'intelligence_rank:2' b:short"),
+    ).toMatchObject({
+      oscillatorHint: "enable",
+      injectionModel: "intelligence_rank:2",
+      injectionBrevity: "shorter",
+    });
+
+    expect(
+      parseAdviceResponse(
+        '{"oscillatorHint":"disabled","injectionModel":"\'other/test-model\'","injectionBrevity":"long"}',
+      ),
+    ).toMatchObject({
+      oscillatorHint: "disable",
+      injectionModel: "other/test-model",
+      injectionBrevity: "longer",
+    });
+  });
+
   it("builds sanitized payloads without key material or raw error text", () => {
     const { modelDbId, keyId } = seedProvider();
     const payload = buildAdvisoryPayload({
@@ -200,8 +234,15 @@ describe("Heartbeat AI routing advisor", () => {
     );
 
     const truncated = truncateToTokenBudget(payload, 120);
-    const { estimatedInputTokens } = buildAdvisoryMessages(truncated, 120);
+    const { estimatedInputTokens, messages } = buildAdvisoryMessages(
+      truncated,
+      120,
+    );
+    const systemPrompt = String(messages[0].content);
     expect(estimatedInputTokens).toBeLessThanOrEqual(120);
+    expect(systemPrompt).toContain("oscillatorHint");
+    expect(systemPrompt).toContain("injectionModel");
+    expect(systemPrompt).toContain("injectionBrevity");
   });
 
   it("applies advice with capped boost, cooldown, and recheck scheduling", () => {

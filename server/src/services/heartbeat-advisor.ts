@@ -307,7 +307,7 @@ export function buildAdvisoryMessages(
       {
         role: "system",
         content:
-          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean}. No prose.',
+          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint only for Rabbit oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
       },
       {
         role: "user",
@@ -618,7 +618,7 @@ function parseCompactAdvice(text: string): Partial<RoutingAdvice> | null {
     const match = field.match(/^([a-zA-Z_]+)\s*[:=]\s*(.+)$/);
     if (!match) continue;
     const key = match[1].toLowerCase();
-    const value = match[2];
+    const value = cleanCompactAdviceValue(match[2]);
     if (["c", "conf", "confidence"].includes(key))
       out.confidence = Number(value);
     if (["self", "selfscore", "self_score"].includes(key))
@@ -629,21 +629,62 @@ function parseCompactAdvice(text: string): Partial<RoutingAdvice> | null {
       out.recheckSooner = /^(1|true|yes)$/i.test(value);
     }
     if (key === "alt") out.alt = value.slice(0, 80);
+    if (["o", "oscillator", "oscillatorhint", "oscillator_hint"].includes(key))
+      out.oscillatorHint = parseCompactOscillatorHint(value);
+    if (["i", "injection", "injectionmodel", "injection_model"].includes(key))
+      out.injectionModel = value.slice(0, 80);
+    if (["b", "brevity", "injectionbrevity", "injection_brevity"].includes(key))
+      out.injectionBrevity = parseCompactInjectionBrevity(value);
   }
 
   return Object.keys(out).length > 0 ? out : null;
 }
 
+function parseCompactOscillatorHint(
+  value: string,
+): RoutingAdvice["oscillatorHint"] {
+  const normalized = cleanCompactAdviceValue(value).toLowerCase();
+  if (normalized === "e" || normalized === "enable" || normalized === "enabled")
+    return "enable";
+  if (
+    normalized === "d" ||
+    normalized === "disable" ||
+    normalized === "disabled"
+  )
+    return "disable";
+  return "no_opinion";
+}
+
+function parseCompactInjectionBrevity(
+  value: string,
+): RoutingAdvice["injectionBrevity"] {
+  const normalized = cleanCompactAdviceValue(value).toLowerCase();
+  if (normalized === "s" || normalized === "shorter" || normalized === "short")
+    return "shorter";
+  if (normalized === "l" || normalized === "longer" || normalized === "long")
+    return "longer";
+  if (normalized === "d" || normalized === "default") return "default";
+  return undefined;
+}
+
+function cleanCompactAdviceValue(value: string): string {
+  const trimmed = value.trim();
+  const first = trimmed[0];
+  const last = trimmed.at(-1);
+  if ((first === "'" || first === '"') && first === last) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed.replace(/^['"]|['"]$/g, "").trim();
+}
+
 function normalizeAdvice(input: Partial<RoutingAdvice>): RoutingAdvice {
   const oscillatorHint =
-    input.oscillatorHint === "enable" || input.oscillatorHint === "disable"
-      ? input.oscillatorHint
+    typeof input.oscillatorHint === "string"
+      ? parseCompactOscillatorHint(input.oscillatorHint)
       : "no_opinion";
   const injectionBrevity =
-    input.injectionBrevity === "shorter" ||
-    input.injectionBrevity === "longer" ||
-    input.injectionBrevity === "default"
-      ? input.injectionBrevity
+    typeof input.injectionBrevity === "string"
+      ? parseCompactInjectionBrevity(input.injectionBrevity)
       : undefined;
 
   return {
@@ -655,7 +696,7 @@ function normalizeAdvice(input: Partial<RoutingAdvice>): RoutingAdvice {
     oscillatorHint,
     injectionModel:
       typeof input.injectionModel === "string"
-        ? input.injectionModel.slice(0, 80)
+        ? cleanCompactAdviceValue(input.injectionModel).slice(0, 80)
         : undefined,
     injectionBrevity,
   };
