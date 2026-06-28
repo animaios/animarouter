@@ -3,7 +3,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { ChatMessage, ModelListRow } from '@animarouter/shared/types.js';
-import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, type RouteResult } from '../services/router.js';
+import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, getRoutingStrategy, type RouteResult } from '../services/router.js';
 import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
 import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
 import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs, isDailyLimitExhausted } from '../services/ratelimit.js';
@@ -19,6 +19,11 @@ import { publish } from '../services/events.js';
 import { getFeatureSetting } from '../services/feature-settings.js';
 import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
 import { getRelayTransport, isRelayTransportConfigured, computeWorkerIndex } from '../services/proxy-transport.js';
+import {
+  executeOscillator,
+  getRabbitOscillatorDecision,
+  type OscillatorModelCall,
+} from '../services/rabbit-shake.js';
 import type { BaseProvider } from '../providers/base.js';
 
 
@@ -113,6 +118,28 @@ function getSessionKeyWithApiKey(apiKey: string | undefined, messages: ChatMessa
   if (!sessionKey) return '';
   if (!apiKey) return sessionKey;
   return `${apiKey}:${sessionKey}`;
+}
+
+function promptTextForRabbit(messages: ChatMessage[]): string {
+  return messages
+    .filter(m => m.role === 'user')
+    .map(m => contentToString(m.content))
+    .filter(Boolean)
+    .join('\n');
+}
+
+type SkipModelsStatement = { all: (modelDbId: number) => Array<{ id: number }> };
+let skipModelsStmtDb: ReturnType<typeof getDb> | undefined;
+let skipModelsStmt: SkipModelsStatement | undefined;
+
+function skipAllModelsExcept(modelDbId: number): Set<number> {
+  const db = getDb();
+  if (!skipModelsStmt || skipModelsStmtDb !== db) {
+    skipModelsStmt = db.prepare('SELECT id FROM models WHERE enabled = 1 AND id != ?') as SkipModelsStatement;
+    skipModelsStmtDb = db;
+  }
+  const rows = skipModelsStmt.all(modelDbId);
+  return new Set(rows.map(row => row.id));
 }
 
 export function getStickyModel(messages: ChatMessage[], sessionIdHeader?: string): number | undefined {
@@ -830,6 +857,148 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   let prevModelKey: string | undefined;
   const providerFailures = new Map<string, Set<number>>();
   const fastFired = new Set<string>();
+
+  const rabbitDecision = getRabbitOscillatorDecision({
+    strategy: getRoutingStrategy(),
+    promptText: promptTextForRabbit(messages),
+    pinnedModelDbId: isAutoRouted ? undefined : (strictPinnedModelDbId ?? preferredModel ?? 0),
+  });
+  const shouldTryRabbitOscillator =
+    rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
+
+  if (shouldTryRabbitOscillator) {
+    const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
+      const stepInputTokens = stepMessages.reduce((sum, message) => {
+        const text = contentToString(message.content);
+        return sum + Math.ceil(text.length / 4);
+      }, 0);
+      const expectedOutputTokens = step === 'injection' ? 150 : (max_tokens ?? 1000);
+      const stepRoute = routeRequest(
+        stepInputTokens + expectedOutputTokens,
+        undefined,
+        candidate.modelDbId,
+        false,
+        false,
+        skipAllModelsExcept(candidate.modelDbId),
+        { pinMode: true, stickySessionKey: sessionKey || undefined },
+      );
+      const stepStart = Date.now();
+
+      try {
+        const stepMaxTokens = step === 'injection'
+          ? Math.min(max_tokens ?? 150, 150)
+          : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
+        const stepOptions = {
+          temperature,
+          max_tokens: stepMaxTokens,
+          top_p,
+          reasoning_effort,
+          thinking,
+        };
+        const relayTransport = getRelayTransport(stepRoute.transportId);
+        const useProxyTransport = !!relayTransport
+          && (getFeatureSetting('proxy_transport_enabled') as boolean)
+          && isRelayTransportConfigured(stepRoute.transportId);
+        const result = useProxyTransport
+          ? await relayTransport!.chatCompletion({
+              providerBaseUrl: resolveProviderBaseUrl(stepRoute.provider),
+              apiKey: stepRoute.apiKey,
+              body: { model: stepRoute.modelId, messages: stepMessages, ...stepOptions },
+              sessionId: sessionKey || undefined,
+            })
+          : await stepRoute.provider.chatCompletion(
+              stepRoute.apiKey,
+              stepMessages,
+              stepRoute.modelId,
+              stepOptions,
+            );
+
+        const respMsg = result.choices?.[0]?.message;
+        const text = contentToString(respMsg?.content ?? '').trim();
+        if (!text) throw new Error(`empty Rabbit oscillator completion from ${stepRoute.displayName}`);
+
+        const promptTokens = result.usage?.prompt_tokens ?? stepInputTokens;
+        const completionTokens = result.usage?.completion_tokens ?? Math.ceil(text.length / 4);
+        const totalTokens = result.usage?.total_tokens ?? promptTokens + completionTokens;
+        recordRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId);
+        recordTokens(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, totalTokens);
+        recordSuccess(stepRoute.modelDbId);
+        logRequest(
+          stepRoute.platform,
+          stepRoute.modelId,
+          stepRoute.keyId,
+          'success',
+          promptTokens,
+          completionTokens,
+          Date.now() - stepStart,
+          null,
+          null,
+          pinnedModelId,
+          (result.usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0,
+        );
+        clearExhausted(stepRoute.keyId, stepRoute.modelId);
+        return text;
+      } catch (err: any) {
+        const safeError = sanitizeProviderErrorMessage(err.message);
+        logRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, 'error', stepInputTokens, 0, Date.now() - stepStart, safeError, null, pinnedModelId);
+        const tier = classifyError(err);
+        if (tier) recordFailure(stepRoute.modelDbId, tier);
+        throw err;
+      } finally {
+        stepRoute.release();
+      }
+    };
+
+    const oscillator = await executeOscillator({
+      messages,
+      sessionKey: sessionKey || requestId,
+      callModel,
+      config: rabbitDecision.config,
+      handoffMode,
+    });
+
+    if (oscillator.status !== 'single_model_fallback' && oscillator.text) {
+      const completionTokens = Math.ceil(oscillator.text.length / 4);
+      const response = {
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: oscillator.foundation?.modelId ?? AUTO_MODEL_ID,
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: oscillator.text },
+          finish_reason: 'stop',
+        }],
+        usage: {
+          prompt_tokens: estimatedInputTokens,
+          completion_tokens: completionTokens,
+          total_tokens: estimatedInputTokens + completionTokens,
+        },
+      };
+
+      if (oscillator.foundation) {
+        const finalModelKey = `${oscillator.foundation.platform}:${oscillator.foundation.modelId}`;
+        setStickyModel(messages, oscillator.foundation.modelDbId, sessionIdHeader);
+        if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
+        res.setHeader('X-Routed-Via', `${oscillator.foundation.platform}/${oscillator.foundation.modelId}`);
+      } else {
+        res.setHeader('X-Routed-Via', 'rabbit');
+      }
+      res.setHeader('X-Rabbit-Status', oscillator.status);
+      res.json(response);
+      publish({
+        type: 'request.done',
+        id: requestId,
+        model: oscillator.foundation?.modelId ?? AUTO_MODEL_ID,
+        provider: oscillator.foundation?.platform ?? 'rabbit',
+        keyId: 0,
+        latencyMs: Date.now() - start,
+        tokens: { in: estimatedInputTokens, out: completionTokens },
+        at: Date.now(),
+      });
+      return;
+    }
+  }
 
   // Client-disconnect detection: if the agent presses Stop or closes the
   // session, abort the whole retry loop instead of grinding through
