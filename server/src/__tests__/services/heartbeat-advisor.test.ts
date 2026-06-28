@@ -18,8 +18,8 @@ describe("Heartbeat AI routing advisor", () => {
   });
 
   beforeEach(() => {
-      const db = getDb();
-      db.exec(`
+    const db = getDb();
+    db.exec(`
         DELETE FROM fallback_config;
         DELETE FROM api_keys;
         DELETE FROM requests;
@@ -31,9 +31,9 @@ describe("Heartbeat AI routing advisor", () => {
            OR key LIKE 'oscillator_%'
            OR key IN ('routing_strategy', 'routing_custom_weights');
       `);
-      initDegradation();
-      setSetting("heartbeat_advisor_max_input_tokens", "400");
-    });
+    initDegradation();
+    setSetting("heartbeat_advisor_max_input_tokens", "400");
+  });
 
   function seedProvider() {
     const db = getDb();
@@ -282,106 +282,106 @@ describe("Heartbeat AI routing advisor", () => {
   });
 
   it("applies confident Iterative Refinement injection model advice", () => {
-      const { modelDbId, keyId } = seedProvider();
-      const db = getDb();
-      db.prepare(`
+    const { modelDbId, keyId } = seedProvider();
+    const db = getDb();
+    db.prepare(`
         INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
         VALUES ('other', 'test-model', 'Other Test Model', 2, 2, 1)
       `).run();
-      const injectionModelDbId = (
-        db
-          .prepare(
-            "SELECT id FROM models WHERE platform = 'other' AND model_id = 'test-model'",
-          )
-          .get() as { id: number }
-      ).id;
+    const injectionModelDbId = (
+      db
+        .prepare(
+          "SELECT id FROM models WHERE platform = 'other' AND model_id = 'test-model'",
+        )
+        .get() as { id: number }
+    ).id;
 
-      const results = applyAdvice({
-        advice: {
-          confidence: 8,
-          selfScore: 0,
-          cooldownHint: 0,
-          recheckSooner: false,
-          oscillatorHint: "enable",
-          injectionModel: " other / test-model ",
-          injectionBrevity: "shorter",
-        },
-        modelDbId,
-        platform: "testprov",
-        modelId: "test-model",
-        keyId,
-      });
-
-      expect(results.map((result) => result.applied)).toEqual([
-        "oscillator_toggled",
-        "injection_adjusted",
-        "injection_adjusted",
-      ]);
-      // oscillatorHint 'enable' with high confidence is acknowledged but strategy selection is the toggle
-      expect(getSetting("oscillator_injection_selection")).toBe(
-        String(injectionModelDbId),
-      );
-      expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
-
-      const rankResults = applyAdvice({
-        advice: {
-          confidence: 6,
-          selfScore: 0,
-          cooldownHint: 0,
-          recheckSooner: false,
-          injectionModel: "intelligence_rank : 2",
-        },
-        modelDbId,
-        platform: "testprov",
-        modelId: "test-model",
-        keyId,
-      });
-
-      expect(rankResults).toContainEqual({
-        applied: "injection_adjusted",
-        modelDbId: injectionModelDbId,
-        magnitude: injectionModelDbId,
-      });
-      expect(getSetting("oscillator_injection_selection")).toBe(
-        String(injectionModelDbId),
-      );
+    const results = applyAdvice({
+      advice: {
+        confidence: 8,
+        selfScore: 0,
+        cooldownHint: 0,
+        recheckSooner: false,
+        oscillatorHint: "enable",
+        injectionModel: " other / test-model ",
+        injectionBrevity: "shorter",
+      },
+      modelDbId,
+      platform: "testprov",
+      modelId: "test-model",
+      keyId,
     });
 
+    expect(results.map((result) => result.applied)).toEqual([
+      "no_opinion",
+      "injection_adjusted",
+      "injection_adjusted",
+    ]);
+    // oscillatorHint 'enable' with high confidence returns no_opinion (strategy selection is the toggle)
+    expect(getSetting("oscillator_injection_selection")).toBe(
+      String(injectionModelDbId),
+    );
+    expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+
+    const rankResults = applyAdvice({
+      advice: {
+        confidence: 6,
+        selfScore: 0,
+        cooldownHint: 0,
+        recheckSooner: false,
+        injectionModel: "intelligence_rank : 2",
+      },
+      modelDbId,
+      platform: "testprov",
+      modelId: "test-model",
+      keyId,
+    });
+
+    expect(rankResults).toContainEqual({
+      applied: "injection_adjusted",
+      modelDbId: injectionModelDbId,
+      magnitude: injectionModelDbId,
+    });
+    expect(getSetting("oscillator_injection_selection")).toBe(
+      String(injectionModelDbId),
+    );
+  });
+
   it("ignores oscillator disable advice when Iterative Refinement is strategy-selected", () => {
-      const { modelDbId, keyId } = seedProvider();
+    const { modelDbId, keyId } = seedProvider();
 
-      // Since oscillator is enabled by strategy selection, disable advice is no_opinion
-      expect(
-        applyAdvice({
-          advice: {
-            confidence: 3,
-            selfScore: 0,
-            cooldownHint: 0,
-            recheckSooner: false,
-            oscillatorHint: "disable",
-          },
-          modelDbId,
-          platform: "testprov",
-          modelId: "test-model",
-          keyId,
-        }),
-      ).toEqual([{ applied: "no_opinion", modelDbId, magnitude: 0 }]);
+    // Since oscillator is enabled by strategy selection, disable advice is no_opinion
+    expect(
+      applyAdvice({
+        advice: {
+          confidence: 3,
+          selfScore: 0,
+          cooldownHint: 0,
+          recheckSooner: false,
+          oscillatorHint: "disable",
+        },
+        modelDbId,
+        platform: "testprov",
+        modelId: "test-model",
+        keyId,
+      }),
+    ).toEqual([{ applied: "no_opinion", modelDbId, magnitude: 0 }]);
 
-      // Even with higher confidence, disable is not applied (strategy change required)
-      expect(
-        applyAdvice({
-          advice: {
-            confidence: 9,
-            selfScore: 0,
-            cooldownHint: 0,
-            recheckSooner: false,
-            oscillatorHint: "disable",
-          },
-          modelDbId,
-          platform: "testprov",
-          modelId: "test-model",
-          keyId,
-        }),
-      }).toEqual([{ applied: "no_opinion", modelDbId, magnitude: 0 }]);
-          });
-        });
+    // Even with higher confidence, disable is not applied (strategy change required)
+    expect(
+      applyAdvice({
+        advice: {
+          confidence: 9,
+          selfScore: 0,
+          cooldownHint: 0,
+          recheckSooner: false,
+          oscillatorHint: "disable",
+        },
+        modelDbId,
+        platform: "testprov",
+        modelId: "test-model",
+        keyId,
+      }),
+    ).toEqual([{ applied: "no_opinion", modelDbId, magnitude: 0 }]);
+  });
+});

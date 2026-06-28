@@ -34,6 +34,8 @@ describe("Provider Health Heartbeat", () => {
   let initDegradation: () => void;
   let getKeyHealth: (keyId: number, modelId?: string) => any;
   let isKeyHealthy: (keyId: number, modelId?: string) => boolean;
+  let setRoutingStrategy: (strategy: string) => void;
+  let getRoutingStrategy: () => string;
   let resetHeartbeatConfig: () => void;
   let markKeyUnhealthy: (
     keyId: number,
@@ -81,6 +83,7 @@ describe("Provider Health Heartbeat", () => {
     const heartbeatModule = await import("../../services/heartbeat.js");
     const dbModule = await import("../../db/index.js");
     const degradationModule = await import("../../services/degradation.js");
+    const routerModule = await import("../../services/router.js");
 
     recordActivity = heartbeatModule.recordActivity;
     startHeartbeat = heartbeatModule.startHeartbeat;
@@ -100,6 +103,8 @@ describe("Provider Health Heartbeat", () => {
     getPenalty = degradationModule.getPenalty;
     recordFailure = degradationModule.recordFailure;
     initDegradation = degradationModule.initDegradation;
+    setRoutingStrategy = routerModule.setRoutingStrategy;
+    getRoutingStrategy = routerModule.getRoutingStrategy;
 
     initDb(":memory:");
     initDegradation();
@@ -1598,74 +1603,74 @@ describe("Provider Health Heartbeat", () => {
     });
 
     it("applies Iterative Refinement oscillator advice and preserves it on the next cycle", async () => {
-          setupProvider();
-          const db = getDb();
-          db.prepare(`
+      setupProvider();
+      const db = getDb();
+      db.prepare(`
             INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, enabled)
             VALUES ('other', 'injection-model', 'Injection Model', 2, 2, 1)
           `).run();
-          const injectionModelDbId = (
-            db
-              .prepare(
-                "SELECT id FROM models WHERE platform = 'other' AND model_id = 'injection-model'",
-              )
-              .get() as { id: number }
-          ).id;
-          setSetting("heartbeat_advisor_enabled", "true");
-          setSetting("heartbeat_advisor_max_output_tokens", "8");
-          setRoutingStrategy("iterative_refinement");
-          chatCompletion
-            .mockResolvedValueOnce({
-              choices: [
-                {
-                  message: {
-                    role: "assistant",
-                    content:
-                      '{"confidence":8,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"enable","injectionModel":"other/injection-model","injectionBrevity":"shorter"}',
-                  },
-                },
-              ],
-              usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
-            })
-            .mockResolvedValueOnce({
-              choices: [
-                {
-                  message: {
-                    role: "assistant",
-                    content:
-                      '{"confidence":0,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"no_opinion"}',
-                  },
-                },
-              ],
-              usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
-            });
-
-          await pokeAllKeys();
-
-          // Strategy is iterative_refinement, so oscillatorHint:enable doesn't toggle a setting
-          // but injection model suggestions still apply
-          expect(getSetting("oscillator_injection_selection")).toBe(
-            String(injectionModelDbId),
-          );
-          expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
-          expect(
-            publishedEvents.some(
-              (e) =>
-                e.type === "heartbeat.advisor_applied" &&
-                e.applied === "injection_adjusted" &&
-                e.magnitude === injectionModelDbId,
-            ),
-          ).toBe(true);
-
-          await pokeAllKeys();
-
-          expect(chatCompletion).toHaveBeenCalledTimes(2);
-          expect(getRoutingStrategy()).toBe("iterative_refinement");
-          expect(getSetting("oscillator_injection_selection")).toBe(
-            String(injectionModelDbId),
-          );
-          expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+      const injectionModelDbId = (
+        db
+          .prepare(
+            "SELECT id FROM models WHERE platform = 'other' AND model_id = 'injection-model'",
+          )
+          .get() as { id: number }
+      ).id;
+      setSetting("heartbeat_advisor_enabled", "true");
+      setSetting("heartbeat_advisor_max_output_tokens", "8");
+      setRoutingStrategy("iterative_refinement");
+      chatCompletion
+        .mockResolvedValueOnce({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content:
+                  '{"confidence":8,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"enable","injectionModel":"other/injection-model","injectionBrevity":"shorter"}',
+              },
+            },
+          ],
+          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+        })
+        .mockResolvedValueOnce({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content:
+                  '{"confidence":0,"selfScore":0,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"no_opinion"}',
+              },
+            },
+          ],
+          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
         });
+
+      await pokeAllKeys();
+
+      // Strategy is iterative_refinement, so oscillatorHint:enable doesn't toggle a setting
+      // but injection model suggestions still apply
+      expect(getSetting("oscillator_injection_selection")).toBe(
+        String(injectionModelDbId),
+      );
+      expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+      expect(
+        publishedEvents.some(
+          (e) =>
+            e.type === "heartbeat.advisor_applied" &&
+            e.applied === "injection_adjusted" &&
+            e.magnitude === injectionModelDbId,
+        ),
+      ).toBe(true);
+
+      await pokeAllKeys();
+
+      expect(chatCompletion).toHaveBeenCalledTimes(2);
+      expect(getRoutingStrategy()).toBe("iterative_refinement");
+      expect(getSetting("oscillator_injection_selection")).toBe(
+        String(injectionModelDbId),
+      );
+      expect(getSetting("oscillator_injection_max_sentences")).toBe("1");
+    });
 
     it("keeps the legacy hi ping and emits no advisor events when disabled", async () => {
       setupProvider();

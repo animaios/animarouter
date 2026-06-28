@@ -52,7 +52,6 @@ function candidate(overrides: Partial<IterativeRefinementCandidate>): IterativeR
 
 function config(overrides: Partial<OscillatorConfig> = {}): OscillatorConfig {
   return {
-    enabled: true,
     foundationSelection: "auto",
     injectionSelection: "divergent",
     iterativeRefinementWeights: ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
@@ -152,7 +151,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     setSetting("oscillator_step_timeout_ms", "15000");
 
     expect(getOscillatorConfig()).toMatchObject({
-      enabled: true,
       foundationSelection: "top_rank",
       injectionSelection: "different_tier",
       minIntelligenceGap: 25,
@@ -609,29 +607,22 @@ describe("Iterative Refinement Shake routing helpers", () => {
           config: config(),
         }).skipReason,
       ).toBe("non_iterative_refinement_strategy");
-    expect(
-      getIterativeRefinementOscillatorDecision({
-        strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
-        config: config({ enabled: false }),
-      }).skipReason,
-    ).toBe("disabled");
-    expect(
-      getIterativeRefinementOscillatorDecision({
-        strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
-        pinnedModelDbId: 1,
-        config: config(),
-      }).skipReason,
-    ).toBe("pinned_model");
-    expect(
-      getIterativeRefinementOscillatorDecision({
-        strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
-        pinnedModelDbId: 0,
-        config: config(),
-      }).skipReason,
-    ).toBe("pinned_model");
+      expect(
+        getIterativeRefinementOscillatorDecision({
+          strategy: "iterative_refinement",
+          promptText: "Analyze this architecture.",
+          pinnedModelDbId: 1,
+          config: config(),
+        }).skipReason,
+      ).toBe("pinned_model");
+      expect(
+        getIterativeRefinementOscillatorDecision({
+          strategy: "iterative_refinement",
+          promptText: "Analyze this architecture.",
+          pinnedModelDbId: 0,
+          config: config(),
+        }).skipReason,
+      ).toBe("pinned_model");
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",

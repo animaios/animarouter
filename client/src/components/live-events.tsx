@@ -238,13 +238,13 @@ type LiveEventBase =
   | OscillatorLoadShedEvent
   | OscillatorMeowDetectedEvent
   | DegradationHitEvent
-    | DegradationRecoveryEvent
-    | StreamChunkEvent
-    | OscillatorStreamStartEvent
-    | OscillatorStreamDeltaEvent
-    | OscillatorStreamStepCompleteEvent
-    | OscillatorStreamCompleteEvent
-    | OscillatorStreamErrorEvent;
+  | DegradationRecoveryEvent
+  | StreamChunkEvent
+  | OscillatorStreamStartEvent
+  | OscillatorStreamDeltaEvent
+  | OscillatorStreamStepCompleteEvent
+  | OscillatorStreamCompleteEvent
+  | OscillatorStreamErrorEvent;
 
 type LiveEvent = LiveEventBase & { _suppressed?: number };
 
@@ -400,98 +400,98 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       };
     }
     case "oscillator.started": {
-          return {
-            id: "iterative_refinement",
-            ts,
-            kind: "info",
-            text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] started: ${evt.foundationModel} → ${evt.injectionModel}`,
-          };
-        }
-        case "oscillator.step_complete": {
-          return {
-            id: "iterative_refinement",
-            ts,
-            kind: "info",
-            text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] step ${evt.step} ${evt.model} done in ${evt.latencyMs}ms (${evt.bridgeType}, stripped ${evt.strippedArtifacts})`,
-          };
-        }
-        case "oscillator.complete": {
-          return {
-            id: "iterative_refinement",
-            ts,
-            kind: "done",
-            text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] complete via ${evt.finalModel} in ${evt.totalLatencyMs}ms${evt.meowDetected ? " (meow flagged)" : ""}`,
-          };
-        }
-        case "oscillator.failed": {
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: "warn",
-                text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] failed at step ${evt.failedStep}: ${evt.error.slice(0, 80)}; fallback ${evt.fellBackTo}`,
-                  };
-                }
-                case "oscillator.load_shed": {
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: "warn",
-                    text: `Iterative Refinement load-shed: ${evt.concurrentRequests} concurrent requests exceeded threshold ${evt.threshold}`,
-                  };
-                }
-                case "oscillator.meow_detected": {
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: "warn",
-                    text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] meow detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
-                  };
-                }
-                case "oscillator.stream_start": {
-                  const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: "start",
-                    text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} streaming started`,
-                  };
-                }
-                case "oscillator.stream_delta": {
-                          const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
-                          return {
-                            id: "iterative_refinement",
-                            ts,
-                            kind: "info",
-                            text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} Δ: "${evt.delta.replace(/\n/g, "⏎").slice(0, 80)}" (${evt.accumulated.length} chars)`,
-                          };
-                        }
-                case "oscillator.stream_step_complete": {
-                  const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: "done",
-                    text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} complete (${evt.fullText.length} chars)`,
-                  };
-                }
-                case "oscillator.stream_complete": {
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: "done",
-                    text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] stream complete: ${evt.result.status}${evt.result.meow?.detected ? " (meow flagged)" : ""}`,
-                  };
-                }
-                case "oscillator.stream_error": {
-                  const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
-                  return {
-                    id: "iterative_refinement",
-                    ts,
-                    kind: evt.fallback ? "warn" : "error",
-                    text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} error: ${evt.error.slice(0, 80)}${evt.fallback ? " — falling back" : ""}`,
-                  };
-                }
-        case "degradation.hit": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "info",
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] started: ${evt.foundationModel} → ${evt.injectionModel}`,
+      };
+    }
+    case "oscillator.step_complete": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "info",
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] step ${evt.step} ${evt.model} done in ${evt.latencyMs}ms (${evt.bridgeType}, stripped ${evt.strippedArtifacts})`,
+      };
+    }
+    case "oscillator.complete": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "done",
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] complete via ${evt.finalModel} in ${evt.totalLatencyMs}ms${evt.meowDetected ? " (meow flagged)" : ""}`,
+      };
+    }
+    case "oscillator.failed": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "warn",
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] failed at step ${evt.failedStep}: ${evt.error.slice(0, 80)}; fallback ${evt.fellBackTo}`,
+      };
+    }
+    case "oscillator.load_shed": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "warn",
+        text: `Iterative Refinement load-shed: ${evt.concurrentRequests} concurrent requests exceeded threshold ${evt.threshold}`,
+      };
+    }
+    case "oscillator.meow_detected": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "warn",
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] meow detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
+      };
+    }
+    case "oscillator.stream_start": {
+      const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "start",
+        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} streaming started`,
+      };
+    }
+    case "oscillator.stream_delta": {
+      const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "info",
+        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} Δ: "${evt.delta.replace(/\n/g, "⏎").slice(0, 80)}" (${evt.accumulated.length} chars)`,
+      };
+    }
+    case "oscillator.stream_step_complete": {
+      const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "done",
+        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} complete (${evt.fullText.length} chars)`,
+      };
+    }
+    case "oscillator.stream_complete": {
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: "done",
+        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] stream complete: ${evt.result.status}${evt.result.meow?.detected ? " (meow flagged)" : ""}`,
+      };
+    }
+    case "oscillator.stream_error": {
+      const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: evt.fallback ? "warn" : "error",
+        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} error: ${evt.error.slice(0, 80)}${evt.fallback ? " — falling back" : ""}`,
+      };
+    }
+    case "degradation.hit": {
       const sup = evt._suppressed
         ? ` (×${evt._suppressed + 1} suppressed)`
         : "";

@@ -609,39 +609,39 @@ export const REGISTRY: FeatureSettingDef[] = [
   },
   // ── Routing ──
   // —— Routing ——
-    {
-      key: "iterative_refinement_weights",
-      label: "Iterative Refinement Weights",
-      description:
-        'Optional JSON weight override. Leave blank to use Smartest defaults: {"reliability":0.30,"speed":0.10,"intelligence":0.45,"latency":0.15}.',
-      type: "string",
-      default: "",
-      envVar: "ITERATIVE_REFINEMENT_WEIGHTS",
-      effect: "live",
-      group: "Routing",
-    },
-    {
-      key: "oscillator_foundation_selection",
-      label: "Foundation Selection",
-      description:
-        "How Iterative Refinement chooses Step 1 and Step 3 foundation candidates. Auto orders eligible models by Iterative Refinement / Smartest-weight score; top rank tries intelligence rank 1 first. Can also be a numeric model ID override.",
-      type: "string",
-      default: "auto",
-      envVar: "OSCILLATOR_FOUNDATION_SELECTION",
-      effect: "live",
-      group: "Routing",
-    },
-    {
-      key: "oscillator_injection_selection",
-      label: "Injection Selection",
-      description:
-        "How Iterative Refinement chooses the Step 2 injection model. Divergent prefers a high-intelligence model on a different provider from the selected foundation. Can also be a numeric model ID override.",
-      type: "string",
-      default: "divergent",
-      envVar: "OSCILLATOR_INJECTION_SELECTION",
-      effect: "live",
-      group: "Routing",
-    },
+  {
+    key: "iterative_refinement_weights",
+    label: "Iterative Refinement Weights",
+    description:
+      'Optional JSON weight override. Leave blank to use Smartest defaults: {"reliability":0.30,"speed":0.10,"intelligence":0.45,"latency":0.15}.',
+    type: "string",
+    default: "",
+    envVar: "ITERATIVE_REFINEMENT_WEIGHTS",
+    effect: "live",
+    group: "Routing",
+  },
+  {
+    key: "oscillator_foundation_selection",
+    label: "Foundation Selection",
+    description:
+      "How Iterative Refinement chooses Step 1 and Step 3 foundation candidates. Auto orders eligible models by Iterative Refinement / Smartest-weight score; top rank tries intelligence rank 1 first. Can also be a numeric model ID override.",
+    type: "string",
+    default: "auto",
+    envVar: "OSCILLATOR_FOUNDATION_SELECTION",
+    effect: "live",
+    group: "Routing",
+  },
+  {
+    key: "oscillator_injection_selection",
+    label: "Injection Selection",
+    description:
+      "How Iterative Refinement chooses the Step 2 injection model. Divergent prefers a high-intelligence model on a different provider from the selected foundation. Can also be a numeric model ID override.",
+    type: "string",
+    default: "divergent",
+    envVar: "OSCILLATOR_INJECTION_SELECTION",
+    effect: "live",
+    group: "Routing",
+  },
   {
     key: "oscillator_min_intelligence_gap",
     label: "Minimum Intelligence Gap",

@@ -225,7 +225,7 @@ function parseSelection<T extends string>(
 export function getIterativeRefinementWeights(): RoutingWeights {
   return (
     parseIterativeRefinementWeights(
-      getFeatureSetting("iterative_refinement_weights") as string) as string,
+      getFeatureSetting("iterative_refinement_weights") as string
     ) ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS
   );
 }
@@ -280,7 +280,6 @@ export function isIterativeRefinementLoadShedActive(
 export function isIterativeRefinementOscillatorEligible(
   input: IterativeRefinementEligibilityInput,
 ): boolean {
-  const config = input.config ?? getOscillatorConfig();
   return (
     input.strategy === "iterative_refinement" &&
     !input.pinnedModelDbId &&

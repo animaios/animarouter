@@ -6,7 +6,8 @@ describe("feature settings registry", () => {
     expect(
       REGISTRY.filter(
         (entry) =>
-          entry.key === "iterative_refinement_weights" || entry.key.startsWith("oscillator_"),
+          entry.key === "iterative_refinement_weights" ||
+          entry.key.startsWith("oscillator_"),
       ).map((entry) => ({
         key: entry.key,
         default: entry.default,
@@ -14,8 +15,16 @@ describe("feature settings registry", () => {
         effect: entry.effect,
         group: entry.group,
         parentToggle: entry.parentToggle,
-      })),
+      }))
     ).toEqual([
+      {
+        key: "iterative_refinement_weights",
+        default: "",
+        envVar: "ITERATIVE_REFINEMENT_WEIGHTS",
+        effect: "live",
+        group: "Routing",
+        parentToggle: undefined,
+      },
       {
         key: "oscillator_foundation_selection",
         default: "auto",
@@ -65,15 +74,5 @@ describe("feature settings registry", () => {
         parentToggle: undefined,
       },
     ]);
-
-    expect(
-      REGISTRY.find((entry) => entry.key === "iterative_refinement_weights"),
-    ).toMatchObject({
-      default: "",
-      envVar: "ITERATIVE_REFINEMENT_WEIGHTS",
-      effect: "live",
-      group: "Routing",
-      parentToggle: undefined,
-    });
   });
 });

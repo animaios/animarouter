@@ -307,7 +307,7 @@ export function buildAdvisoryMessages(
       {
         role: "system",
         content:
-                  'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint for Iterative Refinement oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
+          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint for Iterative Refinement oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
       },
       {
         role: "user",
@@ -396,21 +396,22 @@ export function applyAdvice(params: ApplyAdviceParams): AdviceResult[] {
   }
 
   if (advice.oscillatorHint === "enable") {
-      // Iterative Refinement is enabled by selecting the strategy; no separate toggle needed
-      // The oscillator settings are already configured via iterative_refinement_weights and oscillator_* settings
-      results.push({
-        applied: "oscillator_toggled",
-        modelDbId: params.modelDbId,
-        magnitude: 1,
-      });
-    } else if (advice.oscillatorHint === "disable") {
-      // Cannot disable oscillator without switching strategy; log as no_opinion
-      results.push({
-        applied: "no_opinion",
-        modelDbId: params.modelDbId,
-        magnitude: 0,
-      });
-    }
+    // Iterative Refinement is enabled by selecting the strategy; no separate toggle needed
+    // The oscillator settings are already configured via iterative_refinement_weights and oscillator_* settings
+    // Since we cannot change the global strategy, return no_opinion to avoid misleading events
+    results.push({
+      applied: "no_opinion",
+      modelDbId: params.modelDbId,
+      magnitude: 0,
+    });
+  } else if (advice.oscillatorHint === "disable") {
+    // Cannot disable oscillator without switching strategy; log as no_opinion
+    results.push({
+      applied: "no_opinion",
+      modelDbId: params.modelDbId,
+      magnitude: 0,
+    });
+  }
 
   if (advice.confidence >= 6) {
     const injectionModelDbId = advice.injectionModel

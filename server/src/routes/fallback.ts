@@ -157,14 +157,14 @@ fallbackRouter.get("/performance", (_req: Request, res: Response) => {
 
 const routingSchema = z.object({
   strategy: z.enum([
-      "priority",
-      "balanced",
-      "smartest",
-      "iterative_refinement",
-      "fastest",
-      "reliable",
-      "custom",
-    ]),
+    "priority",
+    "balanced",
+    "smartest",
+    "iterative_refinement",
+    "fastest",
+    "reliable",
+    "custom",
+  ]),
   // Only meaningful with strategy 'custom'. Any non-negative vector with a
   // positive sum is accepted; the server normalizes it to sum to 1.
   weights: z
