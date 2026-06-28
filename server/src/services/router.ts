@@ -207,14 +207,18 @@ const providerInFlight = new Map<
 /** Try to reserve one in-flight slot for the given platform slug.
  *  Returns true if the slot was reserved, false if the provider is at capacity. */
 function tryReserveSlot(platform: string, maxParallel: number | null): boolean {
-  if (maxParallel === null || maxParallel === undefined || maxParallel <= 0)
-    return true;
+  const limit =
+    maxParallel === null || maxParallel === undefined || maxParallel <= 0
+      ? null
+      : maxParallel;
   let entry = providerInFlight.get(platform);
   if (!entry) {
-    entry = { count: 0, limit: maxParallel };
+    entry = { count: 0, limit };
     providerInFlight.set(platform, entry);
+  } else {
+    entry.limit = limit;
   }
-  if (entry.count >= maxParallel) return false;
+  if (limit !== null && entry.count >= limit) return false;
   entry.count++;
   return true;
 }
@@ -223,6 +227,14 @@ function tryReserveSlot(platform: string, maxParallel: number | null): boolean {
 function releaseSlot(platform: string): void {
   const entry = providerInFlight.get(platform);
   if (entry && entry.count > 0) entry.count--;
+}
+
+export function getProviderInFlightTotal(): number {
+  let total = 0;
+  for (const entry of providerInFlight.values()) {
+    total += entry.count;
+  }
+  return total;
 }
 
 // ── Degradation integration ──────────────────────────────────────────────────

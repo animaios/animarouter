@@ -1,6 +1,10 @@
 import { getDb } from "../db/index.js";
 import { getFeatureSetting } from "./feature-settings.js";
-import { getRoutingScores, type RoutingScore } from "./router.js";
+import {
+  getProviderInFlightTotal,
+  getRoutingScores,
+  type RoutingScore,
+} from "./router.js";
 import {
   BANDIT_PRESETS,
   combineScore,
@@ -165,6 +169,15 @@ export function isComplexReasoningPrompt(promptText?: string | null): boolean {
   if (text.length >= 180) return true;
   return /\b(reason|analyze|debug|prove|derive|compare|tradeoff|architecture|plan|why)\b/i.test(
     text,
+  );
+}
+
+export function isRabbitLoadShedActive(
+  config: OscillatorConfig = getOscillatorConfig(),
+  currentConcurrent = getProviderInFlightTotal(),
+): boolean {
+  return (
+    config.loadShedThreshold > 0 && currentConcurrent > config.loadShedThreshold
   );
 }
 
