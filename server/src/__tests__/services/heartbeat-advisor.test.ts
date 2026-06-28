@@ -95,6 +95,22 @@ describe("Heartbeat AI routing advisor", () => {
     });
   });
 
+  it("parses Rabbit oscillator advice fields from JSON", () => {
+    expect(
+      parseAdviceResponse(
+        '{"confidence":8,"selfScore":1,"cooldownHint":0,"recheckSooner":false,"oscillatorHint":"enable","injectionModel":"other/test-model","injectionBrevity":"shorter"}',
+      ),
+    ).toMatchObject({
+      confidence: 8,
+      selfScore: 1,
+      cooldownHint: 0,
+      recheckSooner: false,
+      oscillatorHint: "enable",
+      injectionModel: "other/test-model",
+      injectionBrevity: "shorter",
+    });
+  });
+
   it("builds sanitized payloads without key material or raw error text", () => {
     const { modelDbId, keyId } = seedProvider();
     const payload = buildAdvisoryPayload({
