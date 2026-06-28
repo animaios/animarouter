@@ -7,6 +7,7 @@ import type {
 import { getDb, getSetting, setSetting } from "../db/index.js";
 import { getAllStatesView, getBoost, setBoost } from "./degradation.js";
 import { getFeatureSetting } from "./feature-settings.js";
+import { collectOscillatorStats } from "./rabbit-shake.js";
 import {
   getProviderDailyRequestCap,
   providerDailyRequestCount,
@@ -72,9 +73,9 @@ export function buildAdvisoryPayload(params: {
 }): AdvisoryPayload {
   const db = getDb();
   const now = params.now ?? Date.now();
-  const since = new Date(
-    now - ((getFeatureSetting("scoring_window_days") as number) || 7) * DAY_MS,
-  ).toISOString();
+  const windowMs =
+    ((getFeatureSetting("scoring_window_days") as number) || 7) * DAY_MS;
+  const since = new Date(now - windowMs).toISOString();
 
   const models = db
     .prepare(`
@@ -211,14 +212,7 @@ export function buildAdvisoryPayload(params: {
     })),
     dailyUsage,
     routing,
-    oscillator: {
-      attempts: 0,
-      successes: 0,
-      failures: 0,
-      avgLatencyMs: 0,
-      meowCount: 0,
-      loadShedActive: false,
-    },
+    oscillator: collectOscillatorStats(windowMs, now),
   });
 }
 

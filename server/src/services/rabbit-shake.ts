@@ -1,4 +1,7 @@
-import type { ChatMessage } from "@animarouter/shared/types.js";
+import type {
+  AdvisoryPayload,
+  ChatMessage,
+} from "@animarouter/shared/types.js";
 import { getDb } from "../db/index.js";
 import {
   buildContextBridge,
@@ -129,6 +132,19 @@ export interface ExecuteOscillatorResult {
   };
   meow?: MeowDetectionResult;
   error?: string;
+}
+
+export interface OscillatorStepLatencies {
+  foundation?: number;
+  injection?: number;
+  anchor?: number;
+}
+
+export interface LogOscillatorResultInput {
+  sessionKey: string;
+  result: ExecuteOscillatorResult;
+  totalLatencyMs: number;
+  stepLatencies?: OscillatorStepLatencies;
 }
 
 export const RABBIT_DEFAULT_WEIGHTS: RoutingWeights = BANDIT_PRESETS.smartest;
@@ -810,5 +826,101 @@ export async function executeOscillator(
     foundationAttempts,
     bridges: {},
     error: lastFoundationError ?? "No eligible Rabbit foundation model",
+  };
+}
+
+function failedStepNumber(
+  step: ExecuteOscillatorResult["failedStep"],
+): number | null {
+  if (step === "foundation") return 1;
+  if (step === "injection") return 2;
+  if (step === "anchor" || step === "validation") return 3;
+  return null;
+}
+
+function strippedArtifactCount(result: ExecuteOscillatorResult): number {
+  return (
+    (result.bridges.injection?.strippedArtifacts ?? 0) +
+    (result.bridges.anchor?.strippedArtifacts ?? 0)
+  );
+}
+
+function positiveIntegerOrNull(value: number | undefined): number | null {
+  if (!Number.isFinite(value) || value == null) return null;
+  return Math.max(0, Math.round(value));
+}
+
+export function logOscillatorResult(input: LogOscillatorResultInput): void {
+  const db = getDb();
+  const complete = input.result.status === "completed" ? 1 : 0;
+  db.prepare(`
+    INSERT INTO oscillator_results (
+      session_key,
+      foundation_model_db_id,
+      injection_model_db_id,
+      step1_latency_ms,
+      step2_latency_ms,
+      step3_latency_ms,
+      total_latency_ms,
+      complete,
+      failed_step,
+      status,
+      meow_detected,
+      stripped_artifacts
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.sessionKey,
+    input.result.foundation?.modelDbId ?? null,
+    input.result.injection?.modelDbId ?? null,
+    positiveIntegerOrNull(input.stepLatencies?.foundation),
+    positiveIntegerOrNull(input.stepLatencies?.injection),
+    positiveIntegerOrNull(input.stepLatencies?.anchor),
+    Math.max(0, Math.round(input.totalLatencyMs)),
+    complete,
+    failedStepNumber(input.result.failedStep),
+    input.result.status,
+    input.result.meow?.detected ? 1 : 0,
+    strippedArtifactCount(input.result),
+  );
+}
+
+export function collectOscillatorStats(
+  windowMs: number,
+  now = Date.now(),
+): NonNullable<AdvisoryPayload["oscillator"]> {
+  const db = getDb();
+  const since = new Date(now - Math.max(0, windowMs))
+    .toISOString()
+    .replace("T", " ")
+    .slice(0, 19);
+  const row = db
+    .prepare(`
+      SELECT
+        COUNT(*) AS attempts,
+        SUM(CASE WHEN complete = 1 THEN 1 ELSE 0 END) AS successes,
+        SUM(CASE WHEN complete = 0 THEN 1 ELSE 0 END) AS failures,
+        AVG(CASE WHEN complete = 1 THEN total_latency_ms ELSE NULL END) AS avg_latency_ms,
+        SUM(meow_detected) AS meow_count
+      FROM oscillator_results
+      WHERE created_at >= ?
+    `)
+    .get(since) as
+    | {
+        attempts: number | null;
+        successes: number | null;
+        failures: number | null;
+        avg_latency_ms: number | null;
+        meow_count: number | null;
+      }
+    | undefined;
+
+  return {
+    attempts: row?.attempts ?? 0,
+    successes: row?.successes ?? 0,
+    failures: row?.failures ?? 0,
+    avgLatencyMs: Math.round(row?.avg_latency_ms ?? 0),
+    meowCount: row?.meow_count ?? 0,
+    loadShedActive: isRabbitLoadShedActive(),
   };
 }
