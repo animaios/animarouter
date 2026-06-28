@@ -219,9 +219,9 @@ const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
   },
   {
     key: "rabbit",
-    label: "Rabbit",
+    label: "Rabbit (Iterative Refinement)",
     blurb:
-      "Use Smartest-weight routing as the foundation for Rabbit mode. Intelligence 45%, reliability 30%, latency 15%, speed 10%.",
+      "Three-step reasoning: Foundation model drafts initial answer → Injection model provides alternative perspective → Anchor model synthesizes final response. Includes self-correction (meow detection) and load-shed fallback. Uses Smartest weights (intelligence 45%, reliability 30%, latency 15%, speed 10%).",
   },
   {
     key: "fastest",
