@@ -690,7 +690,7 @@ export const REGISTRY: FeatureSettingDef[] = [
       "Concurrent request count above which Rabbit bypasses the oscillator and uses normal Smartest-weight single-model routing.",
     type: "number",
     default: 21,
-    min: 1,
+    min: 0,
     max: 100,
     envVar: "OSCILLATOR_LOAD_SHED_THRESHOLD",
     effect: "live",

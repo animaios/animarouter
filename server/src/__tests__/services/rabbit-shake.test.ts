@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getDb, initDb, setSetting } from "../../db/index.js";
-import { saveFeatureSettings } from "../../services/feature-settings.js";
+import {
+  REGISTRY,
+  saveFeatureSettings,
+} from "../../services/feature-settings.js";
 import {
   detectMeow,
   getOscillatorConfig,
@@ -163,6 +166,18 @@ describe("Rabbit Shake routing helpers", () => {
       foundationSelection: 30,
       injectionSelection: 40,
     });
+  });
+
+  it("allows zero to disable Rabbit load-shedding", () => {
+    const definition = REGISTRY.find(
+      (entry) => entry.key === "oscillator_load_shed_threshold",
+    );
+
+    expect(definition?.min).toBe(0);
+    expect(saveFeatureSettings({ oscillator_load_shed_threshold: 0 })).toEqual(
+      [],
+    );
+    expect(getOscillatorConfig().loadShedThreshold).toBe(0);
   });
 
   it("orders DB-backed foundation candidates by Rabbit score and requires an enabled key", () => {

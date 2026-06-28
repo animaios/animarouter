@@ -3,6 +3,7 @@ import { initDb, getDb } from '../../db/index.js';
 import { encrypt } from '../../lib/crypto.js';
 import {
   getAllPenalties,
+  getProviderInFlightTotal,
   routeRequest,
   setRoutingStrategy,
 } from '../../services/router.js';
@@ -47,6 +48,25 @@ describe('Router', () => {
     const result = routeRequest();
     expect(result.platform).toBe('groq');
     expect(result.apiKey).toBe('test-groq-key');
+  });
+
+  it('counts unlimited provider routes until the caller releases them', () => {
+    const db = getDb();
+    const { encrypted, iv, authTag } = encrypt('test-groq-key');
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run('groq', 'test', encrypted, iv, authTag, 'healthy', 1);
+
+    const before = getProviderInFlightTotal();
+    const result = routeRequest();
+
+    expect(result.platform).toBe('groq');
+    expect(getProviderInFlightTotal()).toBe(before + 1);
+
+    result.release();
+
+    expect(getProviderInFlightTotal()).toBe(before);
   });
 
   it('should prefer higher-priority model when keys exist for multiple platforms', () => {
