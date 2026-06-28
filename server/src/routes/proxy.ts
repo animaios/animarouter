@@ -962,12 +962,16 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       config: rabbitDecision.config,
       handoffMode,
     });
-    logOscillatorResult({
-      sessionKey: oscillatorSessionKey,
-      result: oscillator,
-      totalLatencyMs: Date.now() - oscillatorStart,
-      stepLatencies: rabbitStepLatencies,
-    });
+    try {
+      logOscillatorResult({
+        sessionKey: oscillatorSessionKey,
+        result: oscillator,
+        totalLatencyMs: Date.now() - oscillatorStart,
+        stepLatencies: rabbitStepLatencies,
+      });
+    } catch (err) {
+      console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
+    }
 
     if (oscillator.status !== 'single_model_fallback' && oscillator.text) {
       const completionTokens = Math.ceil(oscillator.text.length / 4);
