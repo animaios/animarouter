@@ -33,21 +33,24 @@ async function post(
 ) {
   const server = app.listen(0);
   const addr = server.address() as AddressInfo;
-  const res = await fetch(`http://127.0.0.1:${addr.port}${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify(body),
-  });
-  const raw = await res.text();
-  server.close();
-  let json: unknown = null;
   try {
-    json = JSON.parse(raw);
-  } catch {}
-  return { status: res.status, body: json, headers: res.headers };
+    const res = await fetch(`http://127.0.0.1:${addr.port}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const raw = await res.text();
+    let json: unknown = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {}
+    return { status: res.status, body: json, headers: res.headers };
+  } finally {
+    server.close();
+  }
 }
 
 function messageText(messages: ChatMessage[]): string {

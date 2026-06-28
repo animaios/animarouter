@@ -128,10 +128,17 @@ function promptTextForRabbit(messages: ChatMessage[]): string {
     .join('\n');
 }
 
+type SkipModelsStatement = { all: (modelDbId: number) => Array<{ id: number }> };
+let skipModelsStmtDb: ReturnType<typeof getDb> | undefined;
+let skipModelsStmt: SkipModelsStatement | undefined;
+
 function skipAllModelsExcept(modelDbId: number): Set<number> {
-  const rows = getDb()
-    .prepare('SELECT id FROM models WHERE enabled = 1 AND id != ?')
-    .all(modelDbId) as Array<{ id: number }>;
+  const db = getDb();
+  if (!skipModelsStmt || skipModelsStmtDb !== db) {
+    skipModelsStmt = db.prepare('SELECT id FROM models WHERE enabled = 1 AND id != ?') as SkipModelsStatement;
+    skipModelsStmtDb = db;
+  }
+  const rows = skipModelsStmt.all(modelDbId);
   return new Set(rows.map(row => row.id));
 }
 
@@ -860,9 +867,14 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
 
   if (shouldTryRabbitOscillator) {
-    const callModel: OscillatorModelCall = async ({ candidate, messages: stepMessages }) => {
+    const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
+      const stepInputTokens = stepMessages.reduce((sum, message) => {
+        const text = contentToString(message.content);
+        return sum + Math.ceil(text.length / 4);
+      }, 0);
+      const expectedOutputTokens = step === 'injection' ? 150 : (max_tokens ?? 1000);
       const stepRoute = routeRequest(
-        estimatedTotal,
+        stepInputTokens + expectedOutputTokens,
         undefined,
         candidate.modelDbId,
         false,
@@ -871,13 +883,11 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         { pinMode: true, stickySessionKey: sessionKey || undefined },
       );
       const stepStart = Date.now();
-      const stepMaxTokens = max_tokens ?? stepRoute.maxOutputTokens ?? undefined;
-      const stepInputTokens = stepMessages.reduce((sum, message) => {
-        const text = contentToString(message.content);
-        return sum + Math.ceil(text.length / 4);
-      }, 0);
 
       try {
+        const stepMaxTokens = step === 'injection'
+          ? Math.min(max_tokens ?? 150, 150)
+          : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
         const stepOptions = {
           temperature,
           max_tokens: stepMaxTokens,
