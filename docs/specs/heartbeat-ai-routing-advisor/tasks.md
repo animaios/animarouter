@@ -84,7 +84,7 @@
 
 ## Phase 11: Advisor ↔ Oscillator Feedback Loop
 
-- [ ] **T11.1** Extend `RoutingAdvice` with `oscillatorHint`, `injectionModel`, `injectionBrevity` fields
+- [x] **T11.1** Extend `RoutingAdvice` with `oscillatorHint`, `injectionModel`, `injectionBrevity` fields
 - [ ] **T11.2** Update `applyAdvice()` to handle `oscillatorHint` (enable/disable with confidence thresholds) and `injectionModel` suggestions
 - [ ] **T11.3** Update advisory system prompt to include oscillator control fields
 - [ ] **T11.4** Integration test: advisor recommends Rabbit / oscillator control change → `rabbit_enabled` or oscillator eligibility override applied → verified on next cycle
