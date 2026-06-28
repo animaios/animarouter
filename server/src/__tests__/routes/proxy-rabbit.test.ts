@@ -23,7 +23,9 @@ const { initDb, getDb, getUnifiedApiKey, setSetting } = await import(
   "../../db/index.js"
 );
 const { encrypt } = await import("../../lib/crypto.js");
-const { setRoutingStrategy } = await import("../../services/router.js");
+const { routeRequest, setRoutingStrategy } = await import(
+  "../../services/router.js"
+);
 
 async function post(
   app: Express,
@@ -55,6 +57,11 @@ async function post(
 
 function messageText(messages: ChatMessage[]): string {
   return messages.map((message) => String(message.content)).join("\n");
+}
+
+function responseText(body: unknown): string {
+  return (body as { choices: Array<{ message: { content: string } }> })
+    .choices[0].message.content;
 }
 
 function addModel(opts: {
@@ -215,11 +222,133 @@ describe("Rabbit proxy integration", () => {
     );
 
     expect(status).toBe(200);
-    expect(
-      (body as { choices: Array<{ message: { content: string } }> }).choices[0]
-        .message.content,
-    ).toBe("Final Rabbit answer.");
+    expect(responseText(body)).toBe("Final Rabbit answer.");
     expect(headers.get("x-rabbit-status")).toBe("completed");
+    expect(chatCompletion.mock.calls.map((call) => call[2])).toEqual([
+      "foundation",
+      "injection",
+      "foundation",
+    ]);
+  });
+
+  it("uses normal single-model routing for simple Rabbit requests", async () => {
+    chatCompletion.mockResolvedValue({
+      choices: [
+        { message: { role: "assistant", content: "Single model answer." } },
+      ],
+      usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+    });
+
+    const { status, body, headers } = await post(
+      app,
+      "/v1/chat/completions",
+      {
+        model: "auto",
+        messages: [{ role: "user", content: "hello" }],
+      },
+      key,
+    );
+
+    expect(status).toBe(200);
+    expect(responseText(body)).toBe("Single model answer.");
+    expect(headers.get("x-rabbit-status")).toBeNull();
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses normal pinned-model routing even when the prompt is complex", async () => {
+    chatCompletion.mockResolvedValue({
+      choices: [{ message: { role: "assistant", content: "Pinned answer." } }],
+      usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+    });
+
+    const { status, body, headers } = await post(
+      app,
+      "/v1/chat/completions",
+      {
+        model: "alpha/foundation",
+        messages: [
+          {
+            role: "user",
+            content: "Analyze this architecture and explain the tradeoffs.",
+          },
+        ],
+      },
+      key,
+    );
+
+    expect(status).toBe(200);
+    expect(responseText(body)).toBe("Pinned answer.");
+    expect(headers.get("x-rabbit-status")).toBeNull();
+    expect(chatCompletion).toHaveBeenCalledTimes(1);
+    expect(chatCompletion.mock.calls[0][2]).toBe("foundation");
+  });
+
+  it("uses normal single-model routing when Rabbit is load-shed", async () => {
+    setSetting("oscillator_load_shed_threshold", "1");
+    const heldRoutes = [routeRequest(100), routeRequest(100)];
+    chatCompletion.mockResolvedValue({
+      choices: [
+        { message: { role: "assistant", content: "Load-shed answer." } },
+      ],
+      usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+    });
+
+    try {
+      const { status, body, headers } = await post(
+        app,
+        "/v1/chat/completions",
+        {
+          model: "auto",
+          messages: [
+            {
+              role: "user",
+              content: "Analyze this architecture and explain the tradeoffs.",
+            },
+          ],
+        },
+        key,
+      );
+
+      expect(status).toBe(200);
+      expect(responseText(body)).toBe("Load-shed answer.");
+      expect(headers.get("x-rabbit-status")).toBeNull();
+      expect(chatCompletion).toHaveBeenCalledTimes(1);
+    } finally {
+      for (const route of heldRoutes) route.release();
+    }
+  });
+
+  it("falls back to normal single-model routing when all Rabbit foundation candidates fail", async () => {
+    chatCompletion.mockImplementation(async () => {
+      if (chatCompletion.mock.calls.length <= 2) {
+        throw new Error("foundation failed");
+      }
+      return {
+        choices: [
+          { message: { role: "assistant", content: "Recovered fallback." } },
+        ],
+        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+      };
+    });
+
+    const { status, body, headers } = await post(
+      app,
+      "/v1/chat/completions",
+      {
+        model: "auto",
+        messages: [
+          {
+            role: "user",
+            content: "Analyze this architecture and explain the tradeoffs.",
+          },
+        ],
+      },
+      key,
+    );
+
+    expect(status).toBe(200);
+    expect(responseText(body)).toBe("Recovered fallback.");
+    expect(headers.get("x-rabbit-status")).toBeNull();
     expect(chatCompletion.mock.calls.map((call) => call[2])).toEqual([
       "foundation",
       "injection",
