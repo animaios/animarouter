@@ -69,7 +69,7 @@
 - [x] **T9.7** Implement per-step timeout and graceful fallback (Step 1 candidate fail → try next foundation candidate; all Step 1 candidates fail → normal Smartest-weight single-model path; Step 2/3 fail → return selected Foundation)
 - [x] **T9.8** Implement `detectMeow(text, patterns)` — structural tag leakage, Unicode script fragmentation, repeated chars, system markers
 - [ ] **T9.9** Implement load-shedding: check `providerInFlight` count vs `oscillator_load_shed_threshold` before entering oscillator; when load-shed, continue with normal Rabbit / Smartest-weight single-model routing
-- [ ] **T9.10** Unit tests for Rabbit strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
+- [x] **T9.10** Unit tests for Rabbit strategy selection, `resolveFoundationCandidates`, and `resolveInjectionModel` with various config combos, including top-candidate failure and no hardcoded GLM/Nemotron assumptions
 - [x] **T9.11** Unit tests for `detectMeow` — positive/negative cases, false positive rate on normal text
 
 ## Phase 10: Oscillator Integration
