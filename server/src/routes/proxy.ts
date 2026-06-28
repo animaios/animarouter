@@ -1,42 +1,84 @@
-import crypto from 'crypto';
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { z } from 'zod';
-import type { ChatMessage, ModelListRow } from '@animarouter/shared/types.js';
-import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, getRoutingStrategy, getProviderInFlightTotal, type RouteResult } from '../services/router.js';
-import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
-import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
-import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs, isDailyLimitExhausted } from '../services/ratelimit.js';
-import { runEmbeddings, EmbeddingsError } from '../services/embeddings.js';
-import { getDb, getSetting, getUnifiedApiKey } from '../db/index.js';
-import { getAliasCache, resolveGroupKey } from '../db/model-groups.js';
-import { contentToString, messageHasImage, normalizeOutboundContent } from '../lib/content.js';
-import { repairToolArguments, toolSchemaMap } from '../lib/tool-args.js';
-import { sanitizeProviderErrorMessage } from '../lib/error-redaction.js';
-import { rescueInlineToolCalls, startsWithDialectMarker, couldBecomeDialectMarker, containsDialectMarker } from '../lib/tool-call-rescue.js';
-import { getContextHandoffMode, recordIncomingMessages, maybeInjectContextHandoff, recordSuccessfulModel, hasPriorModel, HANDOFF_MAX_TOKENS } from '../services/context-handoff.js';
-import { publish } from '../services/events.js';
-import { getFeatureSetting } from '../services/feature-settings.js';
-import { recordActivity, markKeyUnhealthy, isHeartbeatEnabled } from '../services/heartbeat.js';
-import { getRelayTransport, isRelayTransportConfigured, computeWorkerIndex } from '../services/proxy-transport.js';
+import type { ChatMessage, ModelListRow } from "@animarouter/shared/types.js";
+import crypto from "crypto";
+import type { Request, Response } from "express";
+import { Router } from "express";
+import { z } from "zod";
+import { getDb, getSetting, getUnifiedApiKey } from "../db/index.js";
+import { getAliasCache, resolveGroupKey } from "../db/model-groups.js";
 import {
-  executeOscillator,
-  getRabbitOscillatorDecision,
-  logOscillatorResult,
+  contentToString,
+  messageHasImage,
+  normalizeOutboundContent,
+} from "../lib/content.js";
+import { sanitizeProviderErrorMessage } from "../lib/error-redaction.js";
+import { repairToolArguments, toolSchemaMap } from "../lib/tool-args.js";
+import {
+  containsDialectMarker,
+  couldBecomeDialectMarker,
+  rescueInlineToolCalls,
+  startsWithDialectMarker,
+} from "../lib/tool-call-rescue.js";
+import type { BaseProvider } from "../providers/base.js";
+import {
+  getContextHandoffMode,
+  HANDOFF_MAX_TOKENS,
+  hasPriorModel,
+  maybeInjectContextHandoff,
+  recordIncomingMessages,
+  recordSuccessfulModel,
+} from "../services/context-handoff.js";
+import {
+  classifyError,
+  recordFailure,
+  recordSuccess,
+} from "../services/degradation.js";
+import { EmbeddingsError, runEmbeddings } from "../services/embeddings.js";
+import { publish } from "../services/events.js";
+import { getFeatureSetting } from "../services/feature-settings.js";
+import {
+  isHeartbeatEnabled,
+  markKeyUnhealthy,
+  recordActivity,
+} from "../services/heartbeat.js";
+import {
   type ExecuteOscillatorResult,
+  executeOscillator,
+  getIterativeRefinementOscillatorDecision,
+  logOscillatorResult,
   type OscillatorModelCall,
   type OscillatorStepLatencies,
   type OscillatorStreamChunk,
-} from '../services/rabbit-shake.js';
-import type { BaseProvider } from '../providers/base.js';
-
+} from "../services/iterative-refinement-shake.js";
+import { clearExhausted, markExhausted } from "../services/key-exhaustion.js";
+import {
+  computeWorkerIndex,
+  getRelayTransport,
+  isRelayTransportConfigured,
+} from "../services/proxy-transport.js";
+import {
+  computeRetryCooldownMs,
+  isDailyLimitExhausted,
+  recordRequest,
+  recordTokens,
+  setCooldown,
+} from "../services/ratelimit.js";
+import {
+  getProviderInFlightTotal,
+  getRoutingStrategy,
+  hasEnabledToolsModel,
+  hasEnabledVisionModel,
+  type RouteResult,
+  routeRequest,
+} from "../services/router.js";
 
 /** Resolve the upstream base URL for proxy transport. Falls back to the provider's
  *  baseUrl if available, otherwise throws — proxy transport requires a known upstream URL. */
 function resolveProviderBaseUrl(provider: BaseProvider): string {
   const url = provider.baseUrl;
   if (url) return url;
-  throw new Error(`Proxy transport requires a provider with a baseUrl; ${provider.name} does not expose one. Disable use_proxy for this key.`);
+  throw new Error(
+    `Proxy transport requires a provider with a baseUrl; ${provider.name} does not expose one. Disable use_proxy for this key.`,
+  );
 }
 
 export const proxyRouter = Router();
@@ -45,7 +87,7 @@ export const proxyRouter = Router();
 // on every request, but animarouter's whole point is to pick the model itself.
 // Requesting this id means "let the router decide" — identical to omitting
 // `model` entirely.
-const AUTO_MODEL_ID = 'auto';
+const AUTO_MODEL_ID = "auto";
 
 function isAutoModel(modelId: string | undefined): boolean {
   return modelId === AUTO_MODEL_ID;
@@ -54,14 +96,17 @@ function isAutoModel(modelId: string | undefined): boolean {
 // Constant-time string comparison for the unified API key. Plain `===` leaks
 // length and per-character timing, which a network attacker could in principle
 // use to recover the key one byte at a time.
-export function timingSafeStringEqual(provided: string, expected: string): boolean {
+export function timingSafeStringEqual(
+  provided: string,
+  expected: string,
+): boolean {
   // Use HMAC to produce fixed-length digests so timingSafeEqual always
   // receives same-length buffers regardless of input length. This eliminates
   // both the per-character timing leak and the length-branch timing leak that
   // the Buffer.alloc-on-mismatch approach had.
   const key = Buffer.alloc(32);
-  const a = crypto.createHmac('sha256', key).update(provided).digest();
-  const b = crypto.createHmac('sha256', key).update(expected).digest();
+  const a = crypto.createHmac("sha256", key).update(provided).digest();
+  const b = crypto.createHmac("sha256", key).update(expected).digest();
   return crypto.timingSafeEqual(a, b);
 }
 
@@ -72,10 +117,10 @@ export function timingSafeStringEqual(provided: string, expected: string): boole
 // rather than a bearer token, and were getting a spurious "Invalid API key"
 // 401 before this fallback existed.
 export function extractApiToken(req: Request): string | undefined {
-  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, '').trim();
+  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "").trim();
   if (bearer) return bearer;
 
-  const apiKeyHeader = req.headers['x-api-key'];
+  const apiKeyHeader = req.headers["x-api-key"];
   const xApiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
   const trimmed = xApiKey?.trim();
   return trimmed || undefined;
@@ -85,15 +130,21 @@ export function extractApiToken(req: Request): string | undefined {
 // Key: <api_key>:<session_hash> → model_db_id
 // This prevents model switching mid-conversation which causes hallucination
 function isStickySessionEnabled(): boolean {
-  return getFeatureSetting('sticky_session_enabled') as boolean;
+  return getFeatureSetting("sticky_session_enabled") as boolean;
 }
-const stickySessionMap = new Map<string, { modelDbId: number; lastUsed: number }>();
+const stickySessionMap = new Map<
+  string,
+  { modelDbId: number; lastUsed: number }
+>();
 
 function getStickyTtlMs(): number {
-  return (getFeatureSetting('sticky_session_ttl_min') as number) * 60 * 1000;
+  return (getFeatureSetting("sticky_session_ttl_min") as number) * 60 * 1000;
 }
 
-function getSessionKey(messages: ChatMessage[], sessionIdHeader?: string): string {
+function getSessionKey(
+  messages: ChatMessage[],
+  sessionIdHeader?: string,
+): string {
   // Explicit session pinning: clients that manage their own conversation ids
   // (agent harnesses especially) can send X-Session-Id and get exact
   // affinity regardless of how their message history mutates. (#231)
@@ -108,57 +159,73 @@ function getSessionKey(messages: ChatMessage[], sessionIdHeader?: string): strin
   // the old ':single'/':multi' split guaranteed a sticky MISS on turn 2,
   // exactly where agents replay the assistant's tool-call dialect and a model
   // switch causes cross-dialect contamination.
-  const firstUser = messages.find(m => m.role === 'user');
-  if (!firstUser) return '';
-  const text = contentToString(firstUser.content ?? '');
-  if (!text) return '';
-  return crypto.createHash('sha1').update(text).digest('hex');
+  const firstUser = messages.find((m) => m.role === "user");
+  if (!firstUser) return "";
+  const text = contentToString(firstUser.content ?? "");
+  if (!text) return "";
+  return crypto.createHash("sha1").update(text).digest("hex");
 }
 
-function getSessionKeyWithApiKey(apiKey: string | undefined, messages: ChatMessage[], sessionIdHeader?: string): string {
+function getSessionKeyWithApiKey(
+  apiKey: string | undefined,
+  messages: ChatMessage[],
+  sessionIdHeader?: string,
+): string {
   // When sticky sessions are enabled, include the API key in the session key
   // to make sessions per-API-key instead of global.
   const sessionKey = getSessionKey(messages, sessionIdHeader);
-  if (!sessionKey) return '';
+  if (!sessionKey) return "";
   if (!apiKey) return sessionKey;
   return `${apiKey}:${sessionKey}`;
 }
 
-function promptTextForRabbit(messages: ChatMessage[]): string {
+function promptTextForIterativeRefinement(messages: ChatMessage[]): string {
   return messages
-    .filter(m => m.role === 'user')
-    .map(m => contentToString(m.content))
+    .filter((m) => m.role === "user")
+    .map((m) => contentToString(m.content))
     .filter(Boolean)
-    .join('\n');
+    .join("\n");
 }
 
-function oscillatorFailedStepNumber(step: ExecuteOscillatorResult['failedStep']): 1 | 2 | 3 | undefined {
-  if (step === 'foundation') return 1;
-  if (step === 'injection') return 2;
-  if (step === 'anchor' || step === 'validation') return 3;
+function oscillatorFailedStepNumber(
+  step: ExecuteOscillatorResult["failedStep"],
+): 1 | 2 | 3 | undefined {
+  if (step === "foundation") return 1;
+  if (step === "injection") return 2;
+  if (step === "anchor" || step === "validation") return 3;
   return undefined;
 }
 
-function rabbitModelKey(candidate: ExecuteOscillatorResult['foundation']): string {
-  return candidate ? `${candidate.platform}/${candidate.modelId}` : 'rabbit';
+function iterativeRefinementModelKey(
+  candidate: ExecuteOscillatorResult["foundation"],
+): string {
+  return candidate
+    ? `${candidate.platform}/${candidate.modelId}`
+    : "iterative_refinement";
 }
 
-function publishRabbitOscillatorEvents(params: {
+function publishIterativeRefinementOscillatorEvents(params: {
   sessionKey: string;
   result: ExecuteOscillatorResult;
   totalLatencyMs: number;
   stepLatencies: OscillatorStepLatencies;
 }): void {
   const { sessionKey, result, totalLatencyMs, stepLatencies } = params;
-  const foundationModel = rabbitModelKey(result.foundation);
-  const injectionModel = rabbitModelKey(result.injection);
-  const step1Succeeded = result.status !== 'single_model_fallback';
-  const step2Succeeded = result.status === 'completed' || (result.status === 'foundation_fallback' && result.failedStep !== 'injection');
-  const step3Succeeded = result.status === 'completed' || (result.status === 'foundation_fallback' && result.failedStep === 'validation');
+  const foundationModel = iterativeRefinementModelKey(result.foundation);
+  const injectionModel = iterativeRefinementModelKey(result.injection);
+  const step1Succeeded = result.status !== "single_model_fallback";
+  const step2Succeeded =
+    result.status === "completed" ||
+    (result.status === "foundation_fallback" &&
+      result.failedStep !== "injection");
+  const step3Succeeded =
+    result.status === "completed" ||
+    (result.status === "foundation_fallback" &&
+      result.failedStep === "validation");
 
   if (result.foundation && result.injection) {
     publish({
-      type: 'oscillator.started',
+      type: "oscillator.started",
       sessionKey,
       foundationModel,
       injectionModel,
@@ -168,12 +235,12 @@ function publishRabbitOscillatorEvents(params: {
 
   if (result.foundation && stepLatencies.foundation != null && step1Succeeded) {
     publish({
-      type: 'oscillator.step_complete',
+      type: "oscillator.step_complete",
       sessionKey,
       step: 1,
       model: foundationModel,
       latencyMs: stepLatencies.foundation,
-      bridgeType: 'none',
+      bridgeType: "none",
       strippedArtifacts: 0,
       at: Date.now(),
     });
@@ -181,12 +248,12 @@ function publishRabbitOscillatorEvents(params: {
 
   if (result.injection && stepLatencies.injection != null && step2Succeeded) {
     publish({
-      type: 'oscillator.step_complete',
+      type: "oscillator.step_complete",
       sessionKey,
       step: 2,
       model: injectionModel,
       latencyMs: stepLatencies.injection,
-      bridgeType: result.bridges.injection?.bridgeType ?? 'none',
+      bridgeType: result.bridges.injection?.bridgeType ?? "none",
       strippedArtifacts: result.bridges.injection?.strippedArtifacts ?? 0,
       at: Date.now(),
     });
@@ -194,12 +261,12 @@ function publishRabbitOscillatorEvents(params: {
 
   if (result.foundation && stepLatencies.anchor != null && step3Succeeded) {
     publish({
-      type: 'oscillator.step_complete',
+      type: "oscillator.step_complete",
       sessionKey,
       step: 3,
       model: foundationModel,
       latencyMs: stepLatencies.anchor,
-      bridgeType: result.bridges.anchor?.bridgeType ?? 'none',
+      bridgeType: result.bridges.anchor?.bridgeType ?? "none",
       strippedArtifacts: result.bridges.anchor?.strippedArtifacts ?? 0,
       at: Date.now(),
     });
@@ -207,17 +274,17 @@ function publishRabbitOscillatorEvents(params: {
 
   if (result.meow?.detected) {
     publish({
-      type: 'oscillator.meow_detected',
+      type: "oscillator.meow_detected",
       sessionKey,
-      pattern: result.meow.pattern ?? result.meow.reason ?? 'unknown',
+      pattern: result.meow.pattern ?? result.meow.reason ?? "unknown",
       fellBackTo: foundationModel,
       at: Date.now(),
     });
   }
 
-  if (result.status === 'completed') {
+  if (result.status === "completed") {
     publish({
-      type: 'oscillator.complete',
+      type: "oscillator.complete",
       sessionKey,
       totalLatencyMs,
       meowDetected: !!result.meow?.detected,
@@ -230,36 +297,46 @@ function publishRabbitOscillatorEvents(params: {
   const failedStep = oscillatorFailedStepNumber(result.failedStep);
   if (failedStep) {
     publish({
-      type: 'oscillator.failed',
+      type: "oscillator.failed",
       sessionKey,
       failedStep,
       error: sanitizeProviderErrorMessage(result.error ?? result.status),
-      fellBackTo: result.status === 'single_model_fallback' ? 'single-model' : foundationModel,
+      fellBackTo:
+        result.status === "single_model_fallback"
+          ? "single-model"
+          : foundationModel,
       at: Date.now(),
     });
   }
 }
 
-type SkipModelsStatement = { all: (modelDbId: number) => Array<{ id: number }> };
+type SkipModelsStatement = {
+  all: (modelDbId: number) => Array<{ id: number }>;
+};
 let skipModelsStmtDb: ReturnType<typeof getDb> | undefined;
 let skipModelsStmt: SkipModelsStatement | undefined;
 
 function skipAllModelsExcept(modelDbId: number): Set<number> {
   const db = getDb();
   if (!skipModelsStmt || skipModelsStmtDb !== db) {
-    skipModelsStmt = db.prepare('SELECT id FROM models WHERE enabled = 1 AND id != ?') as SkipModelsStatement;
+    skipModelsStmt = db.prepare(
+      "SELECT id FROM models WHERE enabled = 1 AND id != ?",
+    ) as SkipModelsStatement;
     skipModelsStmtDb = db;
   }
   const rows = skipModelsStmt.all(modelDbId);
-  return new Set(rows.map(row => row.id));
+  return new Set(rows.map((row) => row.id));
 }
 
-export function getStickyModel(messages: ChatMessage[], sessionIdHeader?: string): number | undefined {
+export function getStickyModel(
+  messages: ChatMessage[],
+  sessionIdHeader?: string,
+): number | undefined {
   // Only apply sticky for multi-turn (has assistant messages = continuation)
   // Skip if sticky sessions are disabled
   if (!isStickySessionEnabled()) return undefined;
 
-  const hasAssistant = messages.some(m => m.role === 'assistant');
+  const hasAssistant = messages.some((m) => m.role === "assistant");
   if (!hasAssistant) return undefined;
 
   const key = getSessionKey(messages, sessionIdHeader);
@@ -275,7 +352,11 @@ export function getStickyModel(messages: ChatMessage[], sessionIdHeader?: string
   return entry.modelDbId;
 }
 
-export function setStickyModel(messages: ChatMessage[], modelDbId: number, sessionIdHeader?: string) {
+export function setStickyModel(
+  messages: ChatMessage[],
+  modelDbId: number,
+  sessionIdHeader?: string,
+) {
   // Only apply sticky if enabled
   if (!isStickySessionEnabled()) return;
 
@@ -294,16 +375,19 @@ export function setStickyModel(messages: ChatMessage[], modelDbId: number, sessi
 
 // OpenAI-compatible /models endpoint (used by Hermes for metadata)
 // shows API models which is linked by the user
-proxyRouter.get('/models', (req: Request, res: Response) => {
+proxyRouter.get("/models", (req: Request, res: Response) => {
   const token = extractApiToken(req);
   const unifiedKey = getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
-    res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
+    res.status(401).json({
+      error: { message: "Invalid API key", type: "authentication_error" },
+    });
     return;
   }
 
   const db = getDb();
-  const models = db.prepare(`
+  const models = db
+    .prepare(`
     SELECT platform, model_id, display_name, context_window, intelligence_rank, id
     FROM models m
     WHERE m.enabled = 1
@@ -316,22 +400,23 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
           AND k.enabled = 1
       )
     ORDER BY intelligence_rank ASC, id ASC
-  `).all() as ModelListRow[];
+  `)
+    .all() as ModelListRow[];
 
   res.json({
-    object: 'list',
+    object: "list",
     data: [
       {
         id: AUTO_MODEL_ID,
-        object: 'model',
+        object: "model",
         created: 0,
-        owned_by: 'api-gateway',
-        name: 'Auto (router picks the best available model)',
+        owned_by: "api-gateway",
+        name: "Auto (router picks the best available model)",
         context_window: null,
       },
-      ...models.map(m => ({
+      ...models.map((m) => ({
         id: `${m.platform}/${m.model_id}`,
-        object: 'model',
+        object: "model",
         created: 0,
         owned_by: m.platform,
         name: m.display_name,
@@ -348,9 +433,9 @@ proxyRouter.get('/models', (req: Request, res: Response) => {
 let _providerFastFailThreshold: number | null = null;
 function getProviderFastFailThreshold(): number {
   if (_providerFastFailThreshold === null) {
-    const enabled = getFeatureSetting('provider_fastfail_enabled');
+    const enabled = getFeatureSetting("provider_fastfail_enabled");
     _providerFastFailThreshold = enabled
-      ? (getFeatureSetting('provider_fastfail_threshold') as number)
+      ? (getFeatureSetting("provider_fastfail_threshold") as number)
       : 0;
   }
   return _providerFastFailThreshold;
@@ -370,7 +455,7 @@ export function resetProviderFastFailCache(): void {
 // and paired with their tool-result messages by order. (#200)
 const toolCallSchema = z.object({
   id: z.string().optional(),
-  type: z.literal('function').optional(),
+  type: z.literal("function").optional(),
   function: z.object({
     name: z.string().min(1),
     arguments: z.union([z.string(), z.record(z.string(), z.unknown())]),
@@ -378,8 +463,9 @@ const toolCallSchema = z.object({
   thought_signature: z.string().optional(),
 });
 
-const toolCallArgsToString = (args: string | Record<string, unknown>): string =>
-  typeof args === 'string' ? args : JSON.stringify(args);
+const toolCallArgsToString = (
+  args: string | Record<string, unknown>,
+): string => (typeof args === "string" ? args : JSON.stringify(args));
 
 // OpenAI multimodal envelope. Clients like opencode / continue.dev send
 // content as an array of typed blocks even when only text is present, and
@@ -388,11 +474,14 @@ const toolCallArgsToString = (args: string | Record<string, unknown>): string =>
 // string for providers that don't support arrays (Cohere, Cloudflare).
 // Non-text blocks pass z validation but get dropped by contentToString —
 // vision/audio still isn't supported. (#200)
-const contentBlockSchema = z.union([z.string(), z.record(z.string(), z.unknown())]);
+const contentBlockSchema = z.union([
+  z.string(),
+  z.record(z.string(), z.unknown()),
+]);
 const contentSchema = z.union([z.string(), z.array(contentBlockSchema)]);
 
 const systemMessageSchema = z.object({
-  role: z.literal('system'),
+  role: z.literal("system"),
   content: contentSchema,
   name: z.string().optional(),
 });
@@ -401,13 +490,13 @@ const systemMessageSchema = z.object({
 // and forward as "system" — none of the routed providers know the developer
 // role. (#200)
 const developerMessageSchema = z.object({
-  role: z.literal('developer'),
+  role: z.literal("developer"),
   content: contentSchema,
   name: z.string().optional(),
 });
 
 const userMessageSchema = z.object({
-  role: z.literal('user'),
+  role: z.literal("user"),
   content: contentSchema,
   name: z.string().optional(),
 });
@@ -419,7 +508,7 @@ const userMessageSchema = z.object({
 // forwarding (see message build below) rather than 400-ing a payload OpenAI
 // would take. (#165)
 const assistantMessageSchema = z.object({
-  role: z.literal('assistant'),
+  role: z.literal("assistant"),
   content: z.union([contentSchema, z.null()]).optional(),
   name: z.string().optional(),
   // tool_calls: null (not just missing) is what several agents replay for
@@ -441,7 +530,7 @@ const assistantMessageSchema = z.object({
 // nothing) and a missing/empty tool_call_id (Gemini-lineage agents) — coerced
 // to "" and paired by order with the preceding tool_calls respectively. (#200)
 const toolMessageSchema = z.object({
-  role: z.literal('tool'),
+  role: z.literal("tool"),
   content: z.union([contentSchema, z.null()]).optional(),
   tool_call_id: z.string().optional(),
   name: z.string().optional(),
@@ -450,7 +539,7 @@ const toolMessageSchema = z.object({
 // Legacy function-calling shape (pre-tools OpenAI API). Old clients still
 // replay these in history; forwarded as a tool message. (#200)
 const functionMessageSchema = z.object({
-  role: z.literal('function'),
+  role: z.literal("function"),
   name: z.string().min(1),
   content: z.union([contentSchema, z.null()]).optional(),
 });
@@ -458,7 +547,7 @@ const functionMessageSchema = z.object({
 const toolDefinitionSchema = z.object({
   // Some agents omit `type` on tool definitions; re-defaulted to 'function'
   // on forward. (#200)
-  type: z.literal('function').optional(),
+  type: z.literal("function").optional(),
   function: z.object({
     name: z.string().min(1),
     description: z.string().optional(),
@@ -469,9 +558,9 @@ const toolDefinitionSchema = z.object({
 const toolChoiceSchema = z.union([
   // 'any' is the Mistral/Gemini wording for OpenAI's 'required'; mapped on
   // forward. (#200)
-  z.enum(['none', 'auto', 'required', 'any']),
+  z.enum(["none", "auto", "required", "any"]),
   z.object({
-    type: z.literal('function'),
+    type: z.literal("function"),
     function: z.object({
       name: z.string().min(1),
     }),
@@ -482,27 +571,38 @@ const toolChoiceSchema = z.union([
 // this to their native vocab (`thinking.level`, `reasoning_effort`,
 // `output_config.effort`, etc.). `xhigh` is Anthropic-only; providers that
 // don't recognize it collapse to `high`. (#290)
-const thinkingEffortSchema = z.enum(['max', 'xhigh', 'high', 'medium', 'low', 'minimal']);
+const thinkingEffortSchema = z.enum([
+  "max",
+  "xhigh",
+  "high",
+  "medium",
+  "low",
+  "minimal",
+]);
 
 // Richer thinking-control object. Providers translate this into their native
 // wire shape on the way out. (#290)
 const thinkingConfigSchema = z.object({
-  type: z.enum(['enabled', 'adaptive', 'disabled']).optional(),
+  type: z.enum(["enabled", "adaptive", "disabled"]).optional(),
   effort: thinkingEffortSchema.optional(),
   budget: z.number().int().nonnegative().optional(),
-  display: z.enum(['summarized', 'omitted']).optional(),
+  display: z.enum(["summarized", "omitted"]).optional(),
   includeThoughts: z.boolean().optional(),
 });
 
 const chatCompletionSchema = z.object({
-  messages: z.array(z.union([
-    systemMessageSchema,
-    developerMessageSchema,
-    userMessageSchema,
-    assistantMessageSchema,
-    toolMessageSchema,
-    functionMessageSchema,
-  ])).min(1),
+  messages: z
+    .array(
+      z.union([
+        systemMessageSchema,
+        developerMessageSchema,
+        userMessageSchema,
+        assistantMessageSchema,
+        toolMessageSchema,
+        functionMessageSchema,
+      ]),
+    )
+    .min(1),
   model: z.string().optional(),
   temperature: z.number().min(0).max(2).optional(),
   // Some clients send max_tokens <= 0 (or -1) to mean "no limit"; accepted and
@@ -523,57 +623,76 @@ const chatCompletionSchema = z.object({
   thinking: thinkingConfigSchema.nullable().optional(),
 });
 export function isRetryableError(err: any): boolean {
-  const msg = (err.message ?? '').toLowerCase();
-  return msg.includes('429') || msg.includes('rate limit') || msg.includes('too many requests')
-    || msg.includes('quota') || msg.includes('resource_exhausted')
-    || msg.includes('aborted') || msg.includes('timeout') || msg.includes('etimedout')
-    || msg.includes('econnrefused') || msg.includes('econnreset')
-    || msg.includes('503') || msg.includes('unavailable')
-    || msg.includes('500') || msg.includes('internal server error')
+  const msg = (err.message ?? "").toLowerCase();
+  return (
+    msg.includes("429") ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests") ||
+    msg.includes("quota") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("aborted") ||
+    msg.includes("timeout") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnrefused") ||
+    msg.includes("econnreset") ||
+    msg.includes("503") ||
+    msg.includes("unavailable") ||
+    msg.includes("500") ||
+    msg.includes("internal server error") ||
     // 413: this model's payload limit is too small for the request, but another
     // provider in the fallback chain may have a larger limit. Same reasoning as 503.
-    || msg.includes('413') || msg.includes('payload too large') || msg.includes('request body too large')
-    || msg.includes('request entity too large') || msg.includes('content too large')
+    msg.includes("413") ||
+    msg.includes("payload too large") ||
+    msg.includes("request body too large") ||
+    msg.includes("request entity too large") ||
+    msg.includes("content too large") ||
     // 404: model deprecated/removed upstream (e.g. OpenRouter's "no endpoints found"
     // for a model that's been pulled). Rotate to the next model in the chain —
     // setCooldown + the heartbeat will deprioritize unhealthy keys on this platform.
-    || msg.includes('404') || msg.includes('not found') || msg.includes('no endpoints found')
+    msg.includes("404") ||
+    msg.includes("not found") ||
+    msg.includes("no endpoints found") ||
     // 403: the key is valid (it passed validateKey, and on-demand health check
     // marks truly-forbidden keys as invalid) but this specific model is off-limits to
     // the key's tier — e.g. gpt-4o on GitHub Models' free tier, subscription-only
     // models on Cloudflare. Another model in the chain is reachable, so fail over
     // instead of 502-ing the whole request. Paired with isModelAccessForbiddenError
     // to rule the model out for this request and a day-long bench. See issue #256.
-    || isModelAccessForbiddenError(err)
+    isModelAccessForbiddenError(err) ||
     // 400: one provider may reject parameters another accepts (e.g. max_tokens
     // limits, unsupported params). The matching pattern is "api error 400"
     // which comes from the OpenAI-compat provider's error formatting, not
     // a bare "400" which is deliberately non-retryable for validation errors.
-    || msg.includes('api error 400')
+    msg.includes("api error 400") ||
     // 402: this provider/key is out of credits (e.g. HuggingFace Router
     // "API error 402: Payment required"). The SAME model often lives on another
     // provider (Kimi K2.6 is on HF + Cloudflare + NVIDIA), so fail over instead
     // of killing the workflow. Paired with a long cooldown (isPaymentRequiredError)
     // so we don't re-hammer the broke key every retry.
-    || isPaymentRequiredError(err)
+    isPaymentRequiredError(err) ||
     // Dead-turn classes from the stream turn-integrity layer (#231 audit):
     // all thrown before any byte reached the client, so another model can
     // serve the request invisibly.
-    || msg.includes('empty completion')
-    || msg.includes('in-band provider error')
-    || msg.includes('stream ended unexpectedly')
-    || msg.includes('stream stalled')
-    || msg.includes('unparseable inline tool-call dialect');
+    msg.includes("empty completion") ||
+    msg.includes("in-band provider error") ||
+    msg.includes("stream ended unexpectedly") ||
+    msg.includes("stream stalled") ||
+    msg.includes("unparseable inline tool-call dialect")
+  );
 }
 
 // A 402 Payment Required / out-of-credits error. Distinct from a transient 429:
 // it won't recover on the next window, so the caller benches the model+key with
 // PAYMENT_REQUIRED_COOLDOWN_MS (a full day) rather than the 90s transient cooldown.
 export function isPaymentRequiredError(err: any): boolean {
-  const msg = (err.message ?? '').toLowerCase();
-  return msg.includes('402') || msg.includes('payment required')
-    || msg.includes('insufficient_quota') || msg.includes('insufficient credit')
-    || msg.includes('insufficient balance');
+  const msg = (err.message ?? "").toLowerCase();
+  return (
+    msg.includes("402") ||
+    msg.includes("payment required") ||
+    msg.includes("insufficient_quota") ||
+    msg.includes("insufficient credit") ||
+    msg.includes("insufficient balance")
+  );
 }
 
 // A 404 "model removed/deprecated upstream" error. It's a MODEL-level failure,
@@ -582,8 +701,12 @@ export function isPaymentRequiredError(err: any): boolean {
 // burning one fallback attempt per key on the same dead route.
 // (PR #111, credits @barbotkonv.)
 export function isModelNotFoundError(err: any): boolean {
-  const msg = (err.message ?? '').toLowerCase();
-  return msg.includes('404') || msg.includes('not found') || msg.includes('no endpoints found');
+  const msg = (err.message ?? "").toLowerCase();
+  return (
+    msg.includes("404") ||
+    msg.includes("not found") ||
+    msg.includes("no endpoints found")
+  );
 }
 
 // A 403 Forbidden returned for a specific model behind an otherwise-valid key.
@@ -594,8 +717,8 @@ export function isModelNotFoundError(err: any): boolean {
 // invalid; a 403 reaching here is model-not-on-that-tier. See issue #256.
 export function isModelAccessForbiddenError(err: any): boolean {
   if (err?.status === 403) return true;
-  const msg = (err?.message ?? '').toLowerCase();
-  return msg.includes('403') || msg.includes('forbidden');
+  const msg = (err?.message ?? "").toLowerCase();
+  return msg.includes("403") || msg.includes("forbidden");
 }
 
 // Pull the incremental text out of a streaming chunk for token counting.
@@ -605,7 +728,7 @@ export function isModelAccessForbiddenError(err: any): boolean {
 // properties of undefined (reading '0')", which — once the SSE stream has
 // started — aborts the response mid-flight with no chance to fall back.
 export function streamChunkText(chunk: any): string {
-  return chunk?.choices?.[0]?.delta?.content ?? '';
+  return chunk?.choices?.[0]?.delta?.content ?? "";
 }
 
 // OpenAI-compatible embeddings endpoint, routed through the embeddings family
@@ -618,36 +741,62 @@ const EmbeddingsBody = z.object({
   input: z.union([z.string(), z.array(z.string())]),
 });
 
-proxyRouter.post('/embeddings', async (req: Request, res: Response) => {
+proxyRouter.post("/embeddings", async (req: Request, res: Response) => {
   const token = extractApiToken(req);
   const unifiedKey = getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
-    res.status(401).json({ error: { message: 'Invalid API key', type: 'authentication_error' } });
+    res.status(401).json({
+      error: { message: "Invalid API key", type: "authentication_error" },
+    });
     return;
   }
   const parsed = EmbeddingsBody.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: 'Invalid request: `input` is required', type: 'invalid_request_error' } });
+    res.status(400).json({
+      error: {
+        message: "Invalid request: `input` is required",
+        type: "invalid_request_error",
+      },
+    });
     return;
   }
-  const inputs = Array.isArray(parsed.data.input) ? parsed.data.input : [parsed.data.input];
+  const inputs = Array.isArray(parsed.data.input)
+    ? parsed.data.input
+    : [parsed.data.input];
   try {
     const result = await runEmbeddings(parsed.data.model, inputs);
     res.json({
-      object: 'list',
-      data: result.vectors.map((values, i) => ({ object: 'embedding', index: i, embedding: values })),
+      object: "list",
+      data: result.vectors.map((values, i) => ({
+        object: "embedding",
+        index: i,
+        embedding: values,
+      })),
       model: result.family,
       provider: result.platform,
-      usage: { prompt_tokens: result.inputTokens, total_tokens: result.inputTokens },
+      usage: {
+        prompt_tokens: result.inputTokens,
+        total_tokens: result.inputTokens,
+      },
     });
   } catch (err: any) {
     const status = err instanceof EmbeddingsError ? err.status : 502;
-    const type = status === 400 ? 'invalid_request_error' : status === 429 ? 'rate_limit_error' : 'server_error';
-    res.status(status).json({ error: { message: `embedding error: ${err?.message ?? 'unknown'}`, type } });
+    const type =
+      status === 400
+        ? "invalid_request_error"
+        : status === 429
+          ? "rate_limit_error"
+          : "server_error";
+    res.status(status).json({
+      error: {
+        message: `embedding error: ${err?.message ?? "unknown"}`,
+        type,
+      },
+    });
   }
 });
 
-proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
+proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
   const start = Date.now();
 
   // Authenticate with the unified API key for every proxy request, including
@@ -657,7 +806,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const unifiedKey = getUnifiedApiKey();
   if (!token || !timingSafeStringEqual(token, unifiedKey)) {
     res.status(401).json({
-      error: { message: 'Invalid API key', type: 'authentication_error' },
+      error: { message: "Invalid API key", type: "authentication_error" },
     });
     return;
   }
@@ -672,31 +821,44 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // "Invalid input") and a server-side breadcrumb — these rejections never
     // reach the request log, which made #200 nearly undebuggable.
     const detail = parsed.error.errors
-      .map(e => (e.path.length ? `${e.path.join('.')}: ${e.message}` : e.message))
+      .map((e) =>
+        e.path.length ? `${e.path.join(".")}: ${e.message}` : e.message,
+      )
       .slice(0, 5)
-      .join(', ');
+      .join(", ");
     console.warn(`[proxy] 400 invalid /chat/completions request: ${detail}`);
     res.status(400).json({
       error: {
         message: `Invalid request: ${detail}`,
-        type: 'invalid_request_error',
+        type: "invalid_request_error",
       },
     });
     return;
   }
 
   const {
-    model: requestedModel, temperature, top_p, stream,
+    model: requestedModel,
+    temperature,
+    top_p,
+    stream,
     reasoning_effort: inboundReasoningEffort,
     thinking: inboundThinking,
   } = parsed.data;
   // Agent-tolerant knob normalization (#200): max_tokens <= 0 means "no
   // limit" in several clients → unset; tool_choice 'any' is OpenAI's
   // 'required'; tool definitions get their 'function' type re-defaulted.
-  const max_tokens = parsed.data.max_tokens != null && parsed.data.max_tokens > 0
-    ? parsed.data.max_tokens : undefined;
-  const tool_choice = parsed.data.tool_choice === 'any' ? 'required' as const : parsed.data.tool_choice ?? undefined;
-  const tools = parsed.data.tools?.map(t => ({ ...t, type: 'function' as const }));
+  const max_tokens =
+    parsed.data.max_tokens != null && parsed.data.max_tokens > 0
+      ? parsed.data.max_tokens
+      : undefined;
+  const tool_choice =
+    parsed.data.tool_choice === "any"
+      ? ("required" as const)
+      : (parsed.data.tool_choice ?? undefined);
+  const tools = parsed.data.tools?.map((t) => ({
+    ...t,
+    type: "function" as const,
+  }));
   const parallel_tool_calls = parsed.data.parallel_tool_calls ?? undefined;
   // Build the per-call thinking view once; providers receive it through
   // CompletionOptions. Explicit nulls are normalized to undefined so the
@@ -719,59 +881,74 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   };
 
   const messages: ChatMessage[] = parsed.data.messages.map((m): ChatMessage => {
-    if (m.role === 'assistant') {
+    if (m.role === "assistant") {
       const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
       // With tool_calls, content: null is the correct OpenAI shape — keep it.
       // Without tool_calls, coerce empty/null content to "" so strict upstreams
       // don't choke on a null-content assistant turn we just accepted. (#165)
-      const isEmptyContent = m.content == null
-        || (typeof m.content === 'string' && m.content.length === 0)
-        || (Array.isArray(m.content) && m.content.length === 0);
-      const assistantContent: ChatMessage['content'] = hasToolCalls
+      const isEmptyContent =
+        m.content == null ||
+        (typeof m.content === "string" && m.content.length === 0) ||
+        (Array.isArray(m.content) && m.content.length === 0);
+      const assistantContent: ChatMessage["content"] = hasToolCalls
         ? (m.content ?? null)
-        : (isEmptyContent ? '' : m.content!);
+        : isEmptyContent
+          ? ""
+          : m.content!;
       return {
-        role: 'assistant',
+        role: "assistant",
         content: assistantContent,
         ...(m.name ? { name: m.name } : {}),
         // Replay the thinking trace verbatim. DeepSeek thinking models on
         // OpenCode Zen reject a follow-up turn that drops it; other providers
         // ignore the unknown field. Same round-trip rationale as
         // thought_signature below. (#255)
-        ...(typeof m.reasoning_content === 'string' && m.reasoning_content.length > 0
+        ...(typeof m.reasoning_content === "string" &&
+        m.reasoning_content.length > 0
           ? { reasoning_content: m.reasoning_content }
           : {}),
         // Paired with `reasoning_content` so providers that need an encrypted
         // signature to reconstruct the prior thinking block on a multi-turn
         // tool loop (Anthropic, Gemini 3) receive it without the client
         // having to ship a separate protocol. (#290)
-        ...(typeof m.thinking_signature === 'string' && m.thinking_signature.length > 0
+        ...(typeof m.thinking_signature === "string" &&
+        m.thinking_signature.length > 0
           ? { thinking_signature: m.thinking_signature }
           : {}),
         // hasToolCalls (not a bare truthiness check) so null AND empty-array
         // tool_calls are dropped rather than forwarded — strict upstreams
         // reject both shapes. (#200)
-        ...(hasToolCalls ? { tool_calls: m.tool_calls!.map(tc => {
-          // Normalize echo-tolerant inputs back to the strict OpenAI shape
-          // before forwarding (see toolCallSchema); synthesize missing ids
-          // and queue every id for order-based tool-result pairing. (#200)
-          const id = tc.id && tc.id.length > 0 ? tc.id : `call_auto_${++syntheticIdCounter}`;
-          pendingToolCallIds.push(id);
-          return {
-            id,
-            type: 'function' as const,
-            function: { name: tc.function.name, arguments: toolCallArgsToString(tc.function.arguments) },
-            thought_signature: tc.thought_signature,
-          };
-        }) } : {}),
+        ...(hasToolCalls
+          ? {
+              tool_calls: m.tool_calls!.map((tc) => {
+                // Normalize echo-tolerant inputs back to the strict OpenAI shape
+                // before forwarding (see toolCallSchema); synthesize missing ids
+                // and queue every id for order-based tool-result pairing. (#200)
+                const id =
+                  tc.id && tc.id.length > 0
+                    ? tc.id
+                    : `call_auto_${++syntheticIdCounter}`;
+                pendingToolCallIds.push(id);
+                return {
+                  id,
+                  type: "function" as const,
+                  function: {
+                    name: tc.function.name,
+                    arguments: toolCallArgsToString(tc.function.arguments),
+                  },
+                  thought_signature: tc.thought_signature,
+                };
+              }),
+            }
+          : {}),
       };
     }
 
-    if (m.role === 'tool') {
+    if (m.role === "tool") {
       return {
-        role: 'tool',
+        role: "tool",
         // Null/missing content (a tool that returned nothing) → "". (#200)
-        content: m.content ?? '',
+        content: m.content ?? "",
         tool_call_id: takeToolCallId(m.tool_call_id),
         ...(m.name ? { name: m.name } : {}),
       };
@@ -779,10 +956,10 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
     // Legacy function-calling result → forward as a tool message, paired by
     // order like an id-less tool message. (#200)
-    if (m.role === 'function') {
+    if (m.role === "function") {
       return {
-        role: 'tool',
-        content: m.content ?? '',
+        role: "tool",
+        content: m.content ?? "",
         tool_call_id: takeToolCallId(undefined),
         name: m.name,
       };
@@ -791,7 +968,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     return {
       // 'developer' is OpenAI's newer name for the system role — providers
       // downstream only know 'system'. (#200)
-      role: m.role === 'developer' ? 'system' : m.role,
+      role: m.role === "developer" ? "system" : m.role,
       content: m.content,
       ...(m.name ? { name: m.name } : {}),
     };
@@ -817,17 +994,31 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   if (hasImage && !hasEnabledVisionModel()) {
     res.status(422).json({
       error: {
-        message: 'This request includes an image, but no vision-capable model is enabled. Enable a vision model (e.g. Gemini 2.5 Flash, Llama 4 Scout) in the Fallback Chain.',
-        type: 'invalid_request_error',
-        code: 'no_vision_model',
+        message:
+          "This request includes an image, but no vision-capable model is enabled. Enable a vision model (e.g. Gemini 2.5 Flash, Llama 4 Scout) in the Fallback Chain.",
+        type: "invalid_request_error",
+        code: "no_vision_model",
       },
     });
     return;
   }
   const IMAGE_TOKEN_ESTIMATE = 1000;
-  const imageCount = messages.reduce((n, m) =>
-    n + (Array.isArray(m.content) ? m.content.filter(b => (b as { type?: string })?.type === 'image_url' || (b as { type?: string })?.type === 'image').length : 0), 0);
-  const estimatedTotal = estimatedInputTokens + imageCount * IMAGE_TOKEN_ESTIMATE + (max_tokens ?? 1000);
+  const imageCount = messages.reduce(
+    (n, m) =>
+      n +
+      (Array.isArray(m.content)
+        ? m.content.filter(
+            (b) =>
+              (b as { type?: string })?.type === "image_url" ||
+              (b as { type?: string })?.type === "image",
+          ).length
+        : 0),
+    0,
+  );
+  const estimatedTotal =
+    estimatedInputTokens +
+    imageCount * IMAGE_TOKEN_ESTIMATE +
+    (max_tokens ?? 1000);
 
   // Tool-bearing requests must route to a model that emits STRUCTURED
   // tool_calls. A model without real function-calling support serializes the
@@ -838,9 +1029,10 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   if (wantsTools && !hasEnabledToolsModel()) {
     res.status(422).json({
       error: {
-        message: 'This request includes tools, but no tool-capable model is enabled. Enable a tool-calling model (e.g. GPT-OSS 120B, Gemini 3.5 Flash, GLM-4.7) in the Fallback Chain.',
-        type: 'invalid_request_error',
-        code: 'no_tools_model',
+        message:
+          "This request includes tools, but no tool-capable model is enabled. Enable a tool-calling model (e.g. GPT-OSS 120B, Gemini 3.5 Flash, GLM-4.7) in the Fallback Chain.",
+        type: "invalid_request_error",
+        code: "no_tools_model",
       },
     });
     return;
@@ -849,24 +1041,32 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // Optional client-managed session affinity (see getSessionKey). Express
   // lower-cases header names; a repeated header arrives as an array — take
   // the first value.
-  const rawSessionId = req.headers['x-session-id'];
-  const sessionIdHeader = Array.isArray(rawSessionId) ? rawSessionId[0] : rawSessionId;
+  const rawSessionId = req.headers["x-session-id"];
+  const sessionIdHeader = Array.isArray(rawSessionId)
+    ? rawSessionId[0]
+    : rawSessionId;
 
   // Context handoff only applies to auto-routed requests. Pinned-model requests
   // are deliberate client choices; injecting "you are taking over" there would
   // be semantically wrong.
   const isAutoRouted = !requestedModel || isAutoModel(requestedModel);
-  const handoffMode = isAutoRouted ? getContextHandoffMode() : ('off' as const);
-  const keyAffinityEnabled = getFeatureSetting('key_affinity_enabled') as boolean;
-  const sessionKey = (keyAffinityEnabled || handoffMode !== 'off') ? getSessionKey(messages, sessionIdHeader) : '';
-  if (handoffMode !== 'off' && sessionKey) {
+  const handoffMode = isAutoRouted ? getContextHandoffMode() : ("off" as const);
+  const keyAffinityEnabled = getFeatureSetting(
+    "key_affinity_enabled",
+  ) as boolean;
+  const sessionKey =
+    keyAffinityEnabled || handoffMode !== "off"
+      ? getSessionKey(messages, sessionIdHeader)
+      : "";
+  if (handoffMode !== "off" && sessionKey) {
     recordIncomingMessages(sessionKey, messages);
   }
   // A handoff can only fire when a prior model is on record for this session.
   // Check after recordIncomingMessages, which clears the prior model on a
   // fresh conversation. Stable across the retry loop (the prior model only
   // changes on a success, which returns), so compute it once here.
-  const handoffPossible = handoffMode !== 'off' && !!sessionKey && hasPriorModel(sessionKey);
+  const handoffPossible =
+    handoffMode !== "off" && !!sessionKey && hasPriorModel(sessionKey);
 
   // Explicit `model` field pins routing. If the catalog has no enabled row
   // matching the requested id, return 400 — silently auto-routing to a
@@ -880,34 +1080,45 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     preferredModel = getStickyModel(messages, sessionIdHeader);
   } else if (requestedModel) {
     const db = getDb();
-    const groupingEnabled = getSetting('model_grouping_enabled') === 'true';
+    const groupingEnabled = getSetting("model_grouping_enabled") === "true";
     // Parse platform/model_id format: the first '/' separates the platform
     // from the provider-qualified model_id (e.g. nvidia/moonshotai/kimi-k2.6).
     // Falls back to bare model_id lookup for backward compatibility.
-    const slashIdx = requestedModel.indexOf('/');
-    let enabled: { id: number; group_id: number | null; model_id: string } | undefined;
+    const slashIdx = requestedModel.indexOf("/");
+    let enabled:
+      | { id: number; group_id: number | null; model_id: string }
+      | undefined;
     let exactPlatformModel = false;
     if (slashIdx > 0) {
       const platform = requestedModel.slice(0, slashIdx);
       const modelId = requestedModel.slice(slashIdx + 1);
-      enabled = db.prepare(
-        'SELECT id, group_id, model_id FROM models WHERE platform = ? AND model_id = ? AND enabled = 1'
-      ).get(platform, modelId) as { id: number; group_id: number | null; model_id: string } | undefined;
+      enabled = db
+        .prepare(
+          "SELECT id, group_id, model_id FROM models WHERE platform = ? AND model_id = ? AND enabled = 1",
+        )
+        .get(platform, modelId) as
+        | { id: number; group_id: number | null; model_id: string }
+        | undefined;
       exactPlatformModel = !!enabled;
     }
 
     if (groupingEnabled) {
       const aliasCache = getAliasCache(db);
-      const groupKey = resolveGroupKey(exactPlatformModel && enabled ? enabled.model_id : requestedModel, aliasCache);
-      const group = db.prepare(
-        'SELECT id FROM model_groups WHERE group_key = ? AND enabled = 1'
-      ).get(groupKey) as { id: number } | undefined;
+      const groupKey = resolveGroupKey(
+        exactPlatformModel && enabled ? enabled.model_id : requestedModel,
+        aliasCache,
+      );
+      const group = db
+        .prepare(
+          "SELECT id FROM model_groups WHERE group_key = ? AND enabled = 1",
+        )
+        .get(groupKey) as { id: number } | undefined;
       if (group) {
         preferredGroupId = group.id;
       } else if (enabled?.group_id != null) {
-        const enabledGroup = db.prepare(
-          'SELECT id FROM model_groups WHERE id = ? AND enabled = 1'
-        ).get(enabled.group_id) as { id: number } | undefined;
+        const enabledGroup = db
+          .prepare("SELECT id FROM model_groups WHERE id = ? AND enabled = 1")
+          .get(enabled.group_id) as { id: number } | undefined;
         preferredGroupId = enabledGroup?.id;
       }
     }
@@ -921,32 +1132,48 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // With grouping enabled, don't convert a bare group key into an arbitrary
     // provider row; only use this exact-row fallback when no group matched.
     if (!enabled && (!groupingEnabled || preferredGroupId == null)) {
-      enabled = db.prepare('SELECT id, group_id, model_id FROM models WHERE model_id = ? AND enabled = 1').get(requestedModel) as
-        { id: number; group_id: number | null; model_id: string } | undefined;
+      enabled = db
+        .prepare(
+          "SELECT id, group_id, model_id FROM models WHERE model_id = ? AND enabled = 1",
+        )
+        .get(requestedModel) as
+        | { id: number; group_id: number | null; model_id: string }
+        | undefined;
       if (enabled) {
         preferredModel = enabled.id;
         strictPinnedModelDbId = enabled.id;
-        if (groupingEnabled && preferredGroupId == null && enabled.group_id != null) {
-          const enabledGroup = db.prepare(
-            'SELECT id FROM model_groups WHERE id = ? AND enabled = 1'
-          ).get(enabled.group_id) as { id: number } | undefined;
+        if (
+          groupingEnabled &&
+          preferredGroupId == null &&
+          enabled.group_id != null
+        ) {
+          const enabledGroup = db
+            .prepare("SELECT id FROM model_groups WHERE id = ? AND enabled = 1")
+            .get(enabled.group_id) as { id: number } | undefined;
           preferredGroupId = enabledGroup?.id;
         }
       }
     }
 
     if (!preferredModel && preferredGroupId == null) {
-      const groupKey = groupingEnabled ? resolveGroupKey(requestedModel, getAliasCache(db)) : undefined;
-      const disabledGroup = groupKey
-        ? db.prepare('SELECT id FROM model_groups WHERE group_key = ?').get(groupKey) as { id: number } | undefined
+      const groupKey = groupingEnabled
+        ? resolveGroupKey(requestedModel, getAliasCache(db))
         : undefined;
-      const disabled = db.prepare('SELECT id FROM models WHERE model_id = ?').get(requestedModel) as { id: number } | undefined;
-      const reason = disabled || disabledGroup ? 'is disabled' : 'is not in the catalog';
+      const disabledGroup = groupKey
+        ? (db
+            .prepare("SELECT id FROM model_groups WHERE group_key = ?")
+            .get(groupKey) as { id: number } | undefined)
+        : undefined;
+      const disabled = db
+        .prepare("SELECT id FROM models WHERE model_id = ?")
+        .get(requestedModel) as { id: number } | undefined;
+      const reason =
+        disabled || disabledGroup ? "is disabled" : "is not in the catalog";
       res.status(400).json({
         error: {
           message: `Model '${requestedModel}' ${reason}. Use 'auto' (or omit the 'model' field) to auto-route, or call /v1/models for the available list.`,
-          type: 'invalid_request_error',
-          code: 'model_not_found',
+          type: "invalid_request_error",
+          code: "model_not_found",
         },
       });
       return;
@@ -958,9 +1185,16 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // For analytics: the model id the client pinned, null when auto-routed
   // ('auto' or omitted). Logged with every request row so pinned vs auto
   // traffic and failover overrides are visible.
-  const pinnedModelId: string | undefined = requestedModel && !isAutoModel(requestedModel) ? requestedModel : undefined;
+  const pinnedModelId: string | undefined =
+    requestedModel && !isAutoModel(requestedModel) ? requestedModel : undefined;
   const requestId = crypto.randomUUID();
-  publish({ type: 'request.start', id: requestId, model: pinnedModelId, stream: !!stream, at: Date.now() });
+  publish({
+    type: "request.start",
+    id: requestId,
+    model: pinnedModelId,
+    stream: !!stream,
+    at: Date.now(),
+  });
   // Outer loop: model/key cycling with exhaustion tracking.
   const skipKeys = new Set<string>();
   const skipModels = new Set<number>();
@@ -970,34 +1204,43 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const providerFailures = new Map<string, Set<number>>();
   const fastFired = new Set<string>();
 
-  const rabbitConcurrentRequests = getProviderInFlightTotal();
-  const rabbitDecision = getRabbitOscillatorDecision({
+  const iterativeRefinementConcurrentRequests = getProviderInFlightTotal();
+  const iterativeRefinementDecision = getIterativeRefinementOscillatorDecision({
     strategy: getRoutingStrategy(),
-    promptText: promptTextForRabbit(messages),
-    pinnedModelDbId: isAutoRouted ? undefined : (strictPinnedModelDbId ?? preferredModel ?? 0),
-    currentConcurrent: rabbitConcurrentRequests,
+    promptText: promptTextForIterativeRefinement(messages),
+    pinnedModelDbId: isAutoRouted
+      ? undefined
+      : (strictPinnedModelDbId ?? preferredModel ?? 0),
+    currentConcurrent: iterativeRefinementConcurrentRequests,
   });
-  if (rabbitDecision.skipReason === 'load_shed') {
+  if (iterativeRefinementDecision.skipReason === "load_shed") {
     publish({
-      type: 'oscillator.load_shed',
-      concurrentRequests: rabbitConcurrentRequests,
-      threshold: rabbitDecision.config.loadShedThreshold,
+      type: "oscillator.load_shed",
+      concurrentRequests: iterativeRefinementConcurrentRequests,
+      threshold: iterativeRefinementDecision.config.loadShedThreshold,
       at: Date.now(),
     });
   }
-  const shouldTryRabbitOscillator =
-    rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
-  const shouldTryRabbitStreaming =
-    rabbitDecision.mode === 'oscillator' && stream && !hasImage && !wantsTools && !isPinned;
+  const shouldTryIterativeRefinementOscillator =
+    iterativeRefinementDecision.mode === "oscillator" &&
+    !stream &&
+    !hasImage &&
+    !wantsTools;
+  const shouldTryIterativeRefinementStreaming =
+    iterativeRefinementDecision.mode === "oscillator" &&
+    stream &&
+    !hasImage &&
+    !wantsTools &&
+    !isPinned;
 
-  // ── Rabbit streaming oscillator ────────────────────────────────────
+  // ── Iterative Refinement streaming oscillator ────────────────────────────────────
   // Streams the anchor (final) step to the client in real-time via SSE.
   // Foundation and injection steps consume their streams silently (the
   // oscillator needs full text to build context bridges). If the
   // oscillator fails altogether the error propagates to the outer retry
   // loop as a normal streaming fallback.
-  async function handleRabbitStreaming(): Promise<void> {
-    const rabbitStepLatencies: OscillatorStepLatencies = {};
+  async function handleIterativeRefinementStreaming(): Promise<void> {
+    const iterativeRefinementStepLatencies: OscillatorStepLatencies = {};
     let headerSent = false;
     let ttfbMs: number | null = null;
     let anchorChunkId = `chatcmpl-${Date.now()}`;
@@ -1007,21 +1250,32 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     const flushHeaders = () => {
       if (headerSent) return;
       ttfbMs = Date.now() - start;
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Rabbit-Status', 'streaming');
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Iterative-Refinement-Status", "streaming");
       headerSent = true;
     };
 
     const writeSSE = (data: unknown) => {
-      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* socket gone */ }
+      try {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        /* socket gone */
+      }
     };
 
-    const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
-      const stepInputTokens = stepMessages.reduce((sum, m) =>
-        sum + Math.ceil(contentToString(m.content).length / 4), 0);
-      const expectedOutputTokens = step === 'injection' ? 150 : (max_tokens ?? 1000);
+    const callModel: OscillatorModelCall = async ({
+      step,
+      candidate,
+      messages: stepMessages,
+    }) => {
+      const stepInputTokens = stepMessages.reduce(
+        (sum, m) => sum + Math.ceil(contentToString(m.content).length / 4),
+        0,
+      );
+      const expectedOutputTokens =
+        step === "injection" ? 150 : (max_tokens ?? 1000);
       const stepRoute = routeRequest(
         stepInputTokens + expectedOutputTokens,
         undefined,
@@ -1034,9 +1288,10 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       const stepStart = Date.now();
 
       try {
-        const stepMaxTokens = step === 'injection'
-          ? Math.min(max_tokens ?? 150, 150)
-          : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
+        const stepMaxTokens =
+          step === "injection"
+            ? Math.min(max_tokens ?? 150, 150)
+            : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
         const stepOptions = {
           temperature,
           max_tokens: stepMaxTokens,
@@ -1045,29 +1300,39 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           thinking,
         };
         const relayTransport = getRelayTransport(stepRoute.transportId);
-        const useProxyTransport = !!relayTransport
-          && (getFeatureSetting('proxy_transport_enabled') as boolean)
-          && isRelayTransportConfigured(stepRoute.transportId);
+        const useProxyTransport =
+          !!relayTransport &&
+          (getFeatureSetting("proxy_transport_enabled") as boolean) &&
+          isRelayTransportConfigured(stepRoute.transportId);
 
         const gen = useProxyTransport
           ? relayTransport!.streamChatCompletion({
               providerBaseUrl: resolveProviderBaseUrl(stepRoute.provider),
               apiKey: stepRoute.apiKey,
-              body: { model: stepRoute.modelId, messages: stepMessages, ...stepOptions },
+              body: {
+                model: stepRoute.modelId,
+                messages: stepMessages,
+                ...stepOptions,
+              },
               sessionId: sessionKey || undefined,
             })
           : stepRoute.provider.streamChatCompletion(
-              stepRoute.apiKey, stepMessages, stepRoute.modelId, stepOptions,
+              stepRoute.apiKey,
+              stepMessages,
+              stepRoute.modelId,
+              stepOptions,
             );
 
-        let accumulated = '';
+        let accumulated = "";
 
         for await (const chunk of gen) {
           const anyChunk = chunk as Record<string, any>;
 
           // In-band upstream error frame
           if (anyChunk.error && !anyChunk.choices) {
-            throw new Error(`in-band provider error from ${stepRoute.displayName}: ${anyChunk.error.message ?? JSON.stringify(anyChunk.error).slice(0, 200)}`);
+            throw new Error(
+              `in-band provider error from ${stepRoute.displayName}: ${anyChunk.error.message ?? JSON.stringify(anyChunk.error).slice(0, 200)}`,
+            );
           }
 
           if (anyChunk.id) {
@@ -1079,211 +1344,271 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           const choice = anyChunk.choices?.[0];
           if (!choice) continue;
 
-          const text = typeof choice.delta?.content === 'string' ? choice.delta.content : '';
+          const text =
+            typeof choice.delta?.content === "string"
+              ? choice.delta.content
+              : "";
           if (text) accumulated += text;
 
           // Stream anchor (final) step chunks to the client in real-time
-          if (step === 'anchor' && text) {
+          if (step === "anchor" && text) {
             flushHeaders();
             writeSSE({
               id: anchorChunkId,
-              object: 'chat.completion.chunk',
+              object: "chat.completion.chunk",
               created: anchorCreated,
               model: anchorModel,
-              choices: [{ index: 0, delta: { content: text }, finish_reason: null }],
+              choices: [
+                { index: 0, delta: { content: text }, finish_reason: null },
+              ],
             });
-            publish({ type: 'stream.chunk', id: requestId, text, at: Date.now() });
+            publish({
+              type: "stream.chunk",
+              id: requestId,
+              text,
+              at: Date.now(),
+            });
           }
         }
 
         if (!accumulated.trim()) {
-          throw new Error(`empty Rabbit oscillator stream from ${stepRoute.displayName} (step: ${step})`);
+          throw new Error(
+            `empty Iterative Refinement oscillator stream from ${stepRoute.displayName} (step: ${step})`,
+          );
         }
 
         // Accounting
         const promptTokens = stepInputTokens;
         const completionTokens = Math.ceil(accumulated.length / 4);
         recordRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId);
-        recordTokens(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, promptTokens + completionTokens);
+        recordTokens(
+          stepRoute.platform,
+          stepRoute.modelId,
+          stepRoute.keyId,
+          promptTokens + completionTokens,
+        );
         recordSuccess(stepRoute.modelDbId);
         logRequest(
-          stepRoute.platform, stepRoute.modelId, stepRoute.keyId, 'success',
-          promptTokens, completionTokens, Date.now() - stepStart,
-          null, step === 'anchor' ? ttfbMs : null, pinnedModelId, 0,
+          stepRoute.platform,
+          stepRoute.modelId,
+          stepRoute.keyId,
+          "success",
+          promptTokens,
+          completionTokens,
+          Date.now() - stepStart,
+          null,
+          step === "anchor" ? ttfbMs : null,
+          pinnedModelId,
+          0,
         );
         clearExhausted(stepRoute.keyId, stepRoute.modelId);
         return accumulated;
       } catch (err: any) {
         const safeError = sanitizeProviderErrorMessage(err.message);
-        logRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, 'error', stepInputTokens, 0, Date.now() - stepStart, safeError, null, pinnedModelId);
+        logRequest(
+          stepRoute.platform,
+          stepRoute.modelId,
+          stepRoute.keyId,
+          "error",
+          stepInputTokens,
+          0,
+          Date.now() - stepStart,
+          safeError,
+          null,
+          pinnedModelId,
+        );
         const tier = classifyError(err);
         if (tier) recordFailure(stepRoute.modelDbId, tier);
         throw err;
       } finally {
-        rabbitStepLatencies[step] = Date.now() - stepStart;
+        iterativeRefinementStepLatencies[step] = Date.now() - stepStart;
         stepRoute.release();
       }
     };
 
-        // Run the oscillator pipeline
-        const oscillatorSessionKey = sessionKey || requestId;
-        const oscillatorStart = Date.now();
+    // Run the oscillator pipeline
+    const oscillatorSessionKey = sessionKey || requestId;
+    const oscillatorStart = Date.now();
 
-        // Track streaming state for SSE events
-        let currentStreamStep: 'foundation' | 'injection' | 'anchor' | null = null;
-        let stepStarted = false;
+    // Track streaming state for SSE events
+    let currentStreamStep: "foundation" | "injection" | "anchor" | null = null;
+    let stepStarted = false;
 
-        const handleStreamChunk = (chunk: OscillatorStreamChunk) => {
-          const { step, delta, accumulated, stepComplete, final } = chunk;
-          const now = Date.now();
+    const handleStreamChunk = (chunk: OscillatorStreamChunk) => {
+      const { step, delta, accumulated, stepComplete, final } = chunk;
+      const now = Date.now();
 
-          // Detect step transition
-          if (step !== currentStreamStep) {
-            currentStreamStep = step;
-            stepStarted = false;
-          }
+      // Detect step transition
+      if (step !== currentStreamStep) {
+        currentStreamStep = step;
+        stepStarted = false;
+      }
 
-          // Emit stream_start on first chunk of a step
-          if (!stepStarted) {
-            publish({
-              type: 'oscillator.stream_start',
-              sessionKey: oscillatorSessionKey,
-              step,
-              timestamp: now,
-            });
-            stepStarted = true;
-          }
-
-          // Emit stream_delta for each chunk with content
-          if (delta) {
-            publish({
-              type: 'oscillator.stream_delta',
-              sessionKey: oscillatorSessionKey,
-              step,
-              delta,
-              accumulated,
-              timestamp: now,
-            });
-          }
-
-          // Emit stream_step_complete when step finishes
-          if (stepComplete) {
-            publish({
-              type: 'oscillator.stream_step_complete',
-              sessionKey: oscillatorSessionKey,
-              step,
-              fullText: accumulated,
-              timestamp: now,
-            });
-            stepStarted = false; // Reset for next step
-          }
-
-          // Emit stream_complete or stream_error when final result is available
-          if (final) {
-            if (final.status === 'completed') {
-              publish({
-                type: 'oscillator.stream_complete',
-                sessionKey: oscillatorSessionKey,
-                result: final,
-                timestamp: now,
-              });
-            } else {
-              const failedStep = final.failedStep;
-              const stepMap: Record<string, 'foundation' | 'injection' | 'anchor'> = {
-                foundation: 'foundation',
-                injection: 'injection',
-                anchor: 'anchor',
-                validation: 'anchor',
-              };
-              const errorStep = stepMap[failedStep ?? 'foundation'] ?? 'foundation';
-              publish({
-                type: 'oscillator.stream_error',
-                sessionKey: oscillatorSessionKey,
-                step: errorStep,
-                error: final.error ?? 'Unknown error',
-                fallback: final.status === 'foundation_fallback' || final.status === 'single_model_fallback',
-                timestamp: now,
-              });
-            }
-          }
-        };
-
-        const oscillator = await executeOscillator({
-          messages,
+      // Emit stream_start on first chunk of a step
+      if (!stepStarted) {
+        publish({
+          type: "oscillator.stream_start",
           sessionKey: oscillatorSessionKey,
-          callModel,
-          config: rabbitDecision.config,
-          handoffMode,
-          stream: true,
-                    onChunk: handleStreamChunk,
-                  });
-              const oscillatorTotalLatencyMs = Date.now() - oscillatorStart;
+          step,
+          timestamp: now,
+        });
+        stepStarted = true;
+      }
 
-              try {
-                logOscillatorResult({
-                  sessionKey: oscillatorSessionKey,
-                  result: oscillator,
-                  totalLatencyMs: oscillatorTotalLatencyMs,
-                  stepLatencies: rabbitStepLatencies,
-                });
-              } catch (err) {
-                console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
-              }
+      // Emit stream_delta for each chunk with content
+      if (delta) {
+        publish({
+          type: "oscillator.stream_delta",
+          sessionKey: oscillatorSessionKey,
+          step,
+          delta,
+          accumulated,
+          timestamp: now,
+        });
+      }
 
-              // NOTE: For streaming, we publish events via handleStreamChunk (new streaming events)
-              // NOT via publishRabbitOscillatorEvents (old events). Old events are for non-streaming only.
+      // Emit stream_step_complete when step finishes
+      if (stepComplete) {
+        publish({
+          type: "oscillator.stream_step_complete",
+          sessionKey: oscillatorSessionKey,
+          step,
+          fullText: accumulated,
+          timestamp: now,
+        });
+        stepStarted = false; // Reset for next step
+      }
 
-              if (oscillator.status === 'single_model_fallback') {
+      // Emit stream_complete or stream_error when final result is available
+      if (final) {
+        if (final.status === "completed") {
+          publish({
+            type: "oscillator.stream_complete",
+            sessionKey: oscillatorSessionKey,
+            result: final,
+            timestamp: now,
+          });
+        } else {
+          const failedStep = final.failedStep;
+          const stepMap: Record<string, "foundation" | "injection" | "anchor"> =
+            {
+              foundation: "foundation",
+              injection: "injection",
+              anchor: "anchor",
+              validation: "anchor",
+            };
+          const errorStep = stepMap[failedStep ?? "foundation"] ?? "foundation";
+          publish({
+            type: "oscillator.stream_error",
+            sessionKey: oscillatorSessionKey,
+            step: errorStep,
+            error: final.error ?? "Unknown error",
+            fallback:
+              final.status === "foundation_fallback" ||
+              final.status === "single_model_fallback",
+            timestamp: now,
+          });
+        }
+      }
+    };
+
+    const oscillator = await executeOscillator({
+      messages,
+      sessionKey: oscillatorSessionKey,
+      callModel,
+      config: iterativeRefinementDecision.config,
+      handoffMode,
+      stream: true,
+      onChunk: handleStreamChunk,
+    });
+    const oscillatorTotalLatencyMs = Date.now() - oscillatorStart;
+
+    try {
+      logOscillatorResult({
+        sessionKey: oscillatorSessionKey,
+        result: oscillator,
+        totalLatencyMs: oscillatorTotalLatencyMs,
+        stepLatencies: iterativeRefinementStepLatencies,
+      });
+    } catch (err) {
+      console.warn(
+        "[Proxy] Failed to log Iterative Refinement oscillator result:",
+        err,
+      );
+    }
+
+    // NOTE: For streaming, we publish events via handleStreamChunk (new streaming events)
+    // NOT via publishIterativeRefinementOscillatorEvents (old events). Old events are for non-streaming only.
+
+    if (oscillator.status === "single_model_fallback") {
       // All foundation attempts failed — throw so the outer retry loop takes over
-      throw new Error(oscillator.error ?? 'All Rabbit streaming foundation models failed');
+      throw new Error(
+        oscillator.error ??
+          "All Iterative Refinement streaming foundation models failed",
+      );
     }
 
     // For "foundation_fallback", the anchor step didn\'t run, so the
     // foundation text hasn\'t been streamed. Emit it now.
-    const finalText = oscillator.text ?? '';
+    const finalText = oscillator.text ?? "";
     const completionTokens = Math.ceil(finalText.length / 4);
     const finalModel = oscillator.foundation?.modelId ?? AUTO_MODEL_ID;
 
-    res.setHeader('X-Routed-Via',
-      oscillator.foundation ? `${oscillator.foundation.platform}/${oscillator.foundation.modelId}` : 'rabbit');
-    res.setHeader('X-Rabbit-Status', oscillator.status);
+    res.setHeader(
+      "X-Routed-Via",
+      oscillator.foundation
+        ? `${oscillator.foundation.platform}/${oscillator.foundation.modelId}`
+        : "iterative_refinement",
+    );
+    res.setHeader("X-Iterative-Refinement-Status", oscillator.status);
 
     flushHeaders();
 
-    if (oscillator.status === 'foundation_fallback' && finalText) {
+    if (oscillator.status === "foundation_fallback" && finalText) {
       // Foundation succeeded but injection/anchor failed — stream the
       // foundation text as a single chunk.
       writeSSE({
         id: anchorChunkId,
-        object: 'chat.completion.chunk',
+        object: "chat.completion.chunk",
         created: anchorCreated,
         model: finalModel,
-        choices: [{ index: 0, delta: { content: finalText }, finish_reason: null }],
+        choices: [
+          { index: 0, delta: { content: finalText }, finish_reason: null },
+        ],
       });
     }
 
     // Terminal finish chunk
     writeSSE({
       id: anchorChunkId,
-      object: 'chat.completion.chunk',
+      object: "chat.completion.chunk",
       created: anchorCreated,
       model: finalModel,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
     });
-    res.write('data: [DONE]\n\n');
-    try { res.end(); } catch { /* socket gone */ }
+    res.write("data: [DONE]\n\n");
+    try {
+      res.end();
+    } catch {
+      /* socket gone */
+    }
 
     if (oscillator.foundation) {
       const finalModelKey = `${oscillator.foundation.platform}:${oscillator.foundation.modelId}`;
-      setStickyModel(messages, oscillator.foundation.modelDbId, sessionIdHeader);
-      if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
+      setStickyModel(
+        messages,
+        oscillator.foundation.modelDbId,
+        sessionIdHeader,
+      );
+      if (handoffMode !== "off" && sessionKey)
+        recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
     }
 
     publish({
-      type: 'request.done',
+      type: "request.done",
       id: requestId,
       model: finalModel,
-      provider: oscillator.foundation?.platform ?? 'rabbit',
+      provider: oscillator.foundation?.platform ?? "iterative_refinement",
       keyId: 0,
       latencyMs: oscillatorTotalLatencyMs,
       tokens: { in: estimatedInputTokens, out: completionTokens },
@@ -1291,38 +1616,60 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     });
   }
 
-  let rabbitStreamingHeadersSent = false;
+  let iterativeRefinementStreamingHeadersSent = false;
 
-  if (shouldTryRabbitStreaming) {
+  if (shouldTryIterativeRefinementStreaming) {
     try {
-      await handleRabbitStreaming();
+      await handleIterativeRefinementStreaming();
       return;
-    } catch (rabbitStreamErr: any) {
-      console.warn('[Proxy] Rabbit streaming failed, falling back to standard retry loop:', rabbitStreamErr.message);
+    } catch (iterativeRefinementStreamErr: any) {
+      console.warn(
+        "[Proxy] Iterative Refinement streaming failed, falling back to standard retry loop:",
+        iterativeRefinementStreamErr.message,
+      );
       // If headers were already sent, we can't fall back to a new streaming
       // attempt — the client has already received partial SSE data.
-      rabbitStreamingHeadersSent = res.headersSent;
-      if (rabbitStreamingHeadersSent) {
+      iterativeRefinementStreamingHeadersSent = res.headersSent;
+      if (iterativeRefinementStreamingHeadersSent) {
         try {
-          const payload = { error: { message: `Rabbit streaming failed: ${sanitizeProviderErrorMessage(rabbitStreamErr.message)}`, type: 'stream_error' } };
+          const payload = {
+            error: {
+              message: `Iterative Refinement streaming failed: ${sanitizeProviderErrorMessage(iterativeRefinementStreamErr.message)}`,
+              type: "stream_error",
+            },
+          };
           res.write(`data: ${JSON.stringify(payload)}\n\n`);
-          res.write('data: [DONE]\n\n');
+          res.write("data: [DONE]\n\n");
           res.end();
-        } catch { /* socket gone */ }
-        publish({ type: 'request.error', id: requestId, error: sanitizeProviderErrorMessage(rabbitStreamErr.message), at: Date.now() });
+        } catch {
+          /* socket gone */
+        }
+        publish({
+          type: "request.error",
+          id: requestId,
+          error: sanitizeProviderErrorMessage(
+            iterativeRefinementStreamErr.message,
+          ),
+          at: Date.now(),
+        });
         return;
       }
     }
   }
 
-  if (shouldTryRabbitOscillator) {
-    const rabbitStepLatencies: OscillatorStepLatencies = {};
-    const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
+  if (shouldTryIterativeRefinementOscillator) {
+    const iterativeRefinementStepLatencies: OscillatorStepLatencies = {};
+    const callModel: OscillatorModelCall = async ({
+      step,
+      candidate,
+      messages: stepMessages,
+    }) => {
       const stepInputTokens = stepMessages.reduce((sum, message) => {
         const text = contentToString(message.content);
         return sum + Math.ceil(text.length / 4);
       }, 0);
-      const expectedOutputTokens = step === 'injection' ? 150 : (max_tokens ?? 1000);
+      const expectedOutputTokens =
+        step === "injection" ? 150 : (max_tokens ?? 1000);
       const stepRoute = routeRequest(
         stepInputTokens + expectedOutputTokens,
         undefined,
@@ -1335,9 +1682,10 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       const stepStart = Date.now();
 
       try {
-        const stepMaxTokens = step === 'injection'
-          ? Math.min(max_tokens ?? 150, 150)
-          : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
+        const stepMaxTokens =
+          step === "injection"
+            ? Math.min(max_tokens ?? 150, 150)
+            : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
         const stepOptions = {
           temperature,
           max_tokens: stepMaxTokens,
@@ -1346,14 +1694,19 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           thinking,
         };
         const relayTransport = getRelayTransport(stepRoute.transportId);
-        const useProxyTransport = !!relayTransport
-          && (getFeatureSetting('proxy_transport_enabled') as boolean)
-          && isRelayTransportConfigured(stepRoute.transportId);
+        const useProxyTransport =
+          !!relayTransport &&
+          (getFeatureSetting("proxy_transport_enabled") as boolean) &&
+          isRelayTransportConfigured(stepRoute.transportId);
         const result = useProxyTransport
           ? await relayTransport!.chatCompletion({
               providerBaseUrl: resolveProviderBaseUrl(stepRoute.provider),
               apiKey: stepRoute.apiKey,
-              body: { model: stepRoute.modelId, messages: stepMessages, ...stepOptions },
+              body: {
+                model: stepRoute.modelId,
+                messages: stepMessages,
+                ...stepOptions,
+              },
               sessionId: sessionKey || undefined,
             })
           : await stepRoute.provider.chatCompletion(
@@ -1364,38 +1717,60 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             );
 
         const respMsg = result.choices?.[0]?.message;
-        const text = contentToString(respMsg?.content ?? '').trim();
-        if (!text) throw new Error(`empty Rabbit oscillator completion from ${stepRoute.displayName}`);
+        const text = contentToString(respMsg?.content ?? "").trim();
+        if (!text)
+          throw new Error(
+            `empty Iterative Refinement oscillator completion from ${stepRoute.displayName}`,
+          );
 
         const promptTokens = result.usage?.prompt_tokens ?? stepInputTokens;
-        const completionTokens = result.usage?.completion_tokens ?? Math.ceil(text.length / 4);
-        const totalTokens = result.usage?.total_tokens ?? promptTokens + completionTokens;
+        const completionTokens =
+          result.usage?.completion_tokens ?? Math.ceil(text.length / 4);
+        const totalTokens =
+          result.usage?.total_tokens ?? promptTokens + completionTokens;
         recordRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId);
-        recordTokens(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, totalTokens);
+        recordTokens(
+          stepRoute.platform,
+          stepRoute.modelId,
+          stepRoute.keyId,
+          totalTokens,
+        );
         recordSuccess(stepRoute.modelDbId);
         logRequest(
           stepRoute.platform,
           stepRoute.modelId,
           stepRoute.keyId,
-          'success',
+          "success",
           promptTokens,
           completionTokens,
           Date.now() - stepStart,
           null,
           null,
           pinnedModelId,
-          (result.usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0,
+          (result.usage as any)?.completion_tokens_details?.reasoning_tokens ??
+            0,
         );
         clearExhausted(stepRoute.keyId, stepRoute.modelId);
         return text;
       } catch (err: any) {
         const safeError = sanitizeProviderErrorMessage(err.message);
-        logRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId, 'error', stepInputTokens, 0, Date.now() - stepStart, safeError, null, pinnedModelId);
+        logRequest(
+          stepRoute.platform,
+          stepRoute.modelId,
+          stepRoute.keyId,
+          "error",
+          stepInputTokens,
+          0,
+          Date.now() - stepStart,
+          safeError,
+          null,
+          pinnedModelId,
+        );
         const tier = classifyError(err);
         if (tier) recordFailure(stepRoute.modelDbId, tier);
         throw err;
       } finally {
-        rabbitStepLatencies[step] = Date.now() - stepStart;
+        iterativeRefinementStepLatencies[step] = Date.now() - stepStart;
         stepRoute.release();
       }
     };
@@ -1406,7 +1781,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       messages,
       sessionKey: oscillatorSessionKey,
       callModel,
-      config: rabbitDecision.config,
+      config: iterativeRefinementDecision.config,
       handoffMode,
     });
     const oscillatorTotalLatencyMs = Date.now() - oscillatorStart;
@@ -1415,30 +1790,35 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         sessionKey: oscillatorSessionKey,
         result: oscillator,
         totalLatencyMs: oscillatorTotalLatencyMs,
-        stepLatencies: rabbitStepLatencies,
+        stepLatencies: iterativeRefinementStepLatencies,
       });
     } catch (err) {
-      console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
+      console.warn(
+        "[Proxy] Failed to log Iterative Refinement oscillator result:",
+        err,
+      );
     }
-    publishRabbitOscillatorEvents({
+    publishIterativeRefinementOscillatorEvents({
       sessionKey: oscillatorSessionKey,
       result: oscillator,
       totalLatencyMs: oscillatorTotalLatencyMs,
-      stepLatencies: rabbitStepLatencies,
+      stepLatencies: iterativeRefinementStepLatencies,
     });
 
-    if (oscillator.status !== 'single_model_fallback' && oscillator.text) {
+    if (oscillator.status !== "single_model_fallback" && oscillator.text) {
       const completionTokens = Math.ceil(oscillator.text.length / 4);
       const response = {
         id: `chatcmpl-${Date.now()}`,
-        object: 'chat.completion',
+        object: "chat.completion",
         created: Math.floor(Date.now() / 1000),
         model: oscillator.foundation?.modelId ?? AUTO_MODEL_ID,
-        choices: [{
-          index: 0,
-          message: { role: 'assistant', content: oscillator.text },
-          finish_reason: 'stop',
-        }],
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: oscillator.text },
+            finish_reason: "stop",
+          },
+        ],
         usage: {
           prompt_tokens: estimatedInputTokens,
           completion_tokens: completionTokens,
@@ -1448,19 +1828,27 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
       if (oscillator.foundation) {
         const finalModelKey = `${oscillator.foundation.platform}:${oscillator.foundation.modelId}`;
-        setStickyModel(messages, oscillator.foundation.modelDbId, sessionIdHeader);
-        if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
-        res.setHeader('X-Routed-Via', `${oscillator.foundation.platform}/${oscillator.foundation.modelId}`);
+        setStickyModel(
+          messages,
+          oscillator.foundation.modelDbId,
+          sessionIdHeader,
+        );
+        if (handoffMode !== "off" && sessionKey)
+          recordSuccessfulModel({ sessionKey, modelKey: finalModelKey });
+        res.setHeader(
+          "X-Routed-Via",
+          `${oscillator.foundation.platform}/${oscillator.foundation.modelId}`,
+        );
       } else {
-        res.setHeader('X-Routed-Via', 'rabbit');
+        res.setHeader("X-Routed-Via", "iterative_refinement");
       }
-      res.setHeader('X-Rabbit-Status', oscillator.status);
+      res.setHeader("X-Iterative-Refinement-Status", oscillator.status);
       res.json(response);
       publish({
-        type: 'request.done',
+        type: "request.done",
         id: requestId,
         model: oscillator.foundation?.modelId ?? AUTO_MODEL_ID,
-        provider: oscillator.foundation?.platform ?? 'rabbit',
+        provider: oscillator.foundation?.platform ?? "iterative_refinement",
         keyId: 0,
         latencyMs: Date.now() - start,
         tokens: { in: estimatedInputTokens, out: completionTokens },
@@ -1476,11 +1864,11 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   // connection is severed before `res.end()`. We deliberately do NOT use
   // `req.on('close')` because that also fires when the response completes
   // normally, which would break stream/path completions.
-  const globalRetryLimit = getFeatureSetting('global_retry_limit') as number;
-  outerLoop: for (let totalAttempt = 0; totalAttempt < globalRetryLimit; totalAttempt++) {
+  const globalRetryLimit = getFeatureSetting("global_retry_limit") as number;
+  for (let totalAttempt = 0; totalAttempt < globalRetryLimit; totalAttempt++) {
     // ---- Exit: client disconnected ----
     if (req.aborted) {
-      publish({ type: 'request.aborted', id: requestId, at: Date.now() });
+      publish({ type: "request.aborted", id: requestId, at: Date.now() });
       return;
     }
     // ---- Get route ----
@@ -1488,7 +1876,9 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     try {
       // When a handoff could fire this turn, pad the token estimate so the router's
       // context-window and TPM checks account for the extra system message overhead.
-      const routingEstimate = handoffPossible ? estimatedTotal + HANDOFF_MAX_TOKENS : estimatedTotal;
+      const routingEstimate = handoffPossible
+        ? estimatedTotal + HANDOFF_MAX_TOKENS
+        : estimatedTotal;
       route = routeRequest(
         routingEstimate,
         skipKeys.size > 0 ? skipKeys : undefined,
@@ -1496,19 +1886,29 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         hasImage,
         wantsTools,
         skipModels.size > 0 ? skipModels : undefined,
-        { pinMode: isPinned, preferredGroupId, stickySessionKey: sessionKey || undefined },
+        {
+          pinMode: isPinned,
+          preferredGroupId,
+          stickySessionKey: sessionKey || undefined,
+        },
       );
     } catch (err: any) {
       // All keys/models exhausted — return 429 immediately.
-      const msg = err.code === 'PINNED_MODEL_EXHAUSTED'
-        ? `Pinned model ${requestedModel} exhausted: ${sanitizeProviderErrorMessage(err.message)}`
-        : sanitizeProviderErrorMessage(err.message);
-      publish({ type: 'request.error', id: requestId, error: msg, at: Date.now() });
-      res.setHeader('X-Routed-Via', 'none');
+      const msg =
+        err.code === "PINNED_MODEL_EXHAUSTED"
+          ? `Pinned model ${requestedModel} exhausted: ${sanitizeProviderErrorMessage(err.message)}`
+          : sanitizeProviderErrorMessage(err.message);
+      publish({
+        type: "request.error",
+        id: requestId,
+        error: msg,
+        at: Date.now(),
+      });
+      res.setHeader("X-Routed-Via", "none");
       res.status(429).json({
         error: {
           message: msg,
-          type: 'rate_limit_error',
+          type: "rate_limit_error",
         },
       });
       return;
@@ -1516,7 +1916,14 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
     const modelKey = `${route.platform}:${route.modelId}`;
     if (prevModelKey && prevModelKey !== modelKey && !isPinned) {
-      publish({ type: 'routing.model_switch', id: requestId, from: prevModelKey, to: modelKey, reason: 'auto-routing fallback', at: Date.now() });
+      publish({
+        type: "routing.model_switch",
+        id: requestId,
+        from: prevModelKey,
+        to: modelKey,
+        reason: "auto-routing fallback",
+        at: Date.now(),
+      });
     }
     prevModelKey = modelKey;
     let outboundMessages = messages;
@@ -1525,9 +1932,17 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // counts are estimated; the non-stream path uses the provider's usage,
     // which already counts the injected message.
     let injectedHandoffTokens = 0;
-    if (handoffMode !== 'off' && sessionKey) {
-      const handoff = maybeInjectContextHandoff({ mode: handoffMode, sessionKey, messages, selectedModelKey: modelKey });
-      if (handoff.injected) console.log(`[Proxy] Context handoff injected (session ${sessionKey.slice(0, 8)}…, model switch detected)`);
+    if (handoffMode !== "off" && sessionKey) {
+      const handoff = maybeInjectContextHandoff({
+        mode: handoffMode,
+        sessionKey,
+        messages,
+        selectedModelKey: modelKey,
+      });
+      if (handoff.injected)
+        console.log(
+          `[Proxy] Context handoff injected (session ${sessionKey.slice(0, 8)}…, model switch detected)`,
+        );
       outboundMessages = handoff.messages;
       injectedHandoffTokens = handoff.injectedTokens;
     }
@@ -1541,30 +1956,38 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     // real bound lets the model actually generate.
     const effectiveMaxTokens = max_tokens ?? route.maxOutputTokens ?? undefined;
 
-        // ── Proxy transport decision ─────────────────────────────────
-        // When the key is flagged use_proxy AND the feature flag is enabled AND
-        // the required env vars are set, route through the FreeLLMProxy instead
-        // of connecting directly. All post-processing (degradation, sticky model,
-        // token accounting, tool rescue) applies identically.
-        const proxyTransportEnabled = getFeatureSetting('proxy_transport_enabled') as boolean;
-        const relayTransport = getRelayTransport(route.transportId);
-        const useProxyTransport = !!relayTransport && proxyTransportEnabled && isRelayTransportConfigured(route.transportId);
-        if (useProxyTransport && sessionKey) {
-          const DEFAULT_PROXY_WORKER_COUNT = 3;
-          const workerIndex = computeWorkerIndex(sessionKey, DEFAULT_PROXY_WORKER_COUNT);
-          publish({
-            type: 'routing.worker_affinity_selected',
-            id: requestId,
-            sessionKey: sessionKey.slice(0, 8),
-            keyId: route.keyId,
-            transportId: route.transportId,
-            workerIndex,
-            model: route.modelId,
-            at: Date.now(),
-          });
-        }
+    // ── Proxy transport decision ─────────────────────────────────
+    // When the key is flagged use_proxy AND the feature flag is enabled AND
+    // the required env vars are set, route through the FreeLLMProxy instead
+    // of connecting directly. All post-processing (degradation, sticky model,
+    // token accounting, tool rescue) applies identically.
+    const proxyTransportEnabled = getFeatureSetting(
+      "proxy_transport_enabled",
+    ) as boolean;
+    const relayTransport = getRelayTransport(route.transportId);
+    const useProxyTransport =
+      !!relayTransport &&
+      proxyTransportEnabled &&
+      isRelayTransportConfigured(route.transportId);
+    if (useProxyTransport && sessionKey) {
+      const DEFAULT_PROXY_WORKER_COUNT = 3;
+      const workerIndex = computeWorkerIndex(
+        sessionKey,
+        DEFAULT_PROXY_WORKER_COUNT,
+      );
+      publish({
+        type: "routing.worker_affinity_selected",
+        id: requestId,
+        sessionKey: sessionKey.slice(0, 8),
+        keyId: route.keyId,
+        transportId: route.transportId,
+        workerIndex,
+        model: route.modelId,
+        at: Date.now(),
+      });
+    }
 
-        try {
+    try {
       if (stream) {
         // — Stream turn-integrity (#231 audit) —
         // The old loop forwarded upstream chunks verbatim and called any
@@ -1590,10 +2013,13 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Hold-window state: 'undecided' until the first text either matches
         // a dialect marker (→ 'dialect': buffer everything, rescue at end) or
         // provably cannot (→ 'passthrough': flush and stream normally).
-        let mode: 'undecided' | 'passthrough' | 'dialect' = 'undecided';
-        let heldText = '';
+        let mode: "undecided" | "passthrough" | "dialect" = "undecided";
+        let heldText = "";
         const preamble: unknown[] = []; // role-only chunks held until flush
-        const toolCallAcc = new Map<number, { id?: string; name: string; args: string }>();
+        const toolCallAcc = new Map<
+          number,
+          { id?: string; name: string; args: string }
+        >();
         let upstreamFinish: string | null = null;
         let usageChunk: unknown = null;
         let lastMeta: { id?: string; model?: string; created?: number } = {};
@@ -1601,40 +2027,57 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         const flushHeaders = () => {
           if (headerSent) return;
           ttfbMs = Date.now() - start;
-          res.setHeader('Content-Type', 'text/event-stream');
-          res.setHeader('Cache-Control', 'no-cache');
-          res.setHeader('Connection', 'keep-alive');
-          res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
-          if (totalAttempt > 0) res.setHeader('X-Fallback-Attempts', String(totalAttempt));
+          res.setHeader("Content-Type", "text/event-stream");
+          res.setHeader("Cache-Control", "no-cache");
+          res.setHeader("Connection", "keep-alive");
+          res.setHeader("X-Routed-Via", `${route.platform}/${route.modelId}`);
+          if (totalAttempt > 0)
+            res.setHeader("X-Fallback-Attempts", String(totalAttempt));
           headerSent = true;
           for (const p of preamble) res.write(`data: ${JSON.stringify(p)}\n\n`);
           preamble.length = 0;
         };
-        const mkChunk = (delta: Record<string, unknown>, finish: string | null) => ({
+        const mkChunk = (
+          delta: Record<string, unknown>,
+          finish: string | null,
+        ) => ({
           id: lastMeta.id ?? `chatcmpl-${Date.now()}`,
-          object: 'chat.completion.chunk',
+          object: "chat.completion.chunk",
           created: lastMeta.created ?? Math.floor(Date.now() / 1000),
           model: lastMeta.model ?? route.modelId,
           choices: [{ index: 0, delta, finish_reason: finish }],
         });
-        const writeChunk = (c: unknown) => res.write(`data: ${JSON.stringify(c)}\n\n`);
+        const writeChunk = (c: unknown) =>
+          res.write(`data: ${JSON.stringify(c)}\n\n`);
 
         try {
           const streamOptions = {
-                      temperature, max_tokens: effectiveMaxTokens, top_p, tools, tool_choice, parallel_tool_calls,
-                      reasoning_effort, thinking,
-                    };
-                    const gen = useProxyTransport
-                      ? relayTransport!.streamChatCompletion({
-                          providerBaseUrl: resolveProviderBaseUrl(route.provider),
-                          apiKey: route.apiKey,
-                          body: { model: route.modelId, messages: outboundMessages, ...streamOptions },
-                          sessionId: sessionKey || undefined,
-                        })
-                      : route.provider.streamChatCompletion(
-                          route.apiKey, outboundMessages, route.modelId,
-                          streamOptions,
-                        );
+            temperature,
+            max_tokens: effectiveMaxTokens,
+            top_p,
+            tools,
+            tool_choice,
+            parallel_tool_calls,
+            reasoning_effort,
+            thinking,
+          };
+          const gen = useProxyTransport
+            ? relayTransport!.streamChatCompletion({
+                providerBaseUrl: resolveProviderBaseUrl(route.provider),
+                apiKey: route.apiKey,
+                body: {
+                  model: route.modelId,
+                  messages: outboundMessages,
+                  ...streamOptions,
+                },
+                sessionId: sessionKey || undefined,
+              })
+            : route.provider.streamChatCompletion(
+                route.apiKey,
+                outboundMessages,
+                route.modelId,
+                streamOptions,
+              );
 
           for await (const chunk of gen) {
             const anyChunk = chunk as Record<string, any>;
@@ -1645,16 +2088,50 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             // request. After: surface an error frame instead of pretending
             // the turn succeeded.
             if (anyChunk.error && !anyChunk.choices) {
-              const msg = anyChunk.error.message ?? JSON.stringify(anyChunk.error).slice(0, 200);
-              if (!headerSent) throw new Error(`in-band provider error from ${route.displayName}: ${msg}`);
-              console.error(`[Proxy] In-band error frame from ${route.displayName} mid-stream:`, msg);
-              writeChunk({ error: { message: `Provider error (${route.displayName}): ${sanitizeProviderErrorMessage(String(msg))}`, type: 'stream_error' } });
-              try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* socket gone */ }
-              logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, totalOutputTokens, Date.now() - start, `in-band error frame: ${sanitizeProviderErrorMessage(String(msg))}`, ttfbMs, pinnedModelId);
+              const msg =
+                anyChunk.error.message ??
+                JSON.stringify(anyChunk.error).slice(0, 200);
+              if (!headerSent)
+                throw new Error(
+                  `in-band provider error from ${route.displayName}: ${msg}`,
+                );
+              console.error(
+                `[Proxy] In-band error frame from ${route.displayName} mid-stream:`,
+                msg,
+              );
+              writeChunk({
+                error: {
+                  message: `Provider error (${route.displayName}): ${sanitizeProviderErrorMessage(String(msg))}`,
+                  type: "stream_error",
+                },
+              });
+              try {
+                res.write("data: [DONE]\n\n");
+                res.end();
+              } catch {
+                /* socket gone */
+              }
+              logRequest(
+                route.platform,
+                route.modelId,
+                route.keyId,
+                "error",
+                estimatedInputTokens,
+                totalOutputTokens,
+                Date.now() - start,
+                `in-band error frame: ${sanitizeProviderErrorMessage(String(msg))}`,
+                ttfbMs,
+                pinnedModelId,
+              );
               return;
             }
 
-            if (anyChunk.id) lastMeta = { id: anyChunk.id, model: anyChunk.model, created: anyChunk.created };
+            if (anyChunk.id)
+              lastMeta = {
+                id: anyChunk.id,
+                model: anyChunk.model,
+                created: anyChunk.created,
+              };
 
             const choice = anyChunk.choices?.[0];
             if (!choice) {
@@ -1669,7 +2146,8 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             // Buffer tool_call deltas — emitted complete + repaired at end.
             for (const tc of choice.delta?.tool_calls ?? []) {
               const idx = tc.index ?? 0;
-              if (!toolCallAcc.has(idx)) toolCallAcc.set(idx, { id: undefined, name: '', args: '' });
+              if (!toolCallAcc.has(idx))
+                toolCallAcc.set(idx, { id: undefined, name: "", args: "" });
               const acc = toolCallAcc.get(idx)!;
               if (tc.id && !acc.id) acc.id = tc.id;
               if (tc.function?.name) acc.name += tc.function.name;
@@ -1677,13 +2155,19 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             }
 
             // Count reasoning tokens from thinking/reasoning deltas for fair speed scoring.
-            const reasoningText = typeof choice.delta?.reasoning_content === 'string' ? choice.delta.reasoning_content : '';
+            const reasoningText =
+              typeof choice.delta?.reasoning_content === "string"
+                ? choice.delta.reasoning_content
+                : "";
             if (reasoningText.length > 0) {
               totalReasoningTokens += Math.ceil(reasoningText.length / 4);
             }
 
             normalizeOutboundContent(chunk);
-            const text = typeof choice.delta?.content === 'string' ? choice.delta.content : '';
+            const text =
+              typeof choice.delta?.content === "string"
+                ? choice.delta.content
+                : "";
 
             if (text.length === 0) {
               // Role preamble / keep-alive: hold until first payload decides
@@ -1691,31 +2175,58 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
               // stripped — both are re-emitted complete at the end (OpenRouter
               // attaches tool_call deltas to chunks that also carry role/
               // reasoning keys; forwarding them raw would duplicate the call).
-              if (choice.delta && Object.keys(choice.delta).some(k => k !== 'content' && k !== 'tool_calls' && choice.delta[k] != null)) {
-                const cleaned = { ...anyChunk, choices: [{ ...choice, delta: { ...choice.delta, tool_calls: undefined }, finish_reason: null }] };
-                if (headerSent) writeChunk(cleaned); else preamble.push(cleaned);
+              if (
+                choice.delta &&
+                Object.keys(choice.delta).some(
+                  (k) =>
+                    k !== "content" &&
+                    k !== "tool_calls" &&
+                    choice.delta[k] != null,
+                )
+              ) {
+                const cleaned = {
+                  ...anyChunk,
+                  choices: [
+                    {
+                      ...choice,
+                      delta: { ...choice.delta, tool_calls: undefined },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                if (headerSent) writeChunk(cleaned);
+                else preamble.push(cleaned);
               }
               continue;
             }
 
             totalOutputTokens += Math.ceil(text.length / 4);
 
-            if (mode === 'passthrough') {
-              writeChunk({ ...anyChunk, choices: [{ ...choice, delta: { ...choice.delta, tool_calls: undefined }, finish_reason: null }] });
+            if (mode === "passthrough") {
+              writeChunk({
+                ...anyChunk,
+                choices: [
+                  {
+                    ...choice,
+                    delta: { ...choice.delta, tool_calls: undefined },
+                    finish_reason: null,
+                  },
+                ],
+              });
               continue;
             }
 
             heldText += text;
-            if (mode === 'dialect') continue;
+            if (mode === "dialect") continue;
 
             const probe = heldText.trimStart();
             if (startsWithDialectMarker(probe)) {
-              mode = 'dialect';
+              mode = "dialect";
             } else if (!couldBecomeDialectMarker(probe) || probe.length > 256) {
-              mode = 'passthrough';
+              mode = "passthrough";
               flushHeaders();
               writeChunk(mkChunk({ content: heldText }, null));
-              heldText = '';
+              heldText = "";
             }
             // else: still a strict prefix of a marker — keep holding.
           }
@@ -1730,26 +2241,65 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           const completedCalls = [...toolCallAcc.entries()]
             .sort((a, b) => a[0] - b[0])
             .map(([, acc]) => ({
-              id: acc.id && acc.id.length > 0 ? acc.id : `call_stream_${++syntheticStreamIds}`,
-              type: 'function' as const,
-              function: { name: acc.name, arguments: repairToolArguments(acc.args || '{}', schemas.get(acc.name)) },
+              id:
+                acc.id && acc.id.length > 0
+                  ? acc.id
+                  : `call_stream_${++syntheticStreamIds}`,
+              type: "function" as const,
+              function: {
+                name: acc.name,
+                arguments: repairToolArguments(
+                  acc.args || "{}",
+                  schemas.get(acc.name),
+                ),
+              },
             }))
-            .filter(c => { try { JSON.parse(c.function.arguments); return c.function.name.length > 0; } catch { return false; } });
+            .filter((c) => {
+              try {
+                JSON.parse(c.function.arguments);
+                return c.function.name.length > 0;
+              } catch {
+                return false;
+              }
+            });
 
           // Dialect rescue: the held text is an inline tool call in some
           // model's private syntax. Parse it into structured calls or treat
           // the turn as dead (headers were never sent in dialect mode, so
           // failing over is free).
-          if (mode === 'dialect' || (mode === 'undecided' && heldText.length > 0 && containsDialectMarker(heldText))) {
-            const rescue = rescueInlineToolCalls(heldText, new Set((tools ?? []).map(t => t.function.name)));
+          if (
+            mode === "dialect" ||
+            (mode === "undecided" &&
+              heldText.length > 0 &&
+              containsDialectMarker(heldText))
+          ) {
+            const rescue = rescueInlineToolCalls(
+              heldText,
+              new Set((tools ?? []).map((t) => t.function.name)),
+            );
             if (rescue.detected) {
-              if (!rescue.calls) throw new Error(`unparseable inline tool-call dialect from ${route.displayName}: ${heldText.slice(0, 120)}`);
+              if (!rescue.calls)
+                throw new Error(
+                  `unparseable inline tool-call dialect from ${route.displayName}: ${heldText.slice(0, 120)}`,
+                );
               let rescuedIds = 0;
               for (const c of rescue.calls) {
-                completedCalls.push({ id: `call_rescued_${++rescuedIds}`, type: 'function', function: { name: c.name, arguments: repairToolArguments(c.arguments, schemas.get(c.name)) } });
+                completedCalls.push({
+                  id: `call_rescued_${++rescuedIds}`,
+                  type: "function",
+                  function: {
+                    name: c.name,
+                    arguments: repairToolArguments(
+                      c.arguments,
+                      schemas.get(c.name),
+                    ),
+                  },
+                });
               }
               heldText = rescue.cleanText;
-              console.log(`[Proxy] Rescued ${rescuedIds} inline tool call(s) from ${route.displayName} into structured tool_calls`);
+              console.log(
+                `[Proxy] Rescued ${rescuedIds} inline tool call(s) from ${route.displayName} into structured tool_calls`,
+              );
             }
           }
 
@@ -1758,7 +2308,9 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             // Nothing usable came out — same failover semantics as the
             // non-stream empty-completion path. Headers can't have been sent
             // (header flush requires payload), so the client never notices.
-            throw new Error(`empty completion from ${route.displayName} (stream produced no content and no tool calls)`);
+            throw new Error(
+              `empty completion from ${route.displayName} (stream produced no content and no tool calls)`,
+            );
           }
 
           flushHeaders();
@@ -1766,38 +2318,114 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
             writeChunk(mkChunk({ content: heldText }, null));
           }
           if (completedCalls.length > 0) {
-            writeChunk(mkChunk({ tool_calls: completedCalls.map((c, i) => ({ index: i, ...c })) }, null));
-            totalOutputTokens += Math.ceil(completedCalls.reduce((n, c) => n + c.function.arguments.length, 0) / 4);
+            writeChunk(
+              mkChunk(
+                {
+                  tool_calls: completedCalls.map((c, i) => ({
+                    index: i,
+                    ...c,
+                  })),
+                },
+                null,
+              ),
+            );
+            totalOutputTokens += Math.ceil(
+              completedCalls.reduce(
+                (n, c) => n + c.function.arguments.length,
+                0,
+              ) / 4,
+            );
           }
           // Terminal finish_reason, ALWAYS present: calls win over a sloppy
           // upstream 'stop'; 'length'/'content_filter' survive for pure-text
           // turns; missing upstream reason is synthesized.
-          const finish = completedCalls.length > 0
-            ? 'tool_calls'
-            : (upstreamFinish && upstreamFinish !== 'tool_calls' ? upstreamFinish : 'stop');
+          const finish =
+            completedCalls.length > 0
+              ? "tool_calls"
+              : upstreamFinish && upstreamFinish !== "tool_calls"
+                ? upstreamFinish
+                : "stop";
           writeChunk(mkChunk({}, finish));
           if (usageChunk) writeChunk(usageChunk);
-          res.write('data: [DONE]\n\n');
+          res.write("data: [DONE]\n\n");
           res.end();
 
           recordRequest(route.platform, route.modelId, route.keyId);
-          recordTokens(route.platform, route.modelId, route.keyId, estimatedInputTokens + injectedHandoffTokens + totalOutputTokens);
+          recordTokens(
+            route.platform,
+            route.modelId,
+            route.keyId,
+            estimatedInputTokens + injectedHandoffTokens + totalOutputTokens,
+          );
           recordSuccess(route.modelDbId);
           setStickyModel(messages, route.modelDbId, sessionIdHeader);
-          if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey });
-          logRequest(route.platform, route.modelId, route.keyId, 'success', estimatedInputTokens + injectedHandoffTokens, totalOutputTokens, Date.now() - start, null, ttfbMs, pinnedModelId, totalReasoningTokens);
-          publish({ type: 'request.done', id: requestId, model: route.modelId, provider: route.platform, keyId: route.keyId, latencyMs: Date.now() - start, tokens: { in: estimatedInputTokens + injectedHandoffTokens, out: totalOutputTokens }, at: Date.now() });
+          if (handoffMode !== "off" && sessionKey)
+            recordSuccessfulModel({ sessionKey, modelKey });
+          logRequest(
+            route.platform,
+            route.modelId,
+            route.keyId,
+            "success",
+            estimatedInputTokens + injectedHandoffTokens,
+            totalOutputTokens,
+            Date.now() - start,
+            null,
+            ttfbMs,
+            pinnedModelId,
+            totalReasoningTokens,
+          );
+          publish({
+            type: "request.done",
+            id: requestId,
+            model: route.modelId,
+            provider: route.platform,
+            keyId: route.keyId,
+            latencyMs: Date.now() - start,
+            tokens: {
+              in: estimatedInputTokens + injectedHandoffTokens,
+              out: totalOutputTokens,
+            },
+            at: Date.now(),
+          });
           clearExhausted(route.keyId, route.modelId);
           return;
         } catch (streamErr: any) {
           if (headerSent) {
             // Mid-stream error after real payload reached the client — finish
             // the SSE response honestly instead of leaving the client hanging.
-            console.error(`[Proxy] Mid-stream error from ${route.displayName}:`, streamErr.message);
-            const payload = { error: { message: `Provider error (${route.displayName}): stream interrupted`, type: 'stream_error' } };
-            try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch { /* socket gone */ }
-            try { res.write('data: [DONE]\n\n'); res.end(); } catch { /* socket gone */ }
-            logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, totalOutputTokens, Date.now() - start, sanitizeProviderErrorMessage(streamErr.message), null, pinnedModelId);
+            console.error(
+              `[Proxy] Mid-stream error from ${route.displayName}:`,
+              streamErr.message,
+            );
+            const payload = {
+              error: {
+                message: `Provider error (${route.displayName}): stream interrupted`,
+                type: "stream_error",
+              },
+            };
+            try {
+              res.write(`data: ${JSON.stringify(payload)}\n\n`);
+            } catch {
+              /* socket gone */
+            }
+            try {
+              res.write("data: [DONE]\n\n");
+              res.end();
+            } catch {
+              /* socket gone */
+            }
+            logRequest(
+              route.platform,
+              route.modelId,
+              route.keyId,
+              "error",
+              estimatedInputTokens,
+              totalOutputTokens,
+              Date.now() - start,
+              sanitizeProviderErrorMessage(streamErr.message),
+              null,
+              pinnedModelId,
+            );
             const streamTier = classifyError(streamErr);
             if (streamTier) recordFailure(route.modelDbId, streamTier);
             return;
@@ -1808,26 +2436,38 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           throw streamErr;
         }
       } else {
-              const chatOptions = {
-                temperature, max_tokens: effectiveMaxTokens, top_p, tools, tool_choice, parallel_tool_calls,
-                reasoning_effort, thinking,
-              };
-              const result = useProxyTransport
-                ? await relayTransport!.chatCompletion({
-                    providerBaseUrl: resolveProviderBaseUrl(route.provider),
-                    apiKey: route.apiKey,
-                    body: { model: route.modelId, messages: outboundMessages, ...chatOptions },
-                    sessionId: sessionKey || undefined,
-                  })
-                : await route.provider.chatCompletion(
-                    route.apiKey, outboundMessages, route.modelId,
-                    chatOptions,
-                  );
+        const chatOptions = {
+          temperature,
+          max_tokens: effectiveMaxTokens,
+          top_p,
+          tools,
+          tool_choice,
+          parallel_tool_calls,
+          reasoning_effort,
+          thinking,
+        };
+        const result = useProxyTransport
+          ? await relayTransport!.chatCompletion({
+              providerBaseUrl: resolveProviderBaseUrl(route.provider),
+              apiKey: route.apiKey,
+              body: {
+                model: route.modelId,
+                messages: outboundMessages,
+                ...chatOptions,
+              },
+              sessionId: sessionKey || undefined,
+            })
+          : await route.provider.chatCompletion(
+              route.apiKey,
+              outboundMessages,
+              route.modelId,
+              chatOptions,
+            );
         // Empty completion (no text, no tool calls) → fail over rather than
         // return a transport-level "success" the caller can't act on. Mirrors
         // the zero-chunk streaming case above.
         const respMsg = result.choices?.[0]?.message;
-        const respText = contentToString(respMsg?.content ?? '');
+        const respText = contentToString(respMsg?.content ?? "");
         if (!respText && (respMsg?.tool_calls?.length ?? 0) === 0) {
           throw new Error(`empty completion from ${route.displayName}`);
         }
@@ -1838,21 +2478,41 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // model's private syntax). Re-parse it into structured tool_calls so
         // the client's agent loop keeps working; a detected-but-unparseable
         // dialect is a dead turn and fails over like an empty completion.
-        if (wantsTools && respMsg && (respMsg.tool_calls?.length ?? 0) === 0 && respText) {
-          const rescue = rescueInlineToolCalls(respText, new Set((tools ?? []).map(t => t.function.name)));
+        if (
+          wantsTools &&
+          respMsg &&
+          (respMsg.tool_calls?.length ?? 0) === 0 &&
+          respText
+        ) {
+          const rescue = rescueInlineToolCalls(
+            respText,
+            new Set((tools ?? []).map((t) => t.function.name)),
+          );
           if (rescue.detected) {
             if (!rescue.calls) {
-              throw new Error(`unparseable inline tool-call dialect from ${route.displayName}: ${respText.slice(0, 120)}`);
+              throw new Error(
+                `unparseable inline tool-call dialect from ${route.displayName}: ${respText.slice(0, 120)}`,
+              );
             }
             const schemas = toolSchemaMap(tools);
             respMsg.tool_calls = rescue.calls.map((c, i) => ({
               id: `call_rescued_${i + 1}`,
-              type: 'function' as const,
-              function: { name: c.name, arguments: repairToolArguments(c.arguments, schemas.get(c.name)) },
+              type: "function" as const,
+              function: {
+                name: c.name,
+                arguments: repairToolArguments(
+                  c.arguments,
+                  schemas.get(c.name),
+                ),
+              },
             }));
-            respMsg.content = rescue.cleanText.length > 0 ? rescue.cleanText : null;
-            if (result.choices?.[0]) result.choices[0].finish_reason = 'tool_calls';
-            console.log(`[Proxy] Rescued ${rescue.calls.length} inline tool call(s) from ${route.displayName} into structured tool_calls`);
+            respMsg.content =
+              rescue.cleanText.length > 0 ? rescue.cleanText : null;
+            if (result.choices?.[0])
+              result.choices[0].finish_reason = "tool_calls";
+            console.log(
+              `[Proxy] Rescued ${rescue.calls.length} inline tool call(s) from ${route.displayName} into structured tool_calls`,
+            );
           }
         }
 
@@ -1861,10 +2521,12 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         recordTokens(route.platform, route.modelId, route.keyId, totalTokens);
         recordSuccess(route.modelDbId);
         setStickyModel(messages, route.modelDbId, sessionIdHeader);
-        if (handoffMode !== 'off' && sessionKey) recordSuccessfulModel({ sessionKey, modelKey });
+        if (handoffMode !== "off" && sessionKey)
+          recordSuccessfulModel({ sessionKey, modelKey });
 
-        res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
-        if (totalAttempt > 0) res.setHeader('X-Fallback-Attempts', String(totalAttempt));
+        res.setHeader("X-Routed-Via", `${route.platform}/${route.modelId}`);
+        if (totalAttempt > 0)
+          res.setHeader("X-Fallback-Attempts", String(totalAttempt));
         // Repair double-encoded tool arguments against the request's tool
         // schemas (e.g. GLM emitting an array parameter as a JSON string),
         // so strict clients don't reject the call. Schema-gated — a true
@@ -1873,7 +2535,10 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
           const schemas = toolSchemaMap(tools);
           for (const tc of respMsg.tool_calls) {
             if (tc?.function?.arguments != null) {
-              tc.function.arguments = repairToolArguments(tc.function.arguments, schemas.get(tc.function.name));
+              tc.function.arguments = repairToolArguments(
+                tc.function.arguments,
+                schemas.get(tc.function.name),
+              );
             }
           }
         }
@@ -1882,21 +2547,53 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
 
         // OpenAI-compatible providers report reasoning tokens in completion_tokens_details.
         // Anthropic's completion_tokens already include thinking (see anthropic.ts translateUsage).
-        const reasoningTokens = (result.usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0;
+        const reasoningTokens =
+          (result.usage as any)?.completion_tokens_details?.reasoning_tokens ??
+          0;
         logRequest(
-          route.platform, route.modelId, route.keyId, 'success',
+          route.platform,
+          route.modelId,
+          route.keyId,
+          "success",
           result.usage?.prompt_tokens ?? 0,
           result.usage?.completion_tokens ?? 0,
-          Date.now() - start, null, null, pinnedModelId, reasoningTokens,
+          Date.now() - start,
+          null,
+          null,
+          pinnedModelId,
+          reasoningTokens,
         );
-        publish({ type: 'request.done', id: requestId, model: route.modelId, provider: route.platform, keyId: route.keyId, latencyMs: Date.now() - start, tokens: { in: result.usage?.prompt_tokens ?? 0, out: result.usage?.completion_tokens ?? 0 }, at: Date.now() });
+        publish({
+          type: "request.done",
+          id: requestId,
+          model: route.modelId,
+          provider: route.platform,
+          keyId: route.keyId,
+          latencyMs: Date.now() - start,
+          tokens: {
+            in: result.usage?.prompt_tokens ?? 0,
+            out: result.usage?.completion_tokens ?? 0,
+          },
+          at: Date.now(),
+        });
         clearExhausted(route.keyId, route.modelId);
         return;
       }
     } catch (err: any) {
       const latency = Date.now() - start;
       const safeError = sanitizeProviderErrorMessage(err.message);
-      logRequest(route.platform, route.modelId, route.keyId, 'error', estimatedInputTokens, 0, latency, safeError, null, pinnedModelId);
+      logRequest(
+        route.platform,
+        route.modelId,
+        route.keyId,
+        "error",
+        estimatedInputTokens,
+        0,
+        latency,
+        safeError,
+        null,
+        pinnedModelId,
+      );
 
       // Model-level 404/403: not a key issue — every key on this platform
       // would hit the same dead route. Skip only the model and continue the
@@ -1912,22 +2609,33 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       // a 404/403 to the user so they know to pick a live model instead of
       // silently getting a stranger.
       if (isModelNotFoundError(err) || isModelAccessForbiddenError(err)) {
-        if (isPinned && strictPinnedModelDbId !== undefined && route.modelDbId === strictPinnedModelDbId) {
-          publish({ type: 'request.error', id: requestId, error: `Pinned model ${requestedModel} returned ${isModelNotFoundError(err) ? '404 not found' : '403 forbidden'} upstream — no fallback in pin mode.`, at: Date.now() });
-          res.setHeader('X-Routed-Via', `${route.platform}/${route.modelId}`);
-          res.setHeader('X-Pinned-Model-Dead', '1');
-          const code = isModelNotFoundError(err) ? 'model_not_found' : 'model_forbidden';
+        if (
+          isPinned &&
+          strictPinnedModelDbId !== undefined &&
+          route.modelDbId === strictPinnedModelDbId
+        ) {
+          publish({
+            type: "request.error",
+            id: requestId,
+            error: `Pinned model ${requestedModel} returned ${isModelNotFoundError(err) ? "404 not found" : "403 forbidden"} upstream — no fallback in pin mode.`,
+            at: Date.now(),
+          });
+          res.setHeader("X-Routed-Via", `${route.platform}/${route.modelId}`);
+          res.setHeader("X-Pinned-Model-Dead", "1");
+          const code = isModelNotFoundError(err)
+            ? "model_not_found"
+            : "model_forbidden";
           res.status(isModelNotFoundError(err) ? 404 : 403).json({
             error: {
-              message: `Pinned model '${requestedModel}' is ${isModelNotFoundError(err) ? 'no longer available' : 'not accessible on this tier'} upstream. Pick a different model or omit the 'model' field to auto-route.`,
-              type: 'invalid_request_error',
+              message: `Pinned model '${requestedModel}' is ${isModelNotFoundError(err) ? "no longer available" : "not accessible on this tier"} upstream. Pick a different model or omit the 'model' field to auto-route.`,
+              type: "invalid_request_error",
               code,
             },
           });
           return;
         }
         skipModels.add(route.modelDbId);
-        continue outerLoop;
+        continue;
       }
 
       if (isRetryableError(err)) {
@@ -1937,26 +2645,41 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // NOT transient even though classifyError returns 'minor'. Daily-
         // exhausted keys (RPD/TPD exhausted) are also NOT transient — they
         // won't recover until the provider's daily reset.
-        const isDailyExhausted = isDailyLimitExhausted(route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit });
+        const isDailyExhausted = isDailyLimitExhausted(
+          route.platform,
+          route.modelId,
+          route.keyId,
+          { rpd: route.rpdLimit, tpd: route.tpdLimit },
+        );
         const isPaymentRequired = isPaymentRequiredError(err);
-        const isTransient = classifyError(err) === 'minor' && !isPaymentRequired && !isDailyExhausted;
+        const isTransient =
+          classifyError(err) === "minor" &&
+          !isPaymentRequired &&
+          !isDailyExhausted;
 
         // Dead-turn errors (in-band error, empty completion, stream stall,
         // unparseable dialect): the key WORKS but this specific model
         // can't handle the request. Skip the model, keep the key.
-        if (!(isPinned && strictPinnedModelDbId !== undefined && route.modelDbId === strictPinnedModelDbId)) {
-          const msg = (err.message ?? '').toLowerCase();
-          const isDeadTurn = msg.includes('in-band provider error')
-            || msg.includes('empty completion')
-            || msg.includes('stream ended unexpectedly')
-            || msg.includes('stream stalled')
-            || msg.includes('unparseable inline tool-call dialect')
-            || msg.includes('api error 400');
+        if (
+          !(
+            isPinned &&
+            strictPinnedModelDbId !== undefined &&
+            route.modelDbId === strictPinnedModelDbId
+          )
+        ) {
+          const msg = (err.message ?? "").toLowerCase();
+          const isDeadTurn =
+            msg.includes("in-band provider error") ||
+            msg.includes("empty completion") ||
+            msg.includes("stream ended unexpectedly") ||
+            msg.includes("stream stalled") ||
+            msg.includes("unparseable inline tool-call dialect") ||
+            msg.includes("api error 400");
 
           if (isDeadTurn) {
             skipModels.add(route.modelDbId);
             lastError = err;
-            continue outerLoop;
+            continue;
           }
         }
 
@@ -1966,13 +2689,31 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // excludes it from the healthy pool. Only a successful ping
         // can restore it.
         if (isHeartbeatEnabled()) {
-          const reason = isPaymentRequired ? 'payment_required' : isDailyExhausted ? 'daily_exhausted' : 'rate_limited';
-          const recheckDelayMs = isDailyExhausted || isPaymentRequired
-            ? computeRetryCooldownMs(isPaymentRequired, route.platform, route.modelId, route.keyId, { rpd: route.rpdLimit, tpd: route.tpdLimit }, lastError?.retryAfterMs)
-            : undefined; // transient uses default recheckSec
-          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'error', isTransient, recheckDelayMs);
+          const reason = isPaymentRequired
+            ? "payment_required"
+            : isDailyExhausted
+              ? "daily_exhausted"
+              : "rate_limited";
+          const recheckDelayMs =
+            isDailyExhausted || isPaymentRequired
+              ? computeRetryCooldownMs(
+                  isPaymentRequired,
+                  route.platform,
+                  route.modelId,
+                  route.keyId,
+                  { rpd: route.rpdLimit, tpd: route.tpdLimit },
+                  lastError?.retryAfterMs,
+                )
+              : undefined; // transient uses default recheckSec
+          markKeyUnhealthy(
+            route.keyId,
+            route.modelId,
+            err?.message?.slice(0, 120) ?? "error",
+            isTransient,
+            recheckDelayMs,
+          );
           publish({
-            type: isTransient ? 'routing.key_transient' : 'routing.key_evicted',
+            type: isTransient ? "routing.key_transient" : "routing.key_evicted",
             id: requestId,
             provider: route.platform,
             keyId: route.keyId,
@@ -1986,14 +2727,20 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         // Non-retryable error (auth, 4xx, etc.): also evict from
         // healthy pool when heartbeat is enabled, then skip key.
         if (isHeartbeatEnabled()) {
-          markKeyUnhealthy(route.keyId, route.modelId, err?.message?.slice(0, 120) ?? 'auth error', false, undefined);
+          markKeyUnhealthy(
+            route.keyId,
+            route.modelId,
+            err?.message?.slice(0, 120) ?? "auth error",
+            false,
+            undefined,
+          );
           publish({
-            type: 'routing.key_evicted',
+            type: "routing.key_evicted",
             id: requestId,
             provider: route.platform,
             keyId: route.keyId,
             model: route.modelId,
-            reason: 'auth_error',
+            reason: "auth_error",
             at: Date.now(),
           });
         }
@@ -2007,14 +2754,19 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     markExhausted(route.keyId, route.platform, route.modelId);
     const skipId = `${route.platform}:${route.modelId}:${route.keyId}`;
     skipKeys.add(skipId);
-    if (!isModelNotFoundError(lastError) && !isModelAccessForbiddenError(lastError)) {
+    if (
+      !isModelNotFoundError(lastError) &&
+      !isModelAccessForbiddenError(lastError)
+    ) {
       setCooldown(
         route.platform,
         route.modelId,
         route.keyId,
         computeRetryCooldownMs(
           isPaymentRequiredError(lastError),
-          route.platform, route.modelId, route.keyId,
+          route.platform,
+          route.modelId,
+          route.keyId,
           { rpd: route.rpdLimit, tpd: route.tpdLimit },
           lastError?.retryAfterMs,
         ),
@@ -2022,29 +2774,43 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     }
     const lastTier = classifyError(lastError);
     if (lastTier) recordFailure(route.modelDbId, lastTier);
-    publish({ type: 'routing.key_exhausted', id: requestId, provider: route.platform, keyId: route.keyId, model: route.modelId, reason: sanitizeProviderErrorMessage(lastError?.message), at: Date.now() });
+    publish({
+      type: "routing.key_exhausted",
+      id: requestId,
+      provider: route.platform,
+      keyId: route.keyId,
+      model: route.modelId,
+      reason: sanitizeProviderErrorMessage(lastError?.message),
+      at: Date.now(),
+    });
 
     // ── Provider-outage fast-fail ──────────────────────────────
     // When ≥PROVIDER_FASTFAIL_THRESHOLD distinct models on the same
     // platform have returned a 5xx (major) error in this request,
     // the provider is considered down — skip every remaining model
     // from that platform for the rest of this request.
-    if (getProviderFastFailThreshold() > 0 && classifyError(lastError) === 'major') {
+    if (
+      getProviderFastFailThreshold() > 0 &&
+      classifyError(lastError) === "major"
+    ) {
       const failed = providerFailures.get(route.platform) ?? new Set<number>();
       failed.add(route.modelDbId);
       providerFailures.set(route.platform, failed);
 
-      if (failed.size >= getProviderFastFailThreshold() && !fastFired.has(route.platform)) {
+      if (
+        failed.size >= getProviderFastFailThreshold() &&
+        !fastFired.has(route.platform)
+      ) {
         fastFired.add(route.platform);
 
         const ffDb = getDb();
-        const platformModels = ffDb.prepare(
-          'SELECT id FROM models WHERE platform = ? AND enabled = 1'
-        ).all(route.platform) as Array<{ id: number }>;
+        const platformModels = ffDb
+          .prepare("SELECT id FROM models WHERE platform = ? AND enabled = 1")
+          .all(route.platform) as Array<{ id: number }>;
         for (const m of platformModels) skipModels.add(m.id);
 
         publish({
-          type: 'routing.provider_fastfail',
+          type: "routing.provider_fastfail",
           id: requestId,
           provider: route.platform,
           failedModelCount: failed.size,
@@ -2058,13 +2824,18 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   }
 
   // Outer loop exhausted after globalRetryLimit attempts — return 429.
-  const exhaustedMsg = `All models exhausted after ${globalRetryLimit} attempts. Last: ${lastError?.message ?? 'unknown error'}`;
-  publish({ type: 'request.error', id: requestId, error: exhaustedMsg, at: Date.now() });
-  res.setHeader('X-Routed-Via', 'none');
+  const exhaustedMsg = `All models exhausted after ${globalRetryLimit} attempts. Last: ${lastError?.message ?? "unknown error"}`;
+  publish({
+    type: "request.error",
+    id: requestId,
+    error: exhaustedMsg,
+    at: Date.now(),
+  });
+  res.setHeader("X-Routed-Via", "none");
   res.status(429).json({
     error: {
       message: sanitizeProviderErrorMessage(exhaustedMsg),
-      type: 'rate_limit_error',
+      type: "rate_limit_error",
     },
   });
 });
@@ -2083,15 +2854,27 @@ export function logRequest(
   // analytics split pinned vs auto traffic and detect failover overrides
   // (requested_model set but != model_id).
   requestedModel: string | null = null,
-  reasoningTokens: number = 0,   // thinking/reasoning tokens for fair speed scoring
+  reasoningTokens: number = 0, // thinking/reasoning tokens for fair speed scoring
 ) {
   try {
     const db = getDb();
     db.prepare(`
       INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms, requested_model, reasoning_tokens)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(platform, modelId, keyId, status, inputTokens, outputTokens, latencyMs, error, ttfbMs, requestedModel, reasoningTokens);
+    `).run(
+      platform,
+      modelId,
+      keyId,
+      status,
+      inputTokens,
+      outputTokens,
+      latencyMs,
+      error,
+      ttfbMs,
+      requestedModel,
+      reasoningTokens,
+    );
   } catch (e) {
-    console.error('Failed to log request:', e);
+    console.error("Failed to log request:", e);
   }
 }

@@ -1,5 +1,5 @@
-import type Database from 'better-sqlite3';
-import { getDb } from './index.js';
+import type Database from "better-sqlite3";
+import { getDb } from "./index.js";
 
 /**
  * Benchmark-derived intelligence scores for LLM models.
@@ -33,10 +33,10 @@ export function canonicalizeModelId(modelId: string): string {
   // Per spec R10.2: exact algorithm from TASKS.md Task 1.2
   return modelId
     .toLowerCase()
-    .replace(/^[a-z0-9-]+\//, '')       // strip "provider/" prefix
-    .replace(/[-_]/g, '-')              // normalize separators
-    .replace(/-(instruct|chat|it|hf)$/, '')  // strip common suffixes
-    .replace(/\.(\d+)(?=\D|$)/g, '-$1'); // normalize version dots
+    .replace(/^[a-z0-9-]+\//, "") // strip "provider/" prefix
+    .replace(/[-_]/g, "-") // normalize separators
+    .replace(/-(instruct|chat|it|hf)$/, "") // strip common suffixes
+    .replace(/\.(\d+)(?=\D|$)/g, "-$1"); // normalize version dots
 }
 
 // ─── SOURCE WEIGHT LOADING (with in-memory cache) ─────────────────────────
@@ -58,9 +58,9 @@ export function loadSourceWeights(): Map<string, SourceWeight> {
   if (sourceWeightsCache) return sourceWeightsCache;
 
   const db = getDb();
-  const rows = db.prepare(
-    'SELECT name, weight, enabled FROM benchmark_source_weights'
-  ).all() as Array<{ name: string; weight: number; enabled: number }>;
+  const rows = db
+    .prepare("SELECT name, weight, enabled FROM benchmark_source_weights")
+    .all() as Array<{ name: string; weight: number; enabled: number }>;
 
   sourceWeightsCache = new Map();
   for (const r of rows) {
@@ -83,7 +83,7 @@ export function stalenessDecay(updatedIso: string | null | undefined): number {
   const ageMs = Date.now() - ms;
   if (ageMs < 0) return 1; // future timestamp → treat as fresh
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
-  return Math.pow(0.5, ageDays / 10);
+  return 0.5 ** (ageDays / 10);
 }
 
 // ─── CANARY VALIDATION ────────────────────────────────────────────────────
@@ -144,50 +144,77 @@ export function recomputeBenchmarkComposite(
         if (decay < 0.75 && baseWeight > 0) {
           console.log(
             `[Benchmarks] Staleness decay applied: model id=${id}, source=${sourceName}` +
-            `, decay=${decay.toFixed(2)}, effectiveWeight=${w.toFixed(3)}`
+              `, decay=${decay.toFixed(2)}, effectiveWeight=${w.toFixed(3)}`,
           );
         }
         return w;
       };
 
       // AA source
-      const aaW = weights.get('aa');
+      const aaW = weights.get("aa");
       if (aaW?.enabled && row.aa_score != null) {
-        const w = effectiveWeight(aaW.weight, row.aa_score_updated, row.aa_confidence, 'aa');
+        const w = effectiveWeight(
+          aaW.weight,
+          row.aa_score_updated,
+          row.aa_confidence,
+          "aa",
+        );
         totalWeightedScore += row.aa_score * w;
         totalWeight += w;
       }
 
       // BenchGecko source
-      const bgW = weights.get('bg');
+      const bgW = weights.get("bg");
       if (bgW?.enabled && row.bg_score != null) {
-        const w = effectiveWeight(bgW.weight, row.bg_score_updated, row.bg_confidence, 'bg');
+        const w = effectiveWeight(
+          bgW.weight,
+          row.bg_score_updated,
+          row.bg_confidence,
+          "bg",
+        );
         totalWeightedScore += row.bg_score * w;
         totalWeight += w;
       }
 
       // AI IQ source
-      const aiiqW = weights.get('aiiq');
+      const aiiqW = weights.get("aiiq");
       if (aiiqW?.enabled && row.aiiq_score != null) {
-        const w = effectiveWeight(aiiqW.weight, row.aiiq_score_updated, row.aiiq_confidence, 'aiiq');
+        const w = effectiveWeight(
+          aiiqW.weight,
+          row.aiiq_score_updated,
+          row.aiiq_confidence,
+          "aiiq",
+        );
         totalWeightedScore += row.aiiq_score * w;
         totalWeight += w;
       }
 
-      const manualOverride = lookupManualBenchmarkOverride(row.canonical_model_key);
+      const manualOverride = lookupManualBenchmarkOverride(
+        row.canonical_model_key,
+      );
       if (totalWeight <= 0 && manualOverride == null) continue; // no valid sources (R4.4)
 
-      const composite = manualOverride ?? (totalWeightedScore / totalWeight);
+      const composite = manualOverride ?? totalWeightedScore / totalWeight;
 
       // Canary: reject NaN, Infinity, <0, >100 (R8.1b)
       if (!validateComposite(composite)) {
-        console.warn(`[Benchmarks] Invalid composite for model id=${id}: ${composite} — skipping`);
+        console.warn(
+          `[Benchmarks] Invalid composite for model id=${id}: ${composite} — skipping`,
+        );
         continue;
       }
 
-      const lastUpdate = manualOverride != null
-        ? MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT
-        : [row.aa_score_updated, row.bg_score_updated, row.aiiq_score_updated].filter(t => t != null).sort().pop() ?? null;
+      const lastUpdate =
+        manualOverride != null
+          ? MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT
+          : ([
+              row.aa_score_updated,
+              row.bg_score_updated,
+              row.aiiq_score_updated,
+            ]
+              .filter((t) => t != null)
+              .sort()
+              .pop() ?? null);
 
       update.run(
         composite,
@@ -210,111 +237,119 @@ export function recomputeBenchmarkComposite(
 
 type BenchmarkRow = [string, number]; // [model_id_pattern, intelligence score]
 
-export const MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT = '2026-06-27T00:00:00.000Z';
+export const MANUAL_BENCHMARK_OVERRIDE_UPDATED_AT = "2026-06-27T00:00:00.000Z";
 
 // Manual overrides are intentionally authoritative over live benchmark sources.
 // Public feeds lag or mis-rank several current free-tier agentic models, so
 // these curated scores preserve the operator-reviewed intelligence order.
 export const MANUAL_BENCHMARK_OVERRIDES: BenchmarkRow[] = [
-  ['%glm-5-1%', 100],
-  ['%kimi-k2-6%', 93],
-  ['%nemotron-3-ultra%', 88],
-  ['%minimax-m2-7%', 85],
-  ['%deepseek-v4-flash%', 84],
-  ['%minimax-m3%', 78],
-  ['%step-3-7-flash%', 72],
+  ["%glm-5-1%", 100],
+  ["%kimi-k2-6%", 93],
+  ["%nemotron-3-ultra%", 89],
+  ["%minimax-m2-7%", 85],
+  ["%deepseek-v4-flash%", 62],
+  ["%minimax-m3%", 98],
+  ["%opencode/mimo-v2.5-free%", 74],
+  ["%laguna-m-1%", 74],
+  ["%step-3-7-flash%", 65],
 ];
+type BenchmarkRow = [string, number]; // [model_id_pattern, aa_index_score]
 
-// ─── BENCHMARK SCORE TABLE ──────────────────────────────────────────────────
+// ─── BENCHMARK SCORE TABLE ───────────────────────────────────────────────
 // Patterns are matched via canonical_model_key lookup.
 // Order matters for overlapping patterns — more specific patterns should
 // come first (e.g. 'gemini-3.1-pro%' before 'gemini-3%').
 const BENCHMARK_SCORES: BenchmarkRow[] = [
-  // ── Frontier (AA ≥ 45) ──
-  ['%nemotron-3-ultra%', 88],
-  ['%kimi-k2.6%', 93],
-  ['%kimi-k2.5%', 54],
-  ['%kimi-k2-thinking%', 55],
-  ['%deepseek-v4-pro%', 60],
-  ['%deepseek-v4-flash%', 84],
-  ['%glm-5.1%', 100],
-  ['%glm-5%', 48],
-  ['%minimax-m2.7%', 85],
-  ['%minimax-m3%', 78],
-  ['%step-3.7-flash%', 72],
-  ['%qwen3.6-max%', 57],
-  ['%qwen-3.6-max%', 57],
-  ['%qwen3.6-plus%', 42],
-  ['%qwen3-coder-next%', 46],
-  ['%qwen3-coder%480b%', 44],
-  ['%gemini-3.1-pro%', 60],
-  ['%gemini-3.5-flash%', 55],
-  ['%gemini-3-flash%', 48],
-  ['%gpt-4.1%', 52],
-  ['%gpt-5%', 55],
+  // ── Frontier (Anchor Tier: Raw Reasoning & Heavy Agents) ──
+  ["%glm-5.1%", 100],
+  ["%minimax-m3%", 98],
+  ["%kimi-k2.6%", 93],
+  ["%moonshotai/kimi-k2.6%", 93],
+  ["%nemotron-3-ultra%", 88],
+  ["%minimax-m2.7%", 85],
+  ["%deepseek-v4-pro%", 60],
+  ["%qwen3.6-max%", 57],
+  ["%qwen-3.6-max%", 57],
+  ["%gemini-3.1-pro%", 60],
+  ["%gpt-5%", 55],
+  ["%kimi-k2-thinking%", 55],
+  ["%kimi-k2.5%", 54],
+  ["%moonshotai/kimi-k2.5%", 54],
+  ["%mimo-v2.5%", 54],
+  ["%gpt-4.1%", 52],
+  ["%glm-5%", 48],
+  ["%gemini-3-flash%", 48],
+  ["%qwen3-coder-next%", 46],
+  ["%qwen3-coder%480b%", 44],
+  ["%qwen3.6-plus%", 42],
 
-  // ── Large (AA 26–44) ──
-  ['%minimax-m2.5%', 40],
-  ['%qwen3-next-80b%', 44],
-  ['%qwen-3-235b%', 42],
-  ['%qwen3-235b%', 42],
-  ['%gpt-oss-120b%', 38],
-  ['%gpt-oss:120b%', 38],
-  ['%glm-4.7%', 42],
-  ['%glm-4.7-flash%', 39],
-  ['%nemotron-3-super%', 36],
-  ['%nemotron-3-120b%', 36],
-  ['%gemini-2.5-pro%', 35],
-  ['%deepseek-v3.2%', 32],
-  ['%deepseek-v3.1%', 28],
-  ['%trinity-large%', 32],
-  ['%mistral-medium%', 35],
-  ['%magistral-medium%', 33],
-  ['%gemma-4-31b%', 39],
-  ['%gemma4:31b%', 39],
-  ['%gemma-4-26b%', 31],
-  ['%gemini-3.1-flash-lite%', 34],
-  ['%step-3.5-flash%', 30],
-  ['%command-a-03-2025%', 30],
-  ['%command-r-plus%', 28],
+  // ──── High-Efficiency / Flash Tier (Fast Actions & Low Latency Agents) ─────
+    ["%mimo-v2-5-free%", 74],
+    ["%laguna-m-1%", 74],
+  ["%step-3.7-flash%", 65],
+  ["%deepseek-v4-flash%", 62],
+  ["%gemini-3.5-flash%", 55],
 
-  // ── Medium (AA 13–25) ──
-  ['%qwen3-30b%', 25],
-  ['%qwen3-32b%', 25],
-  ['%mistral-large%', 23],
-  ['%gpt-oss-20b%', 22],
-  ['%gpt-oss:20b%', 22],
-  ['%gpt-oss-safeguard-20b%', 18],
-  ['%glm-4.5-air%', 23],
-  ['%glm-4.5-flash%', 20],
-  ['%glm-4.6v-flash%', 24],
-  ['%devstral%', 22],
-  ['%deepseek-r1-distill%', 17],
-  ['%llama-4-maverick%', 18],
-  ['%llama-4-scout%', 14],
-  ['%llama-3.3-70b%', 14],
-  ['%llama-3.1-70b%', 14],
-  ['%llama-3.3-70b-instruct-fp8-fast%', 14],
-  ['%gemini-2.5-flash%', 21],
-  ['%gemini-2.5-flash-lite%', 17],
-  ['%gpt-4o%', 17],
-  ['%nemotron-3-nano%', 15],
-  ['%nemotron-nano-9b%', 13],
-  ['%nemotron-nano-12b-v2-vl%', 16],
-  ['%north-mini-code%', 18],
-  ['%command-r-08-2024%', 7],
-  ['%moonshotai/kimi-k2.6%', 93],
-  ['%moonshotai/kimi-k2.5%', 54],
+  // ── Large (Legacy / Specialty Contexts) ──
+  ["%minimax-m2.5%", 40],
+  ["%qwen3-next-80b%", 44],
+  ["%qwen-3-235b%", 42],
+  ["%qwen3-235b%", 42],
+  ["%glm-4.7%", 42],
+  ["%gemma-4-31b%", 39],
+  ["%gemma4:31b%", 39],
+  ["%glm-4.7-flash%", 39],
+  ["%gpt-oss-120b%", 38],
+  ["%gpt-oss:120b%", 38],
+  ["%nemotron-3-super%", 36],
+  ["%nemotron-3-120b%", 36],
+  ["%gemini-2.5-pro%", 35],
+  ["%mistral-medium%", 35],
+  ["%gemini-3.1-flash-lite%", 34],
+  ["%magistral-medium%", 33],
+  ["%deepseek-v3.2%", 32],
+  ["%trinity-large%", 32],
+  ["%gemma-4-26b%", 31],
+  ["%step-3.5-flash%", 30],
+  ["%command-a-03-2025%", 30],
+  ["%deepseek-v3.1%", 28],
+  ["%command-r-plus%", 28],
 
-  // ── Small (AA ≤ 12) ──
-  ['%llama-3.1-8b%', 9],
-  ['%llama3.1-8b%', 9],
-  ['%meta-llama-3.1-8b%', 9],
-  ['%gemma-3-12b%', 9],
-  ['%ministral-8b%', 8],
-  ['%granite-4.0-h-micro%', 6],
-  ['%lfm-2.5-1.2b%', 3],
-  ['%codestral%', 8],
+  // ── Medium ──
+  ["%qwen3-30b%", 25],
+  ["%qwen3-32b%", 25],
+  ["%glm-4.6v-flash%", 24],
+  ["%mistral-large%", 23],
+  ["%glm-4.5-air%", 23],
+  ["%gpt-oss-20b%", 22],
+  ["%gpt-oss:20b%", 22],
+  ["%devstral%", 22],
+  ["%gemini-2.5-flash%", 21],
+  ["%glm-4.5-flash%", 20],
+  ["%gpt-oss-safeguard-20b%", 18],
+  ["%llama-4-maverick%", 18],
+  ["%north-mini-code%", 18],
+  ["%deepseek-r1-distill%", 17],
+  ["%gemini-2.5-flash-lite%", 17],
+  ["%gpt-4o%", 17],
+  ["%nemotron-nano-12b-v2-vl%", 16],
+  ["%nemotron-3-nano%", 15],
+  ["%llama-4-scout%", 14],
+  ["%llama-3.3-70b%", 14],
+  ["%llama-3.1-70b%", 14],
+  ["%llama-3.3-70b-instruct-fp8-fast%", 14],
+  ["%nemotron-nano-9b%", 13],
+  ["%command-r-08-2024%", 7],
+
+  // ── Small ──
+  ["%llama-3.1-8b%", 9],
+  ["%llama3.1-8b%", 9],
+  ["%meta-llama-3.1-8b%", 9],
+  ["%gemma-3-12b%", 9],
+  ["%ministral-8b%", 8],
+  ["%codestral%", 8],
+  ["%granite-4.0-h-micro%", 6],
+  ["%lfm-2.5-1.2b%", 3],
 
   // ── Stealth / No Score ──
   // Cogito, Owl Alpha, Poolside Laguna, big-pickle, dolphin-mistral,
@@ -322,21 +357,21 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
   // They stay NULL (benchmark_score = 0 treated as "unscored").
 ];
 
-// ─── TIER DERIVATION ────────────────────────────────────────────────────────
+// ─── TIER DERIVATION ────────────────────────────────────────────────────────────
 // Map an AA Intelligence Index score to the same tier bands the router uses.
 // This lets auto-synced models land in the right tier without manual curation.
 export const TIER_BANDS = {
-  frontier: 45,
-  large: 26,
-  medium: 13,
-  // small = everything below 13
+  frontier: 42,
+  large: 28,
+  medium: 7,
+  // small = everything below 7
 } as const;
 
 export function scoreToTier(score: number): string {
-  if (score >= TIER_BANDS.frontier) return 'Frontier';
-  if (score >= TIER_BANDS.large) return 'Large';
-  if (score >= TIER_BANDS.medium) return 'Medium';
-  return 'Small';
+  if (score >= TIER_BANDS.frontier) return "Frontier";
+  if (score >= TIER_BANDS.large) return "Large";
+  if (score >= TIER_BANDS.medium) return "Medium";
+  return "Small";
 }
 
 // ─── INTELLIGENCE RANK FROM SCORE ───────────────────────────────────────────
@@ -353,26 +388,35 @@ export function scoreToIntelligenceRank(score: number): number {
 }
 
 function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function containsToken(value: string, needle: string): boolean {
   if (!needle) return false;
-  return new RegExp(`(^|[^a-z0-9])${escapeRegex(needle)}($|[^a-z0-9])`).test(value);
+  return new RegExp(`(^|[^a-z0-9])${escapeRegex(needle)}($|[^a-z0-9])`).test(
+    value,
+  );
 }
 
 function patternNeedles(pattern: string): string[] {
-  const raw = pattern.replace(/%/g, '').toLowerCase();
+  const raw = pattern.replace(/%/g, "").toLowerCase();
   const canonical = canonicalizeModelId(raw);
   return raw === canonical ? [raw] : [raw, canonical];
 }
 
-export function lookupManualBenchmarkOverride(modelIdOrKey: string | null | undefined): number | null {
+export function lookupManualBenchmarkOverride(
+  modelIdOrKey: string | null | undefined,
+): number | null {
   if (!modelIdOrKey) return null;
   const lower = modelIdOrKey.toLowerCase();
   const canonical = canonicalizeModelId(modelIdOrKey);
   for (const [pattern, score] of MANUAL_BENCHMARK_OVERRIDES) {
-    if (patternNeedles(pattern).some(needle => containsToken(lower, needle) || containsToken(canonical, needle))) {
+    if (
+      patternNeedles(pattern).some(
+        (needle) =>
+          containsToken(lower, needle) || containsToken(canonical, needle),
+      )
+    ) {
       return score;
     }
   }
@@ -390,7 +434,12 @@ export function lookupBenchmarkScore(modelId: string): number {
   const canonical = canonicalizeModelId(modelId);
   // First match wins (the table is ordered specific → general)
   for (const [pattern, score] of BENCHMARK_SCORES) {
-    if (patternNeedles(pattern).some(needle => containsToken(lower, needle) || containsToken(canonical, needle))) {
+    if (
+      patternNeedles(pattern).some(
+        (needle) =>
+          containsToken(lower, needle) || containsToken(canonical, needle),
+      )
+    ) {
       return score;
     }
   }
@@ -409,8 +458,10 @@ export function lookupBenchmarkScore(modelId: string): number {
  */
 export function applyBenchmarkScores(db: Database.Database): void {
   // Ensure the column exists (defensive — the migration should have added it)
-  const columns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
-  if (!columns.some(c => c.name === 'benchmark_score')) return;
+  const columns = db.prepare("PRAGMA table_info(models)").all() as {
+    name: string;
+  }[];
+  if (!columns.some((c) => c.name === "benchmark_score")) return;
 
   // Backfill canonical_model_key for any models missing it
   backfillCanonicalKeys(db);
@@ -426,7 +477,7 @@ export function applyBenchmarkScores(db: Database.Database): void {
   const apply = db.transaction(() => {
     for (const [pattern, score] of BENCHMARK_SCORES) {
       // Strip SQL LIKE wildcards to derive the canonical key
-      const canonicalKey = canonicalizeModelId(pattern.replace(/%/g, ''));
+      const canonicalKey = canonicalizeModelId(pattern.replace(/%/g, ""));
       updateAAScore.run(score, new Date().toISOString(), canonicalKey, score);
     }
   });
@@ -434,16 +485,22 @@ export function applyBenchmarkScores(db: Database.Database): void {
 }
 
 export function applyManualBenchmarkOverrides(db: Database.Database): number {
-  const modelColumns = db.prepare('PRAGMA table_info(models)').all() as { name: string }[];
+  const modelColumns = db.prepare("PRAGMA table_info(models)").all() as {
+    name: string;
+  }[];
   const requiredModelColumns = [
-    'canonical_model_key',
-    'benchmark_score',
-    'last_benchmark_update',
-    'size_label',
-    'intelligence_rank',
-    'benchmark_composite_version',
+    "canonical_model_key",
+    "benchmark_score",
+    "last_benchmark_update",
+    "size_label",
+    "intelligence_rank",
+    "benchmark_composite_version",
   ];
-  if (!requiredModelColumns.every(name => modelColumns.some(c => c.name === name))) {
+  if (
+    !requiredModelColumns.every((name) =>
+      modelColumns.some((c) => c.name === name),
+    )
+  ) {
     return 0;
   }
 
@@ -465,14 +522,16 @@ export function applyManualBenchmarkOverrides(db: Database.Database): number {
     WHERE id = ?
   `);
 
-  const groupColumns = db.prepare('PRAGMA table_info(model_groups)').all() as { name: string }[];
+  const groupColumns = db.prepare("PRAGMA table_info(model_groups)").all() as {
+    name: string;
+  }[];
   const canUpdateGroups = [
-    'group_key',
-    'benchmark_score',
-    'size_label',
-    'intelligence_rank',
-    'benchmark_composite_version',
-  ].every(name => groupColumns.some(c => c.name === name));
+    "group_key",
+    "benchmark_score",
+    "size_label",
+    "intelligence_rank",
+    "benchmark_composite_version",
+  ].every((name) => groupColumns.some((c) => c.name === name));
 
   const selectGroups = canUpdateGroups
     ? db.prepare(`
@@ -572,10 +631,15 @@ export function applyManualBenchmarkOverrides(db: Database.Database): number {
 // ─── CANONICAL KEY BACKFILL ────────────────────────────────────────────────
 // Populates canonical_model_key for all models that don't have one yet.
 export function backfillCanonicalKeys(db: Database.Database): number {
-  const rows = db.prepare('SELECT id, model_id FROM models WHERE canonical_model_key IS NULL').all() as
-    Array<{ id: number; model_id: string }>;
+  const rows = db
+    .prepare(
+      "SELECT id, model_id FROM models WHERE canonical_model_key IS NULL",
+    )
+    .all() as Array<{ id: number; model_id: string }>;
 
-  const update = db.prepare('UPDATE models SET canonical_model_key = ? WHERE id = ?');
+  const update = db.prepare(
+    "UPDATE models SET canonical_model_key = ? WHERE id = ?",
+  );
   let count = 0;
   const tx = db.transaction(() => {
     for (const r of rows) {
@@ -594,18 +658,23 @@ export function backfillCanonicalKeys(db: Database.Database): number {
 // endpoint. Gracefully degrades on network failure — the static table still
 // provides coverage for ~95% of the catalog.
 
-const AA_LEADERBOARD_URL = 'https://artificialanalysis.ai/leaderboards/models/intelligence/overall';
-const AA_API_URL = 'https://artificialanalysis.ai/api/leaderboards/intelligence';
+const AA_LEADERBOARD_URL =
+  "https://artificialanalysis.ai/leaderboards/models/intelligence/overall";
+const AA_API_URL =
+  "https://artificialanalysis.ai/api/leaderboards/intelligence";
 
 // Simple in-memory cache so we don't re-fetch on every boot within a short window.
 let lastFetchTime = 0;
-let lastFetchResult: { updated: number; errors: string[] } = { updated: 0, errors: [] };
+let lastFetchResult: { updated: number; errors: string[] } = {
+  updated: 0,
+  errors: [],
+};
 const FETCH_CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 export interface BenchmarkFetchResult {
   updated: number;
   errors: string[];
-  source: 'cache' | 'live' | 'skipped' | 'static';
+  source: "cache" | "live" | "skipped" | "static";
 }
 
 /**
@@ -618,12 +687,17 @@ export interface BenchmarkFetchResult {
  *   - Single retry on 5xx or network errors (2 s delay)
  *   - 10 s AbortController timeout (unchanged)
  */
-export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFetchResult & { affectedIds: Set<number> }> {
+export async function fetchAAScores(
+  db: Database.Database,
+): Promise<BenchmarkFetchResult & { affectedIds: Set<number> }> {
   const affectedIds = new Set<number>();
 
   // Return cached result if recently fetched
-  if (Date.now() - lastFetchTime < FETCH_CACHE_TTL_MS && lastFetchResult.updated >= 0) {
-    return { ...lastFetchResult, source: 'cache', affectedIds };
+  if (
+    Date.now() - lastFetchTime < FETCH_CACHE_TTL_MS &&
+    lastFetchResult.updated >= 0
+  ) {
+    return { ...lastFetchResult, source: "cache", affectedIds };
   }
 
   // Retry loop: up to 2 attempts (1 retry on 5xx / network errors)
@@ -635,8 +709,8 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
       const res = await fetch(AA_API_URL, {
         signal: controller.signal,
         headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'AnimaRouter/1.0 (benchmark sync)',
+          Accept: "application/json",
+          "User-Agent": "AnimaRouter/1.0 (benchmark sync)",
         },
       });
 
@@ -645,35 +719,41 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
       if (!res.ok) {
         // ── R2: 404 → static fallback (not an error) ──────────────────────
         if (res.status === 404) {
-          console.warn('[Benchmarks] AA fetch: 404, falling back to static scores');
+          console.warn(
+            "[Benchmarks] AA fetch: 404, falling back to static scores",
+          );
           applyBenchmarkScores(db);
           const staticCount = BENCHMARK_SCORES.length;
           lastFetchResult = { updated: staticCount, errors: [] };
           lastFetchTime = Date.now();
-          return { ...lastFetchResult, source: 'static', affectedIds };
+          return { ...lastFetchResult, source: "static", affectedIds };
         }
 
         // 5xx → retryable; 4xx (other than 404) → terminal error
         if (res.status >= 500 && attempt === 0) {
-          console.warn(`[Benchmarks] AA fetch: ${res.status} — retrying in 2 s`);
-          await new Promise(r => setTimeout(r, 2000));
+          console.warn(
+            `[Benchmarks] AA fetch: ${res.status} — retrying in 2 s`,
+          );
+          await new Promise((r) => setTimeout(r, 2000));
           continue;
         }
 
-        const bodySnippet = await res.text().catch(() => '<unreadable>');
+        const bodySnippet = await res.text().catch(() => "<unreadable>");
         const msg = `AA API returned ${res.status}: ${bodySnippet.slice(0, 80)}`;
         lastFetchResult = { updated: 0, errors: [msg] };
         lastFetchTime = Date.now();
-        return { ...lastFetchResult, source: 'live', affectedIds };
+        return { ...lastFetchResult, source: "live", affectedIds };
       }
 
-      const body = await res.json() as any;
-      const models = Array.isArray(body) ? body : (body?.models ?? body?.data ?? []);
+      const body = (await res.json()) as any;
+      const models = Array.isArray(body)
+        ? body
+        : (body?.models ?? body?.data ?? []);
 
       if (!Array.isArray(models) || models.length === 0) {
-        lastFetchResult = { updated: 0, errors: ['No models in AA response'] };
+        lastFetchResult = { updated: 0, errors: ["No models in AA response"] };
         lastFetchTime = Date.now();
-        return { ...lastFetchResult, source: 'live', affectedIds };
+        return { ...lastFetchResult, source: "live", affectedIds };
       }
 
       // AA writes ONLY to aa_score columns. Uses canonical_model_key.
@@ -683,17 +763,26 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
           AND (aa_score IS NULL OR aa_score != ?)
       `);
 
-      const findId = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+      const findId = db.prepare(
+        "SELECT id FROM models WHERE canonical_model_key = ?",
+      );
 
       let updated = 0;
       const tx = db.transaction(() => {
         for (const m of models) {
-          const modelId = m.model_id ?? m.id ?? m.name ?? '';
-          const score = Number(m.score ?? m.intelligence_index ?? m.intelligence_score ?? 0);
+          const modelId = m.model_id ?? m.id ?? m.name ?? "";
+          const score = Number(
+            m.score ?? m.intelligence_index ?? m.intelligence_score ?? 0,
+          );
           if (!modelId || score <= 0 || score > 100) continue;
 
           const canonicalKey = canonicalizeModelId(modelId);
-          const result = updateScore.run(score, new Date().toISOString(), canonicalKey, score);
+          const result = updateScore.run(
+            score,
+            new Date().toISOString(),
+            canonicalKey,
+            score,
+          );
           if (result.changes > 0) {
             updated += result.changes;
             const row = findId.get(canonicalKey) as { id: number } | undefined;
@@ -707,40 +796,43 @@ export async function fetchAAScores(db: Database.Database): Promise<BenchmarkFet
       lastFetchTime = Date.now();
       console.log(`[Benchmarks] AA fetch: ${updated} models updated`);
 
-      return { ...lastFetchResult, source: 'live', affectedIds };
+      return { ...lastFetchResult, source: "live", affectedIds };
     } catch (err: any) {
       clearTimeout(timeout);
 
       // AbortError = timeout → retryable on first attempt
-      const isTimeout = err.name === 'AbortError';
-      const isNetwork = err.cause?.code === 'ECONNRESET'
-        || err.cause?.code === 'ENOTFOUND'
-        || err.cause?.code === 'ECONNREFUSED'
-        || err.message?.includes('fetch failed');
+      const isTimeout = err.name === "AbortError";
+      const isNetwork =
+        err.cause?.code === "ECONNRESET" ||
+        err.cause?.code === "ENOTFOUND" ||
+        err.cause?.code === "ECONNREFUSED" ||
+        err.message?.includes("fetch failed");
 
       if (attempt === 0 && (isTimeout || isNetwork || err.cause)) {
-        const reason = isTimeout ? 'timeout' : err.message;
+        const reason = isTimeout ? "timeout" : err.message;
         console.warn(`[Benchmarks] AA fetch: ${reason} — retrying in 2 s`);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 2000));
         continue;
       }
 
-      const msg = isTimeout ? 'timeout' : err.message;
-      console.log(`[Benchmarks] AA fetch failed: ${msg} (static table still active)`);
+      const msg = isTimeout ? "timeout" : err.message;
+      console.log(
+        `[Benchmarks] AA fetch failed: ${msg} (static table still active)`,
+      );
       lastFetchResult = { updated: 0, errors: [msg] };
       lastFetchTime = Date.now();
-      return { ...lastFetchResult, source: 'live', affectedIds };
+      return { ...lastFetchResult, source: "live", affectedIds };
     }
   }
 
   // Unreachable, but TypeScript needs a return
-  lastFetchResult = { updated: 0, errors: ['AA fetch exhausted retries'] };
+  lastFetchResult = { updated: 0, errors: ["AA fetch exhausted retries"] };
   lastFetchTime = Date.now();
-  return { ...lastFetchResult, source: 'live', affectedIds };
+  return { ...lastFetchResult, source: "live", affectedIds };
 }
 
+export { fetchAIIQScores } from "../services/benchmark-sources/aiiq.js";
 // ─── RE-EXPORTS from benchmark source adapters ────────────────────────────
 // These are re-exported here so benchmarks.ts can import them from the
 // same module as fetchAAScores, keeping the import surface simple.
-export { fetchBenchGeckoScores } from '../services/benchmark-sources/benchgecko.js';
-export { fetchAIIQScores } from '../services/benchmark-sources/aiiq.js';
+export { fetchBenchGeckoScores } from "../services/benchmark-sources/benchgecko.js";

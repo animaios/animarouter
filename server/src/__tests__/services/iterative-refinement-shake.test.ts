@@ -9,23 +9,23 @@ import {
   detectMeow,
   executeOscillator,
   getOscillatorConfig,
-  getRabbitCandidates,
-  getRabbitOscillatorDecision,
-  getRabbitWeights,
+  getIterativeRefinementCandidates,
+  getIterativeRefinementOscillatorDecision,
+  getIterativeRefinementWeights,
   isComplexReasoningPrompt,
-  isRabbitLoadShedActive,
-  isRabbitOscillatorEligible,
+  isIterativeRefinementLoadShedActive,
+  isIterativeRefinementOscillatorEligible,
   logOscillatorResult,
   type OscillatorConfig,
   type OscillatorStreamChunk,
-  parseRabbitWeights,
-  RABBIT_DEFAULT_WEIGHTS,
-  type RabbitCandidate,
+  parseIterativeRefinementWeights,
+  ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
+  type IterativeRefinementCandidate,
   resolveFoundationCandidates,
   resolveInjectionModel,
-} from "../../services/rabbit-shake.js";
+} from "../../services/iterative-refinement-shake.js";
 
-function candidate(overrides: Partial<RabbitCandidate>): RabbitCandidate {
+function candidate(overrides: Partial<IterativeRefinementCandidate>): IterativeRefinementCandidate {
   return {
     modelDbId: 1,
     platform: "alpha",
@@ -45,17 +45,16 @@ function candidate(overrides: Partial<RabbitCandidate>): RabbitCandidate {
     supportsVision: false,
     supportsTools: false,
     contextWindow: null,
-    rabbitScore: 0.8,
+    iterativeRefinementScore: 0.8,
     ...overrides,
   };
 }
 
 function config(overrides: Partial<OscillatorConfig> = {}): OscillatorConfig {
   return {
-    enabled: true,
     foundationSelection: "auto",
     injectionSelection: "divergent",
-    rabbitWeights: RABBIT_DEFAULT_WEIGHTS,
+    iterativeRefinementWeights: ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
     minIntelligenceGap: 0,
     injectionMaxSentences: 2,
     meowPatterns: [],
@@ -105,32 +104,32 @@ function addModel(opts: {
   return modelDbId;
 }
 
-describe("Rabbit Shake routing helpers", () => {
+describe("Iterative Refinement Shake routing helpers", () => {
   beforeEach(() => {
     process.env.DEV_MODE = "true";
     process.env.NODE_ENV = "test";
     initDb(":memory:");
     getDb().exec(`
-      DELETE FROM fallback_config;
-      DELETE FROM api_keys;
-      DELETE FROM models;
-      DELETE FROM requests;
-      DELETE FROM settings
-      WHERE key LIKE 'rabbit_%' OR key LIKE 'oscillator_%' OR key = 'routing_strategy';
-    `);
+          DELETE FROM fallback_config;
+          DELETE FROM api_keys;
+          DELETE FROM models;
+          DELETE FROM requests;
+          DELETE FROM settings
+          WHERE key LIKE 'iterative_refinement_%' OR key LIKE 'oscillator_%' OR key = 'routing_strategy';
+        `);
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("defaults Rabbit weights to Smartest and normalizes optional JSON overrides", () => {
-    expect(getRabbitWeights()).toEqual(RABBIT_DEFAULT_WEIGHTS);
-    expect(parseRabbitWeights("")).toBeUndefined();
-    expect(parseRabbitWeights("{bad json")).toBeUndefined();
+  it("defaults Iterative Refinement weights to Smartest and normalizes optional JSON overrides", () => {
+    expect(getIterativeRefinementWeights()).toEqual(ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS);
+    expect(parseIterativeRefinementWeights("")).toBeUndefined();
+    expect(parseIterativeRefinementWeights("{bad json")).toBeUndefined();
 
     setSetting(
-      "rabbit_weights",
+      "iterative_refinement_weights",
       JSON.stringify({
         reliability: 3,
         speed: 1,
@@ -139,11 +138,11 @@ describe("Rabbit Shake routing helpers", () => {
       }),
     );
 
-    expect(getRabbitWeights()).toEqual(RABBIT_DEFAULT_WEIGHTS);
+    expect(getIterativeRefinementWeights()).toEqual(ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS);
   });
 
   it("reads oscillator config from feature settings", () => {
-    setSetting("rabbit_enabled", "true");
+    setSetting("iterative_refinement_enabled", "true");
     setSetting("oscillator_foundation_selection", "top_rank");
     setSetting("oscillator_injection_selection", "different_tier");
     setSetting("oscillator_min_intelligence_gap", "25");
@@ -152,7 +151,6 @@ describe("Rabbit Shake routing helpers", () => {
     setSetting("oscillator_step_timeout_ms", "15000");
 
     expect(getOscillatorConfig()).toMatchObject({
-      enabled: true,
       foundationSelection: "top_rank",
       injectionSelection: "different_tier",
       minIntelligenceGap: 25,
@@ -177,7 +175,7 @@ describe("Rabbit Shake routing helpers", () => {
     });
   });
 
-  it("allows zero to disable Rabbit load-shedding", () => {
+  it("allows zero to disable Iterative Refinement load-shedding", () => {
     const definition = REGISTRY.find(
       (entry) => entry.key === "oscillator_load_shed_threshold",
     );
@@ -189,7 +187,7 @@ describe("Rabbit Shake routing helpers", () => {
     expect(getOscillatorConfig().loadShedThreshold).toBe(0);
   });
 
-  it("orders DB-backed foundation candidates by Rabbit score and requires an enabled key", () => {
+  it("orders DB-backed foundation candidates by Iterative Refinement score and requires an enabled key", () => {
     addModel({
       platform: "smart",
       modelId: "foundation",
@@ -219,14 +217,14 @@ describe("Rabbit Shake routing helpers", () => {
       withKey: false,
     });
 
-    const candidates = getRabbitCandidates();
+    const candidates = getIterativeRefinementCandidates();
 
     expect(candidates.map((entry) => entry.modelId)).toEqual([
       "foundation",
       "speedy",
     ]);
-    expect(candidates[0].rabbitScore).toBeGreaterThan(
-      candidates[1].rabbitScore,
+    expect(candidates[0].iterativeRefinementScore).toBeGreaterThan(
+      candidates[1].iterativeRefinementScore,
     );
   });
 
@@ -236,19 +234,19 @@ describe("Rabbit Shake routing helpers", () => {
         modelDbId: 10,
         modelId: "auto-first",
         intelligenceRank: 4,
-        rabbitScore: 0.9,
+        iterativeRefinementScore: 0.9,
       }),
       candidate({
         modelDbId: 20,
         modelId: "rank-first",
         intelligenceRank: 1,
-        rabbitScore: 0.7,
+        iterativeRefinementScore: 0.7,
       }),
       candidate({
         modelDbId: 30,
         modelId: "explicit",
         intelligenceRank: 2,
-        rabbitScore: 0.5,
+        iterativeRefinementScore: 0.5,
       }),
     ];
 
@@ -279,7 +277,7 @@ describe("Rabbit Shake routing helpers", () => {
         modelId: "foundation",
         sizeLabel: "Frontier",
         intelligenceRank: 1,
-        rabbitScore: 0.95,
+        iterativeRefinementScore: 0.95,
       }),
       candidate({
         modelDbId: 2,
@@ -287,7 +285,7 @@ describe("Rabbit Shake routing helpers", () => {
         modelId: "same-provider",
         sizeLabel: "Frontier",
         intelligenceRank: 2,
-        rabbitScore: 0.9,
+        iterativeRefinementScore: 0.9,
       }),
       candidate({
         modelDbId: 3,
@@ -295,7 +293,7 @@ describe("Rabbit Shake routing helpers", () => {
         modelId: "divergent",
         sizeLabel: "Large",
         intelligenceRank: 3,
-        rabbitScore: 0.85,
+        iterativeRefinementScore: 0.85,
       }),
       candidate({
         modelDbId: 4,
@@ -303,7 +301,7 @@ describe("Rabbit Shake routing helpers", () => {
         modelId: "top-rank",
         sizeLabel: "Frontier",
         intelligenceRank: 1,
-        rabbitScore: 0.7,
+        iterativeRefinementScore: 0.7,
       }),
     ];
 
@@ -343,19 +341,19 @@ describe("Rabbit Shake routing helpers", () => {
     ).toBe(2);
   });
 
-  it("executes the Rabbit oscillator sequentially with sanitized context bridges", async () => {
+  it("executes the Iterative Refinement oscillator sequentially with sanitized context bridges", async () => {
     const candidates = [
       candidate({
         modelDbId: 1,
         platform: "alpha",
         modelId: "foundation",
-        rabbitScore: 0.9,
+        iterativeRefinementScore: 0.9,
       }),
       candidate({
         modelDbId: 2,
         platform: "beta",
         modelId: "injection",
-        rabbitScore: 0.8,
+        iterativeRefinementScore: 0.8,
       }),
     ];
     const calls: Array<{
@@ -537,22 +535,22 @@ describe("Rabbit Shake routing helpers", () => {
 
   it("applies basic oscillator eligibility gates", () => {
     expect(
-      isRabbitOscillatorEligible({
-        strategy: "rabbit",
+      isIterativeRefinementOscillatorEligible({
+        strategy: "iterative_refinement",
         promptText: "Analyze this architecture and explain the tradeoffs.",
         config: config(),
       }),
     ).toBe(true);
     expect(
-      isRabbitOscillatorEligible({
+      isIterativeRefinementOscillatorEligible({
         strategy: "smartest",
         promptText: "Analyze this architecture and explain the tradeoffs.",
         config: config(),
       }),
     ).toBe(false);
     expect(
-      isRabbitOscillatorEligible({
-        strategy: "rabbit",
+      isIterativeRefinementOscillatorEligible({
+        strategy: "iterative_refinement",
         promptText: "Analyze this architecture and explain the tradeoffs.",
         pinnedModelDbId: 1,
         config: config(),
@@ -561,21 +559,21 @@ describe("Rabbit Shake routing helpers", () => {
   });
 
   it("load-sheds only above the configured concurrent request threshold", () => {
-    expect(isRabbitLoadShedActive(config({ loadShedThreshold: 21 }), 21)).toBe(
+    expect(isIterativeRefinementLoadShedActive(config({ loadShedThreshold: 21 }), 21)).toBe(
       false,
     );
-    expect(isRabbitLoadShedActive(config({ loadShedThreshold: 21 }), 22)).toBe(
+    expect(isIterativeRefinementLoadShedActive(config({ loadShedThreshold: 21 }), 22)).toBe(
       true,
     );
-    expect(isRabbitLoadShedActive(config({ loadShedThreshold: 0 }), 999)).toBe(
+    expect(isIterativeRefinementLoadShedActive(config({ loadShedThreshold: 0 }), 999)).toBe(
       false,
     );
   });
 
-  it("returns a proxy-facing single-model decision when Rabbit is load-shed", () => {
+  it("returns a proxy-facing single-model decision when Iterative Refinement is load-shed", () => {
     expect(
-      getRabbitOscillatorDecision({
-        strategy: "rabbit",
+      getIterativeRefinementOscillatorDecision({
+        strategy: "iterative_refinement",
         promptText: "Analyze this architecture and explain the tradeoffs.",
         currentConcurrent: 22,
         config: config({ loadShedThreshold: 21 }),
@@ -587,10 +585,10 @@ describe("Rabbit Shake routing helpers", () => {
     });
   });
 
-  it("returns oscillator mode only for enabled complex unpinned Rabbit requests under the load threshold", () => {
+  it("returns oscillator mode only for enabled complex unpinned Iterative Refinement requests under the load threshold", () => {
     expect(
-      getRabbitOscillatorDecision({
-        strategy: "rabbit",
+      getIterativeRefinementOscillatorDecision({
+        strategy: "iterative_refinement",
         promptText: "Analyze this architecture and explain the tradeoffs.",
         currentConcurrent: 21,
         config: config({ loadShedThreshold: 21 }),
@@ -601,40 +599,33 @@ describe("Rabbit Shake routing helpers", () => {
     });
   });
 
-  it("explains non-load-shed Rabbit oscillator skips for normal single-model fallback", () => {
+  it("explains non-load-shed Iterative Refinement oscillator skips for normal single-model fallback", () => {
+      expect(
+        getIterativeRefinementOscillatorDecision({
+          strategy: "smartest",
+          promptText: "Analyze this architecture.",
+          config: config(),
+        }).skipReason,
+      ).toBe("non_iterative_refinement_strategy");
+      expect(
+        getIterativeRefinementOscillatorDecision({
+          strategy: "iterative_refinement",
+          promptText: "Analyze this architecture.",
+          pinnedModelDbId: 1,
+          config: config(),
+        }).skipReason,
+      ).toBe("pinned_model");
+      expect(
+        getIterativeRefinementOscillatorDecision({
+          strategy: "iterative_refinement",
+          promptText: "Analyze this architecture.",
+          pinnedModelDbId: 0,
+          config: config(),
+        }).skipReason,
+      ).toBe("pinned_model");
     expect(
-      getRabbitOscillatorDecision({
-        strategy: "smartest",
-        promptText: "Analyze this architecture.",
-        config: config(),
-      }).skipReason,
-    ).toBe("non_rabbit_strategy");
-    expect(
-      getRabbitOscillatorDecision({
-        strategy: "rabbit",
-        promptText: "Analyze this architecture.",
-        config: config({ enabled: false }),
-      }).skipReason,
-    ).toBe("disabled");
-    expect(
-      getRabbitOscillatorDecision({
-        strategy: "rabbit",
-        promptText: "Analyze this architecture.",
-        pinnedModelDbId: 1,
-        config: config(),
-      }).skipReason,
-    ).toBe("pinned_model");
-    expect(
-      getRabbitOscillatorDecision({
-        strategy: "rabbit",
-        promptText: "Analyze this architecture.",
-        pinnedModelDbId: 0,
-        config: config(),
-      }).skipReason,
-    ).toBe("pinned_model");
-    expect(
-      getRabbitOscillatorDecision({
-        strategy: "rabbit",
+      getIterativeRefinementOscillatorDecision({
+        strategy: "iterative_refinement",
         promptText: "hello",
         config: config(),
       }).skipReason,
@@ -644,8 +635,8 @@ describe("Rabbit Shake routing helpers", () => {
   it("treats null prompt text as non-complex instead of throwing", () => {
     expect(isComplexReasoningPrompt(null)).toBe(false);
     expect(
-      isRabbitOscillatorEligible({
-        strategy: "rabbit",
+      isIterativeRefinementOscillatorEligible({
+        strategy: "iterative_refinement",
         promptText: null,
         config: config(),
       }),
@@ -668,14 +659,15 @@ describe("Rabbit Shake routing helpers", () => {
   });
 
   it("supports custom meow patterns", () => {
-    expect(
-      detectMeow("the router emitted RABBIT_BAD_TOKEN", ["RABBIT_BAD_TOKEN"])
-        .detected,
-    ).toBe(true);
-    expect(detectMeow("normal response", ["RABBIT_BAD_TOKEN"]).detected).toBe(
-      false,
-    );
-  });
+      expect(
+        detectMeow("the router emitted ITERATIVE_REFINEMENT_BAD_TOKEN", [
+          "ITERATIVE_REFINEMENT_BAD_TOKEN",
+        ]).detected,
+      ).toBe(true);
+      expect(detectMeow("normal response", ["ITERATIVE_REFINEMENT_BAD_TOKEN"]).detected).toBe(
+        false,
+      );
+    });
 
   it("flags extreme Unicode script fragmentation but not normal prose", () => {
     const fragmented =
@@ -878,13 +870,13 @@ describe("Rabbit Shake routing helpers", () => {
         modelDbId: 1,
         platform: "alpha",
         modelId: "foundation",
-        rabbitScore: 0.9,
+        iterativeRefinementScore: 0.9,
       }),
       candidate({
         modelDbId: 2,
         platform: "beta",
         modelId: "injection",
-        rabbitScore: 0.8,
+        iterativeRefinementScore: 0.8,
       }),
     ];
     const chunks: OscillatorStreamChunk[] = [];
@@ -974,13 +966,13 @@ describe("Rabbit Shake routing helpers", () => {
         modelDbId: 1,
         platform: "alpha",
         modelId: "foundation",
-        rabbitScore: 0.9,
+        iterativeRefinementScore: 0.9,
       }),
       candidate({
         modelDbId: 2,
         platform: "beta",
         modelId: "injection",
-        rabbitScore: 0.8,
+        iterativeRefinementScore: 0.8,
       }),
     ];
     const chunks: OscillatorStreamChunk[] = [];
@@ -1025,13 +1017,13 @@ describe("Rabbit Shake routing helpers", () => {
         modelDbId: 1,
         platform: "alpha",
         modelId: "foundation",
-        rabbitScore: 0.9,
+        iterativeRefinementScore: 0.9,
       }),
       candidate({
         modelDbId: 2,
         platform: "beta",
         modelId: "injection",
-        rabbitScore: 0.8,
+        iterativeRefinementScore: 0.8,
       }),
     ];
 

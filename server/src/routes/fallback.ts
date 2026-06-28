@@ -160,7 +160,7 @@ const routingSchema = z.object({
     "priority",
     "balanced",
     "smartest",
-    "rabbit",
+    "iterative_refinement",
     "fastest",
     "reliable",
     "custom",

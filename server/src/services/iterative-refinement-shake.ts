@@ -29,10 +29,9 @@ export type InjectionSelection =
   | number;
 
 export interface OscillatorConfig {
-  enabled: boolean;
   foundationSelection: FoundationSelection;
   injectionSelection: InjectionSelection;
-  rabbitWeights?: RoutingWeights;
+  iterativeRefinementWeights?: RoutingWeights;
   minIntelligenceGap: number;
   injectionMaxSentences: number;
   meowPatterns: string[];
@@ -41,16 +40,16 @@ export interface OscillatorConfig {
   fallbackMode: "foundation_only" | "injection_only";
 }
 
-export interface RabbitCandidate extends RoutingScore {
+export interface IterativeRefinementCandidate extends RoutingScore {
   intelligenceRank: number;
   sizeLabel: string;
   supportsVision: boolean;
   supportsTools: boolean;
   contextWindow: number | null;
-  rabbitScore: number;
+  iterativeRefinementScore: number;
 }
 
-export interface RabbitEligibilityInput {
+export interface IterativeRefinementEligibilityInput {
   strategy: RoutingStrategy;
   promptText?: string | null;
   pinnedModelDbId?: number | null;
@@ -58,21 +57,20 @@ export interface RabbitEligibilityInput {
   config?: OscillatorConfig;
 }
 
-export type RabbitOscillatorSkipReason =
-  | "non_rabbit_strategy"
-  | "disabled"
+export type IterativeRefinementOscillatorSkipReason =
+  | "non_iterative_refinement_strategy"
   | "pinned_model"
   | "load_shed"
   | "simple_prompt";
 
-export interface RabbitOscillatorDecision {
+export interface IterativeRefinementOscillatorDecision {
   mode: "oscillator" | "single_model";
   config: OscillatorConfig;
   loadShedActive: boolean;
-  skipReason?: RabbitOscillatorSkipReason;
+  skipReason?: IterativeRefinementOscillatorSkipReason;
 }
 
-export interface RabbitOscillatorDecisionInput extends RabbitEligibilityInput {
+export interface IterativeRefinementOscillatorDecisionInput extends IterativeRefinementEligibilityInput {
   currentConcurrent?: number;
 }
 
@@ -91,7 +89,7 @@ export type OscillatorStep = "foundation" | "injection" | "anchor";
 
 export interface OscillatorModelCallInput {
   step: OscillatorStep;
-  candidate: RabbitCandidate;
+  candidate: IterativeRefinementCandidate;
   messages: ChatMessage[];
   onChunk?: (delta: string, accumulated: string) => void;
 }
@@ -121,7 +119,7 @@ export interface ExecuteOscillatorParams {
   sessionKey: string;
   callModel: OscillatorModelCall;
   config?: OscillatorConfig;
-  candidates?: RabbitCandidate[];
+  candidates?: IterativeRefinementCandidate[];
   handoffMode?: ContextHandoffMode;
   stream?: boolean;
   onChunk?: (chunk: OscillatorStreamChunk) => void;
@@ -130,8 +128,8 @@ export interface ExecuteOscillatorParams {
 export interface ExecuteOscillatorResult {
   status: "completed" | "foundation_fallback" | "single_model_fallback";
   text?: string;
-  foundation?: RabbitCandidate;
-  injection?: RabbitCandidate;
+  foundation?: IterativeRefinementCandidate;
+  injection?: IterativeRefinementCandidate;
   foundationText?: string;
   injectionText?: string;
   anchorText?: string;
@@ -158,7 +156,7 @@ export interface LogOscillatorResultInput {
   stepLatencies?: OscillatorStepLatencies;
 }
 
-export const RABBIT_DEFAULT_WEIGHTS: RoutingWeights = BANDIT_PRESETS.smartest;
+export const ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS: RoutingWeights = BANDIT_PRESETS.smartest;
 
 const DEFAULT_MEOW_PATTERNS = [
   "<\\|[^>]+\\|>",
@@ -186,7 +184,7 @@ function normalizeWeights(weights: RoutingWeights): RoutingWeights | undefined {
   };
 }
 
-export function parseRabbitWeights(
+export function parseIterativeRefinementWeights(
   raw: string | undefined,
 ): RoutingWeights | undefined {
   const trimmed = raw?.trim();
@@ -224,16 +222,16 @@ function parseSelection<T extends string>(
   return allowed.includes(text as T) ? (text as T) : fallback;
 }
 
-export function getRabbitWeights(): RoutingWeights {
+export function getIterativeRefinementWeights(): RoutingWeights {
   return (
-    parseRabbitWeights(getFeatureSetting("rabbit_weights") as string) ??
-    RABBIT_DEFAULT_WEIGHTS
+    parseIterativeRefinementWeights(
+      getFeatureSetting("iterative_refinement_weights") as string
+    ) ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS
   );
 }
 
 export function getOscillatorConfig(): OscillatorConfig {
   return {
-    enabled: getFeatureSetting("rabbit_enabled") as boolean,
     foundationSelection: parseSelection(
       getFeatureSetting("oscillator_foundation_selection"),
       ["auto", "top_rank"] as const,
@@ -244,8 +242,8 @@ export function getOscillatorConfig(): OscillatorConfig {
       ["divergent", "top_rank", "different_tier"] as const,
       "divergent",
     ),
-    rabbitWeights: parseRabbitWeights(
-      getFeatureSetting("rabbit_weights") as string,
+    iterativeRefinementWeights: parseIterativeRefinementWeights(
+      getFeatureSetting("iterative_refinement_weights") as string,
     ),
     minIntelligenceGap: getFeatureSetting(
       "oscillator_min_intelligence_gap",
@@ -270,7 +268,7 @@ export function isComplexReasoningPrompt(promptText?: string | null): boolean {
   );
 }
 
-export function isRabbitLoadShedActive(
+export function isIterativeRefinementLoadShedActive(
   config: OscillatorConfig = getOscillatorConfig(),
   currentConcurrent = getProviderInFlightTotal(),
 ): boolean {
@@ -279,41 +277,31 @@ export function isRabbitLoadShedActive(
   );
 }
 
-export function isRabbitOscillatorEligible(
-  input: RabbitEligibilityInput,
+export function isIterativeRefinementOscillatorEligible(
+  input: IterativeRefinementEligibilityInput,
 ): boolean {
-  const config = input.config ?? getOscillatorConfig();
   return (
-    input.strategy === "rabbit" &&
-    config.enabled &&
+    input.strategy === "iterative_refinement" &&
     !input.pinnedModelDbId &&
     !input.loadShedActive &&
     isComplexReasoningPrompt(input.promptText)
   );
 }
 
-export function getRabbitOscillatorDecision(
-  input: RabbitOscillatorDecisionInput,
-): RabbitOscillatorDecision {
+export function getIterativeRefinementOscillatorDecision(
+  input: IterativeRefinementOscillatorDecisionInput,
+): IterativeRefinementOscillatorDecision {
   const config = input.config ?? getOscillatorConfig();
   const loadShedActive =
     input.loadShedActive ??
-    isRabbitLoadShedActive(config, input.currentConcurrent);
+    isIterativeRefinementLoadShedActive(config, input.currentConcurrent);
 
-  if (input.strategy !== "rabbit") {
+  if (input.strategy !== "iterative_refinement") {
     return {
       mode: "single_model",
       config,
       loadShedActive,
-      skipReason: "non_rabbit_strategy",
-    };
-  }
-  if (!config.enabled) {
-    return {
-      mode: "single_model",
-      config,
-      loadShedActive,
-      skipReason: "disabled",
+      skipReason: "non_iterative_refinement_strategy",
     };
   }
   if (input.pinnedModelDbId != null) {
@@ -422,7 +410,7 @@ export function detectMeow(
 
 function metadataByModelId(
   modelDbIds: number[],
-): Map<number, Omit<RabbitCandidate, keyof RoutingScore | "rabbitScore">> {
+): Map<number, Omit<IterativeRefinementCandidate, keyof RoutingScore | "iterativeRefinementScore">> {
   if (modelDbIds.length === 0) return new Map();
   const db = getDb();
   const placeholders = modelDbIds.map(() => "?").join(", ");
@@ -467,11 +455,11 @@ function platformsWithEnabledKeys(): Set<string> {
   return new Set(rows.map((row) => row.platform));
 }
 
-export function getRabbitCandidates(
-  weights: RoutingWeights = getRabbitWeights(),
-): RabbitCandidate[] {
+export function getIterativeRefinementCandidates(
+  weights: RoutingWeights = getIterativeRefinementWeights(),
+): IterativeRefinementCandidate[] {
   const routing = getRoutingScores();
-  const normalizedWeights = normalizeWeights(weights) ?? RABBIT_DEFAULT_WEIGHTS;
+  const normalizedWeights = normalizeWeights(weights) ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS;
   const keyPlatforms = platformsWithEnabledKeys();
   const metadata = metadataByModelId(
     routing.scores.map((score) => score.modelDbId),
@@ -494,17 +482,17 @@ export function getRabbitCandidates(
         {
           ...score,
           ...meta,
-          rabbitScore: base * score.degradationFactor * score.boost,
+          iterativeRefinementScore: base * score.degradationFactor * score.boost,
         },
       ];
     })
-    .sort((a, b) => b.rabbitScore - a.rabbitScore);
+    .sort((a, b) => b.iterativeRefinementScore - a.iterativeRefinementScore);
 }
 
 function orderWithExplicitFirst(
-  candidates: RabbitCandidate[],
+  candidates: IterativeRefinementCandidate[],
   modelDbId: number,
-): RabbitCandidate[] {
+): IterativeRefinementCandidate[] {
   const preferred = candidates.find(
     (candidate) => candidate.modelDbId === modelDbId,
   );
@@ -517,10 +505,10 @@ function orderWithExplicitFirst(
 
 export function resolveFoundationCandidates(
   config: OscillatorConfig = getOscillatorConfig(),
-  candidates: RabbitCandidate[] = getRabbitCandidates(
-    config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS,
+  candidates: IterativeRefinementCandidate[] = getIterativeRefinementCandidates(
+    config.iterativeRefinementWeights ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
   ),
-): RabbitCandidate[] {
+): IterativeRefinementCandidate[] {
   if (typeof config.foundationSelection === "number") {
     return orderWithExplicitFirst(candidates, config.foundationSelection);
   }
@@ -528,15 +516,15 @@ export function resolveFoundationCandidates(
     return [...candidates].sort(
       (a, b) =>
         a.intelligenceRank - b.intelligenceRank ||
-        b.rabbitScore - a.rabbitScore,
+        b.iterativeRefinementScore - a.iterativeRefinementScore,
     );
   }
   return candidates;
 }
 
 function intelligenceGapOk(
-  foundation: RabbitCandidate,
-  candidate: RabbitCandidate,
+  foundation: IterativeRefinementCandidate,
+  candidate: IterativeRefinementCandidate,
   minGap: number,
 ): boolean {
   return (
@@ -547,10 +535,10 @@ function intelligenceGapOk(
 export function resolveInjectionModel(
   config: OscillatorConfig,
   foundationModelDbId: number,
-  candidates: RabbitCandidate[] = getRabbitCandidates(
-    config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS,
+  candidates: IterativeRefinementCandidate[] = getIterativeRefinementCandidates(
+    config.iterativeRefinementWeights ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
   ),
-): RabbitCandidate | undefined {
+): IterativeRefinementCandidate | undefined {
   const foundation = candidates.find(
     (candidate) => candidate.modelDbId === foundationModelDbId,
   );
@@ -575,7 +563,7 @@ export function resolveInjectionModel(
     return [...eligible].sort(
       (a, b) =>
         a.intelligenceRank - b.intelligenceRank ||
-        b.rabbitScore - a.rabbitScore,
+        b.iterativeRefinementScore - a.iterativeRefinementScore,
     )[0];
   }
 
@@ -593,7 +581,7 @@ export function resolveInjectionModel(
   );
 }
 
-function candidateKey(candidate: RabbitCandidate): string {
+function candidateKey(candidate: IterativeRefinementCandidate): string {
   return `${candidate.platform}:${candidate.modelId}`;
 }
 
@@ -615,9 +603,9 @@ function withStepTimeout<T>(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Rabbit ${step} step timed out`)),
-      timeoutMs,
-    );
+          () => reject(new Error(`Iterative Refinement ${step} step timed out`)),
+          timeoutMs,
+        );
   });
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
@@ -635,7 +623,7 @@ function injectionInstruction(maxSentences: number): string {
   const sentenceLimit = Math.max(1, Math.floor(maxSentences));
   const sentenceWord = sentenceLimit === 1 ? "sentence" : "sentences";
   return [
-    "You are the Rabbit injection step.",
+    "You are the Iterative Refinement injection step.",
     "Check the thought context and user request for loops, brittle assumptions, or missing alternatives.",
     `Return exactly ${sentenceLimit} ${sentenceWord}.`,
     "Do not include raw system tags, XML tags, markdown fences, or analysis headings.",
@@ -644,15 +632,15 @@ function injectionInstruction(maxSentences: number): string {
 
 function anchorInstruction(): string {
   return [
-    "You are the Rabbit anchor step.",
-    "Synthesize the final answer for the user using the original request and the Rabbit injection context.",
+    "You are the Iterative Refinement anchor step.",
+    "Synthesize the final answer for the user using the original request and the Iterative Refinement injection context.",
     "Do not expose routing internals, thought-context labels, or structural tags.",
   ].join(" ");
 }
 
 async function callStep(params: {
   step: OscillatorStep;
-  candidate: RabbitCandidate;
+  candidate: IterativeRefinementCandidate;
   messages: ChatMessage[];
   callModel: OscillatorModelCall;
   timeoutMs: number;
@@ -670,7 +658,7 @@ async function callStep(params: {
       params.step,
     ),
   ).trim();
-  if (!text) throw new Error(`Rabbit ${params.step} step returned empty text`);
+  if (!text) throw new Error(`Iterative Refinement ${params.step} step returned empty text`);
   return text;
 }
 
@@ -689,8 +677,8 @@ export async function executeOscillator(
 ): Promise<ExecuteOscillatorResult> {
   const config = params.config ?? getOscillatorConfig();
   const candidates =
-    params.candidates ??
-    getRabbitCandidates(config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS);
+      params.candidates ??
+      getIterativeRefinementCandidates(config.iterativeRefinementWeights ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS);
   const foundations = resolveFoundationCandidates(config, candidates);
   const handoffMode = params.handoffMode ?? "off";
   const stream = params.stream ?? false;
@@ -749,7 +737,7 @@ export async function executeOscillator(
           failedStep: "injection",
           foundationAttempts,
           bridges: {},
-          error: "No eligible Rabbit injection model",
+          error: "No eligible Iterative Refinement injection model",
         };
         if (stream) emitChunk({ step: "foundation", delta: "", accumulated: foundationText, stepComplete: true, final: result });
         return result;
@@ -954,7 +942,7 @@ export async function executeOscillator(
     failedStep: "foundation",
     foundationAttempts,
     bridges: {},
-    error: lastFoundationError ?? "No eligible Rabbit foundation model",
+    error: lastFoundationError ?? "No eligible Iterative Refinement foundation model",
   };
 
   if (stream) {
@@ -1062,6 +1050,6 @@ export function collectOscillatorStats(
     failures: row?.failures ?? 0,
     avgLatencyMs: Math.round(row?.avg_latency_ms ?? 0),
     meowCount: row?.meow_count ?? 0,
-    loadShedActive: isRabbitLoadShedActive(),
+    loadShedActive: isIterativeRefinementLoadShedActive(),
   };
 }
