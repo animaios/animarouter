@@ -151,6 +151,52 @@ export type LiveEventBase =
       at: number;
     }
   | {
+      type: "oscillator.started";
+      sessionKey: string;
+      foundationModel: string;
+      injectionModel: string;
+      at: number;
+    }
+  | {
+      type: "oscillator.step_complete";
+      sessionKey: string;
+      step: 1 | 2 | 3;
+      model: string;
+      latencyMs: number;
+      bridgeType: string;
+      strippedArtifacts: number;
+      at: number;
+    }
+  | {
+      type: "oscillator.complete";
+      sessionKey: string;
+      totalLatencyMs: number;
+      meowDetected: boolean;
+      finalModel: string;
+      at: number;
+    }
+  | {
+      type: "oscillator.failed";
+      sessionKey: string;
+      failedStep: 1 | 2 | 3;
+      error: string;
+      fellBackTo: string;
+      at: number;
+    }
+  | {
+      type: "oscillator.load_shed";
+      concurrentRequests: number;
+      threshold: number;
+      at: number;
+    }
+  | {
+      type: "oscillator.meow_detected";
+      sessionKey: string;
+      pattern: string;
+      fellBackTo: string;
+      at: number;
+    }
+  | {
       type: "degradation.boost";
       modelDbId: number;
       oldBoost: number;

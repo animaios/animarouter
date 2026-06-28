@@ -6,6 +6,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 const chatCompletion = vi.fn();
 const streamChatCompletion = vi.fn();
 const fakeProvider = { name: "fake", chatCompletion, streamChatCompletion };
+const publishedEvents: Array<{ type: string; [key: string]: unknown }> = [];
 
 vi.mock("../../providers/index.js", async (importOriginal) => {
   const actual =
@@ -17,6 +18,16 @@ vi.mock("../../providers/index.js", async (importOriginal) => {
     buildProviderFor: () => fakeProvider,
   };
 });
+
+vi.mock("../../services/events.js", () => ({
+  publish: vi.fn((event: { type: string; [key: string]: unknown }) => {
+    publishedEvents.push(event);
+  }),
+  publishDeduped: vi.fn((event: { type: string; [key: string]: unknown }) => {
+    publishedEvents.push(event);
+  }),
+  subscribeSse: vi.fn(),
+}));
 
 const { createApp } = await import("../../app.js");
 const { initDb, getDb, getUnifiedApiKey, setSetting } = await import(
@@ -162,6 +173,7 @@ describe("Rabbit proxy integration", () => {
     addKey("beta");
     chatCompletion.mockReset();
     streamChatCompletion.mockReset();
+    publishedEvents.length = 0;
   });
 
   it("routes eligible non-streaming Rabbit requests through Foundation, Injection, and Anchor steps", async () => {
@@ -252,6 +264,17 @@ describe("Rabbit proxy integration", () => {
     expect(row.step1_latency_ms).toBeGreaterThanOrEqual(0);
     expect(row.step2_latency_ms).toBeGreaterThanOrEqual(0);
     expect(row.step3_latency_ms).toBeGreaterThanOrEqual(0);
+    expect(
+      publishedEvents
+        .filter((event) => event.type.startsWith("oscillator."))
+        .map((event) => event.type),
+    ).toEqual([
+      "oscillator.started",
+      "oscillator.step_complete",
+      "oscillator.step_complete",
+      "oscillator.step_complete",
+      "oscillator.complete",
+    ]);
   });
 
   it("uses normal single-model routing for simple Rabbit requests", async () => {
@@ -339,9 +362,84 @@ describe("Rabbit proxy integration", () => {
       expect(responseText(body)).toBe("Load-shed answer.");
       expect(headers.get("x-rabbit-status")).toBeNull();
       expect(chatCompletion).toHaveBeenCalledTimes(1);
+      expect(
+        publishedEvents.find((event) => event.type === "oscillator.load_shed"),
+      ).toMatchObject({
+        concurrentRequests: 2,
+        threshold: 1,
+      });
     } finally {
       for (const route of heldRoutes) route.release();
     }
+  });
+
+  it("emits a meow event when Rabbit anchor validation falls back", async () => {
+    chatCompletion.mockImplementation(
+      async (_apiKey: string, _messages: ChatMessage[], modelId: string) => {
+        if (
+          modelId === "foundation" &&
+          chatCompletion.mock.calls.length === 1
+        ) {
+          return {
+            choices: [
+              { message: { role: "assistant", content: "Foundation base." } },
+            ],
+            usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+          };
+        }
+        if (modelId === "injection") {
+          return {
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "Alternative angle. Concise.",
+                },
+              },
+            ],
+            usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 },
+          };
+        }
+        return {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "Final Rabbit answer leaked <|assistant|>.",
+              },
+            },
+          ],
+          usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
+        };
+      },
+    );
+
+    const { status, body, headers } = await post(
+      app,
+      "/v1/chat/completions",
+      {
+        model: "auto",
+        messages: [
+          {
+            role: "user",
+            content: "Analyze this architecture and explain the tradeoffs.",
+          },
+        ],
+      },
+      key,
+    );
+
+    expect(status).toBe(200);
+    expect(responseText(body)).toBe("Foundation base.");
+    expect(headers.get("x-rabbit-status")).toBe("foundation_fallback");
+    expect(
+      publishedEvents.find(
+        (event) => event.type === "oscillator.meow_detected",
+      ),
+    ).toMatchObject({
+      pattern: "structural_tag",
+      fellBackTo: "alpha/foundation",
+    });
   });
 
   it("falls back to normal single-model routing when all Rabbit foundation candidates fail", async () => {
@@ -388,6 +486,12 @@ describe("Rabbit proxy integration", () => {
       status: "single_model_fallback",
       complete: 0,
       failed_step: 1,
+    });
+    expect(
+      publishedEvents.find((event) => event.type === "oscillator.failed"),
+    ).toMatchObject({
+      failedStep: 1,
+      fellBackTo: "single-model",
     });
   });
 });

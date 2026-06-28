@@ -3,7 +3,7 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import type { ChatMessage, ModelListRow } from '@animarouter/shared/types.js';
-import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, getRoutingStrategy, type RouteResult } from '../services/router.js';
+import { routeRequest, hasEnabledVisionModel, hasEnabledToolsModel, getRoutingStrategy, getProviderInFlightTotal, type RouteResult } from '../services/router.js';
 import { classifyError, recordFailure, recordSuccess } from '../services/degradation.js';
 import { markExhausted, clearExhausted } from '../services/key-exhaustion.js';
 import { recordRequest, recordTokens, setCooldown, computeRetryCooldownMs, isDailyLimitExhausted } from '../services/ratelimit.js';
@@ -23,6 +23,7 @@ import {
   executeOscillator,
   getRabbitOscillatorDecision,
   logOscillatorResult,
+  type ExecuteOscillatorResult,
   type OscillatorModelCall,
   type OscillatorStepLatencies,
 } from '../services/rabbit-shake.js';
@@ -128,6 +129,111 @@ function promptTextForRabbit(messages: ChatMessage[]): string {
     .map(m => contentToString(m.content))
     .filter(Boolean)
     .join('\n');
+}
+
+function oscillatorFailedStepNumber(step: ExecuteOscillatorResult['failedStep']): 1 | 2 | 3 | undefined {
+  if (step === 'foundation') return 1;
+  if (step === 'injection') return 2;
+  if (step === 'anchor' || step === 'validation') return 3;
+  return undefined;
+}
+
+function rabbitModelKey(candidate: ExecuteOscillatorResult['foundation']): string {
+  return candidate ? `${candidate.platform}/${candidate.modelId}` : 'rabbit';
+}
+
+function publishRabbitOscillatorEvents(params: {
+  sessionKey: string;
+  result: ExecuteOscillatorResult;
+  totalLatencyMs: number;
+  stepLatencies: OscillatorStepLatencies;
+}): void {
+  const { sessionKey, result, totalLatencyMs, stepLatencies } = params;
+  const foundationModel = rabbitModelKey(result.foundation);
+  const injectionModel = rabbitModelKey(result.injection);
+
+  if (result.foundation && result.injection) {
+    publish({
+      type: 'oscillator.started',
+      sessionKey,
+      foundationModel,
+      injectionModel,
+      at: Date.now(),
+    });
+  }
+
+  if (result.foundation && stepLatencies.foundation != null) {
+    publish({
+      type: 'oscillator.step_complete',
+      sessionKey,
+      step: 1,
+      model: foundationModel,
+      latencyMs: stepLatencies.foundation,
+      bridgeType: 'none',
+      strippedArtifacts: 0,
+      at: Date.now(),
+    });
+  }
+
+  if (result.injection && stepLatencies.injection != null) {
+    publish({
+      type: 'oscillator.step_complete',
+      sessionKey,
+      step: 2,
+      model: injectionModel,
+      latencyMs: stepLatencies.injection,
+      bridgeType: result.bridges.injection?.bridgeType ?? 'none',
+      strippedArtifacts: result.bridges.injection?.strippedArtifacts ?? 0,
+      at: Date.now(),
+    });
+  }
+
+  if (result.foundation && stepLatencies.anchor != null) {
+    publish({
+      type: 'oscillator.step_complete',
+      sessionKey,
+      step: 3,
+      model: foundationModel,
+      latencyMs: stepLatencies.anchor,
+      bridgeType: result.bridges.anchor?.bridgeType ?? 'none',
+      strippedArtifacts: result.bridges.anchor?.strippedArtifacts ?? 0,
+      at: Date.now(),
+    });
+  }
+
+  if (result.meow?.detected) {
+    publish({
+      type: 'oscillator.meow_detected',
+      sessionKey,
+      pattern: result.meow.pattern ?? result.meow.reason ?? 'unknown',
+      fellBackTo: foundationModel,
+      at: Date.now(),
+    });
+  }
+
+  if (result.status === 'completed') {
+    publish({
+      type: 'oscillator.complete',
+      sessionKey,
+      totalLatencyMs,
+      meowDetected: !!result.meow?.detected,
+      finalModel: foundationModel,
+      at: Date.now(),
+    });
+    return;
+  }
+
+  const failedStep = oscillatorFailedStepNumber(result.failedStep);
+  if (failedStep) {
+    publish({
+      type: 'oscillator.failed',
+      sessionKey,
+      failedStep,
+      error: sanitizeProviderErrorMessage(result.error ?? result.status),
+      fellBackTo: result.status === 'single_model_fallback' ? 'single-model' : foundationModel,
+      at: Date.now(),
+    });
+  }
 }
 
 type SkipModelsStatement = { all: (modelDbId: number) => Array<{ id: number }> };
@@ -860,11 +966,21 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
   const providerFailures = new Map<string, Set<number>>();
   const fastFired = new Set<string>();
 
+  const rabbitConcurrentRequests = getProviderInFlightTotal();
   const rabbitDecision = getRabbitOscillatorDecision({
     strategy: getRoutingStrategy(),
     promptText: promptTextForRabbit(messages),
     pinnedModelDbId: isAutoRouted ? undefined : (strictPinnedModelDbId ?? preferredModel ?? 0),
+    currentConcurrent: rabbitConcurrentRequests,
   });
+  if (rabbitDecision.skipReason === 'load_shed') {
+    publish({
+      type: 'oscillator.load_shed',
+      concurrentRequests: rabbitConcurrentRequests,
+      threshold: rabbitDecision.config.loadShedThreshold,
+      at: Date.now(),
+    });
+  }
   const shouldTryRabbitOscillator =
     rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
 
@@ -962,16 +1078,23 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
       config: rabbitDecision.config,
       handoffMode,
     });
+    const oscillatorTotalLatencyMs = Date.now() - oscillatorStart;
     try {
       logOscillatorResult({
         sessionKey: oscillatorSessionKey,
         result: oscillator,
-        totalLatencyMs: Date.now() - oscillatorStart,
+        totalLatencyMs: oscillatorTotalLatencyMs,
         stepLatencies: rabbitStepLatencies,
       });
     } catch (err) {
       console.warn('[Proxy] Failed to log Rabbit oscillator result:', err);
     }
+    publishRabbitOscillatorEvents({
+      sessionKey: oscillatorSessionKey,
+      result: oscillator,
+      totalLatencyMs: oscillatorTotalLatencyMs,
+      stepLatencies: rabbitStepLatencies,
+    });
 
     if (oscillator.status !== 'single_model_fallback' && oscillator.text) {
       const completionTokens = Math.ceil(oscillator.text.length / 4);

@@ -108,6 +108,46 @@ interface HeartbeatAdvisorAppliedEvent extends TimestampOnly {
   applied: string;
   magnitude: number;
 }
+interface OscillatorStartedEvent extends TimestampOnly {
+  type: "oscillator.started";
+  sessionKey: string;
+  foundationModel: string;
+  injectionModel: string;
+}
+interface OscillatorStepCompleteEvent extends TimestampOnly {
+  type: "oscillator.step_complete";
+  sessionKey: string;
+  step: 1 | 2 | 3;
+  model: string;
+  latencyMs: number;
+  bridgeType: string;
+  strippedArtifacts: number;
+}
+interface OscillatorCompleteEvent extends TimestampOnly {
+  type: "oscillator.complete";
+  sessionKey: string;
+  totalLatencyMs: number;
+  meowDetected: boolean;
+  finalModel: string;
+}
+interface OscillatorFailedEvent extends TimestampOnly {
+  type: "oscillator.failed";
+  sessionKey: string;
+  failedStep: 1 | 2 | 3;
+  error: string;
+  fellBackTo: string;
+}
+interface OscillatorLoadShedEvent extends TimestampOnly {
+  type: "oscillator.load_shed";
+  concurrentRequests: number;
+  threshold: number;
+}
+interface OscillatorMeowDetectedEvent extends TimestampOnly {
+  type: "oscillator.meow_detected";
+  sessionKey: string;
+  pattern: string;
+  fellBackTo: string;
+}
 interface DegradationHitEvent extends TimestampOnly {
   type: "degradation.hit";
   modelDbId: number;
@@ -141,6 +181,12 @@ type LiveEventBase =
   | HeartbeatAdvisorParsedEvent
   | HeartbeatAdvisorFailedEvent
   | HeartbeatAdvisorAppliedEvent
+  | OscillatorStartedEvent
+  | OscillatorStepCompleteEvent
+  | OscillatorCompleteEvent
+  | OscillatorFailedEvent
+  | OscillatorLoadShedEvent
+  | OscillatorMeowDetectedEvent
   | DegradationHitEvent
   | DegradationRecoveryEvent
   | StreamChunkEvent;
@@ -296,6 +342,54 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         ts,
         kind: "info",
         text: `♥ [advisor] ${evt.provider}/${evt.model} key#${evt.keyId} applied ${evt.applied} (${evt.magnitude})`,
+      };
+    }
+    case "oscillator.started": {
+      return {
+        id: "rabbit",
+        ts,
+        kind: "info",
+        text: `Rabbit [${evt.sessionKey.slice(0, 8)}] started: ${evt.foundationModel} → ${evt.injectionModel}`,
+      };
+    }
+    case "oscillator.step_complete": {
+      return {
+        id: "rabbit",
+        ts,
+        kind: "info",
+        text: `Rabbit [${evt.sessionKey.slice(0, 8)}] step ${evt.step} ${evt.model} done in ${evt.latencyMs}ms (${evt.bridgeType}, stripped ${evt.strippedArtifacts})`,
+      };
+    }
+    case "oscillator.complete": {
+      return {
+        id: "rabbit",
+        ts,
+        kind: "done",
+        text: `Rabbit [${evt.sessionKey.slice(0, 8)}] complete via ${evt.finalModel} in ${evt.totalLatencyMs}ms${evt.meowDetected ? " (meow flagged)" : ""}`,
+      };
+    }
+    case "oscillator.failed": {
+      return {
+        id: "rabbit",
+        ts,
+        kind: "warn",
+        text: `Rabbit [${evt.sessionKey.slice(0, 8)}] failed at step ${evt.failedStep}: ${evt.error.slice(0, 80)}; fallback ${evt.fellBackTo}`,
+      };
+    }
+    case "oscillator.load_shed": {
+      return {
+        id: "rabbit",
+        ts,
+        kind: "warn",
+        text: `Rabbit load-shed: ${evt.concurrentRequests} concurrent requests exceeded threshold ${evt.threshold}`,
+      };
+    }
+    case "oscillator.meow_detected": {
+      return {
+        id: "rabbit",
+        ts,
+        kind: "warn",
+        text: `Rabbit [${evt.sessionKey.slice(0, 8)}] meow detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
       };
     }
     case "degradation.hit": {
