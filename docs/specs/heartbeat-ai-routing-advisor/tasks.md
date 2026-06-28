@@ -75,7 +75,7 @@
 ## Phase 10: Oscillator Integration
 
 - [x] **T10.1** Wire Rabbit strategy into `proxy.ts` request handler — when routing strategy is `rabbit`, use Rabbit / Smartest-weight ordering and call `executeOscillator` only for eligible complex reasoning requests
-- [ ] **T10.2** Ensure non-eligible Rabbit requests, pinned-model requests, load-shed requests, and all-Step-1-failed requests fall back to normal best-eligible Smartest-weight single-model routing
+- [x] **T10.2** Ensure non-eligible Rabbit requests, pinned-model requests, load-shed requests, and all-Step-1-failed requests fall back to normal best-eligible Smartest-weight single-model routing
 - [ ] **T10.3** Add oscillator metrics logging to `logOscillatorResult()` for heartbeat advisor payload
 - [ ] **T10.4** Add `oscillator_results` SQLite table + `logOscillatorResult()` persistence
 - [ ] **T10.5** Implement `collectOscillatorStats(windowMs)` for advisory payload (§10.2)
