@@ -1,4 +1,10 @@
+import type { ChatMessage } from "@animarouter/shared/types.js";
 import { getDb } from "../db/index.js";
+import {
+  buildContextBridge,
+  type ContextBridgeResult,
+} from "./context-bridge.js";
+import type { ContextHandoffMode } from "./context-handoff.js";
 import { getFeatureSetting } from "./feature-settings.js";
 import {
   getProviderInFlightTotal,
@@ -58,6 +64,53 @@ export interface MeowDetectionResult {
     | "replacement_character"
     | "script_fragmentation";
   pattern?: string;
+}
+
+export type OscillatorStep = "foundation" | "injection" | "anchor";
+
+export interface OscillatorModelCallInput {
+  step: OscillatorStep;
+  candidate: RabbitCandidate;
+  messages: ChatMessage[];
+}
+
+export type OscillatorModelCallResult =
+  | string
+  | {
+      text?: string | null;
+    }
+  | null
+  | undefined;
+
+export type OscillatorModelCall = (
+  input: OscillatorModelCallInput,
+) => Promise<OscillatorModelCallResult>;
+
+export interface ExecuteOscillatorParams {
+  messages: ChatMessage[];
+  sessionKey: string;
+  callModel: OscillatorModelCall;
+  config?: OscillatorConfig;
+  candidates?: RabbitCandidate[];
+  handoffMode?: ContextHandoffMode;
+}
+
+export interface ExecuteOscillatorResult {
+  status: "completed" | "foundation_fallback" | "single_model_fallback";
+  text?: string;
+  foundation?: RabbitCandidate;
+  injection?: RabbitCandidate;
+  foundationText?: string;
+  injectionText?: string;
+  anchorText?: string;
+  failedStep?: OscillatorStep | "validation";
+  foundationAttempts: number;
+  bridges: {
+    injection?: ContextBridgeResult;
+    anchor?: ContextBridgeResult;
+  };
+  meow?: MeowDetectionResult;
+  error?: string;
 }
 
 export const RABBIT_DEFAULT_WEIGHTS: RoutingWeights = BANDIT_PRESETS.smartest;
@@ -441,4 +494,251 @@ export function resolveInjectionModel(
     eligible.find((candidate) => candidate.platform !== foundation.platform) ??
     eligible[0]
   );
+}
+
+function candidateKey(candidate: RabbitCandidate): string {
+  return `${candidate.platform}:${candidate.modelId}`;
+}
+
+function asText(result: OscillatorModelCallResult): string {
+  if (!result) return "";
+  return typeof result === "string" ? result : (result.text ?? "");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function withStepTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  step: OscillatorStep,
+): Promise<T> {
+  if (timeoutMs <= 0) return promise;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Rabbit ${step} step timed out`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function prependSystemMessage(
+  messages: ChatMessage[],
+  content: string,
+): ChatMessage[] {
+  return [{ role: "system", content }, ...messages];
+}
+
+function injectionInstruction(maxSentences: number): string {
+  const sentenceLimit = Math.max(1, Math.floor(maxSentences));
+  const sentenceWord = sentenceLimit === 1 ? "sentence" : "sentences";
+  return [
+    "You are the Rabbit injection step.",
+    "Check the thought context and user request for loops, brittle assumptions, or missing alternatives.",
+    `Return exactly ${sentenceLimit} ${sentenceWord}.`,
+    "Do not include raw system tags, XML tags, markdown fences, or analysis headings.",
+  ].join(" ");
+}
+
+function anchorInstruction(): string {
+  return [
+    "You are the Rabbit anchor step.",
+    "Synthesize the final answer for the user using the original request and the Rabbit injection context.",
+    "Do not expose routing internals, thought-context labels, or structural tags.",
+  ].join(" ");
+}
+
+async function callStep(params: {
+  step: OscillatorStep;
+  candidate: RabbitCandidate;
+  messages: ChatMessage[];
+  callModel: OscillatorModelCall;
+  timeoutMs: number;
+}): Promise<string> {
+  const text = asText(
+    await withStepTimeout(
+      params.callModel({
+        step: params.step,
+        candidate: params.candidate,
+        messages: params.messages,
+      }),
+      params.timeoutMs,
+      params.step,
+    ),
+  ).trim();
+  if (!text) throw new Error(`Rabbit ${params.step} step returned empty text`);
+  return text;
+}
+
+function limitSentences(text: string, maxSentences: number): string {
+  const sentenceLimit = Math.max(1, Math.floor(maxSentences));
+  const matches =
+    text
+      .match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g)
+      ?.map((part) => part.trim()) ?? [];
+  if (matches.length <= sentenceLimit) return text;
+  return matches.slice(0, sentenceLimit).join(" ").trim();
+}
+
+export async function executeOscillator(
+  params: ExecuteOscillatorParams,
+): Promise<ExecuteOscillatorResult> {
+  const config = params.config ?? getOscillatorConfig();
+  const candidates =
+    params.candidates ??
+    getRabbitCandidates(config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS);
+  const foundations = resolveFoundationCandidates(config, candidates);
+  const handoffMode = params.handoffMode ?? "off";
+  let lastFoundationError: string | undefined;
+  let foundationAttempts = 0;
+
+  for (const foundation of foundations) {
+    foundationAttempts++;
+    try {
+      const foundationText = await callStep({
+        step: "foundation",
+        candidate: foundation,
+        messages: params.messages,
+        callModel: params.callModel,
+        timeoutMs: config.stepTimeoutMs,
+      });
+
+      const injection = resolveInjectionModel(
+        config,
+        foundation.modelDbId,
+        candidates,
+      );
+      if (!injection) {
+        return {
+          status: "foundation_fallback",
+          text: foundationText,
+          foundation,
+          foundationText,
+          failedStep: "injection",
+          foundationAttempts,
+          bridges: {},
+          error: "No eligible Rabbit injection model",
+        };
+      }
+
+      const injectionBridge = buildContextBridge({
+        mode: handoffMode,
+        sessionKey: params.sessionKey,
+        messages: prependSystemMessage(
+          params.messages,
+          injectionInstruction(config.injectionMaxSentences),
+        ),
+        selectedModelKey: candidateKey(injection),
+        sourceProvider: foundation.platform,
+        isOscillatorHandoff: true,
+        priorResponseText: foundationText,
+      });
+
+      let injectionText: string;
+      try {
+        injectionText = await callStep({
+          step: "injection",
+          candidate: injection,
+          messages: injectionBridge.messages,
+          callModel: params.callModel,
+          timeoutMs: config.stepTimeoutMs,
+        });
+        injectionText = limitSentences(
+          injectionText,
+          config.injectionMaxSentences,
+        );
+      } catch (error) {
+        return {
+          status: "foundation_fallback",
+          text: foundationText,
+          foundation,
+          injection,
+          foundationText,
+          failedStep: "injection",
+          foundationAttempts,
+          bridges: { injection: injectionBridge },
+          error: errorMessage(error),
+        };
+      }
+
+      const anchorBridge = buildContextBridge({
+        mode: handoffMode,
+        sessionKey: params.sessionKey,
+        messages: prependSystemMessage(params.messages, anchorInstruction()),
+        selectedModelKey: candidateKey(foundation),
+        sourceProvider: injection.platform,
+        isOscillatorHandoff: true,
+        priorResponseText: injectionText,
+      });
+
+      let anchorText: string;
+      try {
+        anchorText = await callStep({
+          step: "anchor",
+          candidate: foundation,
+          messages: anchorBridge.messages,
+          callModel: params.callModel,
+          timeoutMs: config.stepTimeoutMs,
+        });
+      } catch (error) {
+        return {
+          status: "foundation_fallback",
+          text: foundationText,
+          foundation,
+          injection,
+          foundationText,
+          injectionText,
+          failedStep: "anchor",
+          foundationAttempts,
+          bridges: { injection: injectionBridge, anchor: anchorBridge },
+          error: errorMessage(error),
+        };
+      }
+
+      const meow = detectMeow(anchorText, config.meowPatterns);
+      if (meow.detected) {
+        return {
+          status: "foundation_fallback",
+          text: foundationText,
+          foundation,
+          injection,
+          foundationText,
+          injectionText,
+          anchorText,
+          failedStep: "validation",
+          foundationAttempts,
+          bridges: { injection: injectionBridge, anchor: anchorBridge },
+          meow,
+        };
+      }
+
+      return {
+        status: "completed",
+        text: anchorText,
+        foundation,
+        injection,
+        foundationText,
+        injectionText,
+        anchorText,
+        foundationAttempts,
+        bridges: { injection: injectionBridge, anchor: anchorBridge },
+        meow,
+      };
+    } catch (error) {
+      lastFoundationError = errorMessage(error);
+    }
+  }
+
+  return {
+    status: "single_model_fallback",
+    failedStep: "foundation",
+    foundationAttempts,
+    bridges: {},
+    error: lastFoundationError ?? "No eligible Rabbit foundation model",
+  };
 }

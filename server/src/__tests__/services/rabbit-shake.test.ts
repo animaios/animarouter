@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDb, initDb, setSetting } from "../../db/index.js";
 import {
   REGISTRY,
@@ -6,6 +6,7 @@ import {
 } from "../../services/feature-settings.js";
 import {
   detectMeow,
+  executeOscillator,
   getOscillatorConfig,
   getRabbitCandidates,
   getRabbitWeights,
@@ -113,6 +114,10 @@ describe("Rabbit Shake routing helpers", () => {
       DELETE FROM settings
       WHERE key LIKE 'rabbit_%' OR key LIKE 'oscillator_%' OR key = 'routing_strategy';
     `);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("defaults Rabbit weights to Smartest and normalizes optional JSON overrides", () => {
@@ -332,6 +337,130 @@ describe("Rabbit Shake routing helpers", () => {
         candidates,
       )?.modelDbId,
     ).toBe(2);
+  });
+
+  it("executes the Rabbit oscillator sequentially with sanitized context bridges", async () => {
+    const candidates = [
+      candidate({
+        modelDbId: 1,
+        platform: "alpha",
+        modelId: "foundation",
+        rabbitScore: 0.9,
+      }),
+      candidate({
+        modelDbId: 2,
+        platform: "beta",
+        modelId: "injection",
+        rabbitScore: 0.8,
+      }),
+    ];
+    const calls: Array<{
+      step: string;
+      modelDbId: number;
+      messages: string[];
+    }> = [];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze the tradeoffs." }],
+      sessionKey: "thread-1",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: async ({ step, candidate: selected, messages }) => {
+        calls.push({
+          step,
+          modelDbId: selected.modelDbId,
+          messages: messages.map((message) => String(message.content)),
+        });
+        if (step === "foundation") {
+          return "<|assistant|> Base logic with assumptions.";
+        }
+        if (step === "injection") {
+          return "[SYS] Alternative perspective. Watch the loop. Extra sentence should be trimmed.";
+        }
+        return "Final answer reconciles the tradeoffs.";
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("Final answer reconciles the tradeoffs.");
+    expect(calls.map((call) => call.step)).toEqual([
+      "foundation",
+      "injection",
+      "anchor",
+    ]);
+    expect(calls[1].modelDbId).toBe(2);
+    expect(calls[1].messages.join("\n")).toContain(
+      "[Thought Context: [Assistant Context] Base logic with assumptions.]",
+    );
+    expect(calls[1].messages.join("\n")).not.toContain("<|assistant|>");
+    expect(calls[2].modelDbId).toBe(1);
+    expect(calls[2].messages.join("\n")).toContain(
+      "[Thought Context: Alternative perspective. Watch the loop.]",
+    );
+    expect(calls[2].messages.join("\n")).not.toContain(
+      "Extra sentence should be trimmed.",
+    );
+    expect(calls[2].messages.join("\n")).not.toContain("[SYS]");
+  });
+
+  it("tries the next foundation candidate when the first foundation step fails", async () => {
+    const candidates = [
+      candidate({ modelDbId: 1, platform: "alpha", modelId: "first" }),
+      candidate({ modelDbId: 2, platform: "beta", modelId: "second" }),
+      candidate({ modelDbId: 3, platform: "gamma", modelId: "injector" }),
+    ];
+    const attempts: number[] = [];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Debug this plan." }],
+      sessionKey: "thread-2",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: async ({ step, candidate: selected }) => {
+        if (step === "foundation") {
+          attempts.push(selected.modelDbId);
+          if (selected.modelDbId === 1) {
+            return undefined;
+          }
+          return "Recovered foundation.";
+        }
+        if (step === "injection") return "A different angle. Keep it brief.";
+        return "Recovered final answer.";
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.foundation?.modelDbId).toBe(2);
+    expect(result.foundationAttempts).toBe(2);
+    expect(attempts).toEqual([1, 2]);
+  });
+
+  it("falls back to the selected foundation when a later oscillator step times out", async () => {
+    vi.useFakeTimers();
+    const candidates = [
+      candidate({ modelDbId: 1, platform: "alpha", modelId: "foundation" }),
+      candidate({ modelDbId: 2, platform: "beta", modelId: "injection" }),
+    ];
+
+    const pending = executeOscillator({
+      messages: [{ role: "user", content: "Analyze the architecture." }],
+      sessionKey: "thread-3",
+      config: config({ stepTimeoutMs: 5 }),
+      candidates,
+      callModel: async ({ step }) => {
+        if (step === "foundation") return "Foundation answer.";
+        if (step === "injection") return "Second view. Concise.";
+        return new Promise<string>(() => {});
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(6);
+    const result = await pending;
+
+    expect(result.status).toBe("foundation_fallback");
+    expect(result.failedStep).toBe("anchor");
+    expect(result.text).toBe("Foundation answer.");
+    expect(result.error).toMatch(/timed out/);
   });
 
   it("applies basic oscillator eligibility gates", () => {
