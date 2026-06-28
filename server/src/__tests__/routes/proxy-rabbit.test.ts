@@ -124,6 +124,7 @@ describe("Rabbit proxy integration", () => {
       DELETE FROM api_keys;
       DELETE FROM models;
       DELETE FROM requests;
+      DELETE FROM oscillator_results;
       DELETE FROM settings
       WHERE key LIKE 'rabbit_%'
          OR key LIKE 'oscillator_%'
@@ -229,6 +230,28 @@ describe("Rabbit proxy integration", () => {
       "injection",
       "foundation",
     ]);
+    const row = getDb().prepare("SELECT * FROM oscillator_results").get() as {
+      status: string;
+      complete: number;
+      failed_step: number | null;
+      foundation_model_db_id: number | null;
+      injection_model_db_id: number | null;
+      total_latency_ms: number;
+      step1_latency_ms: number | null;
+      step2_latency_ms: number | null;
+      step3_latency_ms: number | null;
+    };
+    expect(row).toMatchObject({
+      status: "completed",
+      complete: 1,
+      failed_step: null,
+    });
+    expect(row.foundation_model_db_id).toBeGreaterThan(0);
+    expect(row.injection_model_db_id).toBeGreaterThan(0);
+    expect(row.total_latency_ms).toBeGreaterThanOrEqual(0);
+    expect(row.step1_latency_ms).toBeGreaterThanOrEqual(0);
+    expect(row.step2_latency_ms).toBeGreaterThanOrEqual(0);
+    expect(row.step3_latency_ms).toBeGreaterThanOrEqual(0);
   });
 
   it("uses normal single-model routing for simple Rabbit requests", async () => {
@@ -357,5 +380,14 @@ describe("Rabbit proxy integration", () => {
       "injection",
       "foundation",
     ]);
+    expect(
+      getDb()
+        .prepare("SELECT status, complete, failed_step FROM oscillator_results")
+        .get(),
+    ).toMatchObject({
+      status: "single_model_fallback",
+      complete: 0,
+      failed_step: 1,
+    });
   });
 });

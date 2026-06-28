@@ -22,7 +22,9 @@ import { getRelayTransport, isRelayTransportConfigured, computeWorkerIndex } fro
 import {
   executeOscillator,
   getRabbitOscillatorDecision,
+  logOscillatorResult,
   type OscillatorModelCall,
+  type OscillatorStepLatencies,
 } from '../services/rabbit-shake.js';
 import type { BaseProvider } from '../providers/base.js';
 
@@ -867,6 +869,7 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
     rabbitDecision.mode === 'oscillator' && !stream && !hasImage && !wantsTools;
 
   if (shouldTryRabbitOscillator) {
+    const rabbitStepLatencies: OscillatorStepLatencies = {};
     const callModel: OscillatorModelCall = async ({ step, candidate, messages: stepMessages }) => {
       const stepInputTokens = stepMessages.reduce((sum, message) => {
         const text = contentToString(message.content);
@@ -945,16 +948,25 @@ proxyRouter.post('/chat/completions', async (req: Request, res: Response) => {
         if (tier) recordFailure(stepRoute.modelDbId, tier);
         throw err;
       } finally {
+        rabbitStepLatencies[step] = Date.now() - stepStart;
         stepRoute.release();
       }
     };
 
+    const oscillatorSessionKey = sessionKey || requestId;
+    const oscillatorStart = Date.now();
     const oscillator = await executeOscillator({
       messages,
-      sessionKey: sessionKey || requestId,
+      sessionKey: oscillatorSessionKey,
       callModel,
       config: rabbitDecision.config,
       handoffMode,
+    });
+    logOscillatorResult({
+      sessionKey: oscillatorSessionKey,
+      result: oscillator,
+      totalLatencyMs: Date.now() - oscillatorStart,
+      stepLatencies: rabbitStepLatencies,
     });
 
     if (oscillator.status !== 'single_model_fallback' && oscillator.text) {
