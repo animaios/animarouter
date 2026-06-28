@@ -442,6 +442,49 @@ describe("Rabbit proxy integration", () => {
     });
   });
 
+  it("does not emit step-complete for a failed Rabbit injection step", async () => {
+    chatCompletion.mockImplementation(
+      async (_apiKey: string, _messages: ChatMessage[], modelId: string) => {
+        if (modelId === "injection") throw new Error("injection failed");
+        return {
+          choices: [
+            { message: { role: "assistant", content: "Foundation base." } },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+        };
+      },
+    );
+
+    const { status, body, headers } = await post(
+      app,
+      "/v1/chat/completions",
+      {
+        model: "auto",
+        messages: [
+          {
+            role: "user",
+            content: "Analyze this architecture and explain the tradeoffs.",
+          },
+        ],
+      },
+      key,
+    );
+
+    expect(status).toBe(200);
+    expect(responseText(body)).toBe("Foundation base.");
+    expect(headers.get("x-rabbit-status")).toBe("foundation_fallback");
+    expect(
+      publishedEvents
+        .filter((event) => event.type === "oscillator.step_complete")
+        .map((event) => event.step),
+    ).toEqual([1]);
+    expect(
+      publishedEvents.find((event) => event.type === "oscillator.failed"),
+    ).toMatchObject({
+      failedStep: 2,
+    });
+  });
+
   it("falls back to normal single-model routing when all Rabbit foundation candidates fail", async () => {
     chatCompletion.mockImplementation(async () => {
       if (chatCompletion.mock.calls.length <= 2) {

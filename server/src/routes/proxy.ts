@@ -151,6 +151,9 @@ function publishRabbitOscillatorEvents(params: {
   const { sessionKey, result, totalLatencyMs, stepLatencies } = params;
   const foundationModel = rabbitModelKey(result.foundation);
   const injectionModel = rabbitModelKey(result.injection);
+  const step1Succeeded = result.status !== 'single_model_fallback';
+  const step2Succeeded = result.status === 'completed' || (result.status === 'foundation_fallback' && result.failedStep !== 'injection');
+  const step3Succeeded = result.status === 'completed' || (result.status === 'foundation_fallback' && result.failedStep === 'validation');
 
   if (result.foundation && result.injection) {
     publish({
@@ -162,7 +165,7 @@ function publishRabbitOscillatorEvents(params: {
     });
   }
 
-  if (result.foundation && stepLatencies.foundation != null) {
+  if (result.foundation && stepLatencies.foundation != null && step1Succeeded) {
     publish({
       type: 'oscillator.step_complete',
       sessionKey,
@@ -175,7 +178,7 @@ function publishRabbitOscillatorEvents(params: {
     });
   }
 
-  if (result.injection && stepLatencies.injection != null) {
+  if (result.injection && stepLatencies.injection != null && step2Succeeded) {
     publish({
       type: 'oscillator.step_complete',
       sessionKey,
@@ -188,7 +191,7 @@ function publishRabbitOscillatorEvents(params: {
     });
   }
 
-  if (result.foundation && stepLatencies.anchor != null) {
+  if (result.foundation && stepLatencies.anchor != null && step3Succeeded) {
     publish({
       type: 'oscillator.step_complete',
       sessionKey,
