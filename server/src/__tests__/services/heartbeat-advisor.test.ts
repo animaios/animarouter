@@ -23,6 +23,7 @@ describe("Heartbeat AI routing advisor", () => {
       DELETE FROM fallback_config;
       DELETE FROM api_keys;
       DELETE FROM requests;
+      DELETE FROM oscillator_results;
       DELETE FROM rate_limit_cooldowns;
       DELETE FROM models;
       DELETE FROM settings WHERE key LIKE 'heartbeat_advisor_%' OR key IN ('routing_strategy', 'routing_custom_weights', 'oscillator_enabled');
@@ -120,6 +121,39 @@ describe("Heartbeat AI routing advisor", () => {
     expect(json).toContain("auth_error");
     expect(payload.keys[0].models[0].lastPingLatencyMs).toBe(321);
     expect(payload.models[0].stats.successRate).toBe(0.5);
+  });
+
+  it("includes collected oscillator metrics in advisory payloads", () => {
+    const { modelDbId, keyId } = seedProvider();
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO oscillator_results (
+        session_key,
+        foundation_model_db_id,
+        injection_model_db_id,
+        total_latency_ms,
+        complete,
+        status,
+        meow_detected
+      )
+      VALUES ('thread-advisor', ?, ?, 1500, 1, 'completed', 0)
+    `).run(modelDbId, modelDbId);
+
+    const payload = buildAdvisoryPayload({
+      platform: "testprov",
+      modelDbId,
+      modelId: "test-model",
+      keyId,
+      keyHealth: new Map(),
+    });
+
+    expect(payload.oscillator).toMatchObject({
+      attempts: 1,
+      successes: 1,
+      failures: 0,
+      avgLatencyMs: 1500,
+      meowCount: 0,
+    });
   });
 
   it("truncates the advisory prompt to the approximate token budget", () => {

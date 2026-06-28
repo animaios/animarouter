@@ -5,6 +5,7 @@ import {
   saveFeatureSettings,
 } from "../../services/feature-settings.js";
 import {
+  collectOscillatorStats,
   detectMeow,
   executeOscillator,
   getOscillatorConfig,
@@ -14,6 +15,7 @@ import {
   isComplexReasoningPrompt,
   isRabbitLoadShedActive,
   isRabbitOscillatorEligible,
+  logOscillatorResult,
   type OscillatorConfig,
   parseRabbitWeights,
   RABBIT_DEFAULT_WEIGHTS,
@@ -689,5 +691,156 @@ describe("Rabbit Shake routing helpers", () => {
         "Here is a TypeScript example: const total = 1 + 2; return total.",
       ).detected,
     ).toBe(false);
+  });
+
+  it("persists oscillator results and aggregates advisor-facing stats", async () => {
+    const foundationId = addModel({
+      platform: "alpha",
+      modelId: "foundation",
+      name: "Foundation",
+      intelligenceRank: 1,
+      speedRank: 5,
+      sizeLabel: "Frontier",
+      priority: 1,
+    });
+    const injectionId = addModel({
+      platform: "beta",
+      modelId: "injection",
+      name: "Injection",
+      intelligenceRank: 2,
+      speedRank: 4,
+      sizeLabel: "Large",
+      priority: 2,
+    });
+    const candidates = [
+      candidate({
+        modelDbId: foundationId,
+        platform: "alpha",
+        modelId: "foundation",
+      }),
+      candidate({
+        modelDbId: injectionId,
+        platform: "beta",
+        modelId: "injection",
+      }),
+    ];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze this routing issue." }],
+      sessionKey: "thread-stats",
+      config: config(),
+      candidates,
+      callModel: async ({ step }) => {
+        if (step === "foundation") return "Foundation answer.";
+        if (step === "injection") return "Alternative view. Keep it short.";
+        return "Anchored final answer.";
+      },
+    });
+
+    logOscillatorResult({
+      sessionKey: "thread-stats",
+      result,
+      totalLatencyMs: 1234,
+      stepLatencies: {
+        foundation: 100,
+        injection: 200,
+        anchor: 300,
+      },
+    });
+
+    const row = getDb()
+      .prepare("SELECT * FROM oscillator_results WHERE session_key = ?")
+      .get("thread-stats") as {
+      foundation_model_db_id: number;
+      injection_model_db_id: number;
+      step1_latency_ms: number;
+      step2_latency_ms: number;
+      step3_latency_ms: number;
+      total_latency_ms: number;
+      complete: number;
+      failed_step: number | null;
+      status: string;
+      meow_detected: number;
+    };
+
+    expect(row).toMatchObject({
+      foundation_model_db_id: foundationId,
+      injection_model_db_id: injectionId,
+      step1_latency_ms: 100,
+      step2_latency_ms: 200,
+      step3_latency_ms: 300,
+      total_latency_ms: 1234,
+      complete: 1,
+      failed_step: null,
+      status: "completed",
+      meow_detected: 0,
+    });
+
+    expect(collectOscillatorStats(60_000)).toMatchObject({
+      attempts: 1,
+      successes: 1,
+      failures: 0,
+      avgLatencyMs: 1234,
+      meowCount: 0,
+      loadShedActive: false,
+    });
+  });
+
+  it("counts meow validation fallbacks as oscillator failures", async () => {
+    const foundationId = addModel({
+      platform: "alpha",
+      modelId: "foundation",
+      name: "Foundation",
+      intelligenceRank: 1,
+      speedRank: 5,
+      sizeLabel: "Frontier",
+      priority: 1,
+    });
+    const injectionId = addModel({
+      platform: "beta",
+      modelId: "injection",
+      name: "Injection",
+      intelligenceRank: 2,
+      speedRank: 4,
+      sizeLabel: "Large",
+      priority: 2,
+    });
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze this routing issue." }],
+      sessionKey: "thread-meow",
+      config: config(),
+      candidates: [
+        candidate({
+          modelDbId: foundationId,
+          platform: "alpha",
+          modelId: "foundation",
+        }),
+        candidate({
+          modelDbId: injectionId,
+          platform: "beta",
+          modelId: "injection",
+        }),
+      ],
+      callModel: async ({ step }) => {
+        if (step === "foundation") return "Foundation answer.";
+        if (step === "injection") return "Alternative view. Keep it short.";
+        return "Leaked raw marker <|assistant|>.";
+      },
+    });
+
+    logOscillatorResult({
+      sessionKey: "thread-meow",
+      result,
+      totalLatencyMs: 900,
+    });
+
+    expect(collectOscillatorStats(60_000)).toMatchObject({
+      attempts: 1,
+      successes: 0,
+      failures: 1,
+      avgLatencyMs: 0,
+      meowCount: 1,
+    });
   });
 });

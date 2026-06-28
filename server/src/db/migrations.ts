@@ -169,6 +169,25 @@ function createTables(db: Database.Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS oscillator_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_key TEXT NOT NULL,
+      foundation_model_db_id INTEGER,
+      injection_model_db_id INTEGER,
+      step1_latency_ms INTEGER,
+      step2_latency_ms INTEGER,
+      step3_latency_ms INTEGER,
+      total_latency_ms INTEGER NOT NULL DEFAULT 0,
+      complete INTEGER NOT NULL DEFAULT 0,
+      failed_step INTEGER,
+      status TEXT NOT NULL,
+      meow_detected INTEGER NOT NULL DEFAULT 0,
+      stripped_artifacts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (foundation_model_db_id) REFERENCES models(id) ON DELETE SET NULL,
+      FOREIGN KEY (injection_model_db_id) REFERENCES models(id) ON DELETE SET NULL
+    );
+
     CREATE TABLE IF NOT EXISTS rate_limit_usage (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       platform TEXT NOT NULL,
@@ -238,6 +257,7 @@ function createTables(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_requests_created_at ON requests(created_at);
     CREATE INDEX IF NOT EXISTS idx_requests_platform ON requests(platform);
+    CREATE INDEX IF NOT EXISTS idx_oscillator_results_created_at ON oscillator_results(created_at);
     CREATE INDEX IF NOT EXISTS idx_rate_limit_usage_lookup ON rate_limit_usage(platform, model_id, key_id, kind, created_at_ms);
     CREATE INDEX IF NOT EXISTS idx_rate_limit_cooldowns_expires ON rate_limit_cooldowns(expires_at_ms);
     CREATE INDEX IF NOT EXISTS idx_api_keys_platform ON api_keys(platform);
