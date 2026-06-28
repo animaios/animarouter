@@ -212,7 +212,7 @@ export function buildAdvisoryPayload(params: {
     })),
     dailyUsage,
     routing,
-    oscillator: collectOscillatorStats(windowMs),
+    oscillator: collectOscillatorStats(windowMs, now),
   });
 }
 

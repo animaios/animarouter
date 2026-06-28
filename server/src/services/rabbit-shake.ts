@@ -887,9 +887,10 @@ export function logOscillatorResult(input: LogOscillatorResultInput): void {
 
 export function collectOscillatorStats(
   windowMs: number,
+  now = Date.now(),
 ): NonNullable<AdvisoryPayload["oscillator"]> {
   const db = getDb();
-  const since = new Date(Date.now() - Math.max(0, windowMs))
+  const since = new Date(now - Math.max(0, windowMs))
     .toISOString()
     .replace("T", " ")
     .slice(0, 19);

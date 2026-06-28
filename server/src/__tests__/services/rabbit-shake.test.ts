@@ -843,4 +843,31 @@ describe("Rabbit Shake routing helpers", () => {
       meowCount: 1,
     });
   });
+
+  it("collects oscillator stats using the provided clock", () => {
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO oscillator_results (
+        session_key,
+        total_latency_ms,
+        complete,
+        status,
+        meow_detected,
+        created_at
+      )
+      VALUES
+        ('inside-window', 500, 1, 'completed', 0, '2026-01-01 00:00:05'),
+        ('outside-window', 900, 0, 'foundation_fallback', 1, '2025-12-31 23:59:59')
+    `).run();
+
+    expect(
+      collectOscillatorStats(10_000, Date.parse("2026-01-01T00:00:10Z")),
+    ).toMatchObject({
+      attempts: 1,
+      successes: 1,
+      failures: 0,
+      avgLatencyMs: 500,
+      meowCount: 0,
+    });
+  });
 });
