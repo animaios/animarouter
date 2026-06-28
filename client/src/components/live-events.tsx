@@ -114,6 +114,23 @@ interface OscillatorStartedEvent extends TimestampOnly {
   foundationModel: string;
   injectionModel: string;
 }
+interface OscillatorDecisionEvent extends TimestampOnly {
+  type: "oscillator.decision";
+  sessionKey: string;
+  strategy: string;
+  mode: "oscillator" | "single_model";
+  skipReason?: string;
+  stream: boolean;
+  pinned: boolean;
+  hasImage: boolean;
+  wantsTools: boolean;
+  loadShedActive: boolean;
+  concurrentRequests: number;
+  threshold: number;
+  foundationSelection: string;
+  injectionSelection: string;
+  willRunOscillator: boolean;
+}
 interface OscillatorStepCompleteEvent extends TimestampOnly {
   type: "oscillator.step_complete";
   sessionKey: string;
@@ -127,7 +144,7 @@ interface OscillatorCompleteEvent extends TimestampOnly {
   type: "oscillator.complete";
   sessionKey: string;
   totalLatencyMs: number;
-  meowDetected: boolean;
+  anomalyDetected: boolean;
   finalModel: string;
 }
 interface OscillatorFailedEvent extends TimestampOnly {
@@ -142,8 +159,8 @@ interface OscillatorLoadShedEvent extends TimestampOnly {
   concurrentRequests: number;
   threshold: number;
 }
-interface OscillatorMeowDetectedEvent extends TimestampOnly {
-  type: "oscillator.meow_detected";
+interface OscillatorAnomalyDetectedEvent extends TimestampOnly {
+  type: "oscillator.anomaly_detected";
   sessionKey: string;
   pattern: string;
   fellBackTo: string;
@@ -160,7 +177,7 @@ interface ExecuteOscillatorResult {
   foundationAttempts: number;
   bridges: Record<string, unknown>;
   error?: string;
-  meow?: { detected: boolean; pattern?: string; reason?: string };
+  anomaly?: { detected: boolean; pattern?: string; reason?: string };
 }
 
 interface IterativeRefinementCandidate {
@@ -231,12 +248,13 @@ type LiveEventBase =
   | HeartbeatAdvisorParsedEvent
   | HeartbeatAdvisorFailedEvent
   | HeartbeatAdvisorAppliedEvent
+  | OscillatorDecisionEvent
   | OscillatorStartedEvent
   | OscillatorStepCompleteEvent
   | OscillatorCompleteEvent
   | OscillatorFailedEvent
   | OscillatorLoadShedEvent
-  | OscillatorMeowDetectedEvent
+  | OscillatorAnomalyDetectedEvent
   | DegradationHitEvent
   | DegradationRecoveryEvent
   | StreamChunkEvent
@@ -407,6 +425,16 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] started: ${evt.foundationModel} → ${evt.injectionModel}`,
       };
     }
+    case "oscillator.decision": {
+      const reason = evt.skipReason ? ` reason=${evt.skipReason}` : "";
+      const target = evt.willRunOscillator ? "oscillator" : "single-model";
+      return {
+        id: "iterative_refinement",
+        ts,
+        kind: evt.willRunOscillator ? "start" : "info",
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] decision: ${target}; strategy=${evt.strategy}; mode=${evt.mode}${reason}; stream=${evt.stream}; pinned=${evt.pinned}; image=${evt.hasImage}; tools=${evt.wantsTools}; load=${evt.concurrentRequests}/${evt.threshold}; foundation=${evt.foundationSelection}; injection=${evt.injectionSelection}`,
+      };
+    }
     case "oscillator.step_complete": {
       return {
         id: "iterative_refinement",
@@ -420,7 +448,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         id: "iterative_refinement",
         ts,
         kind: "done",
-        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] complete via ${evt.finalModel} in ${evt.totalLatencyMs}ms${evt.meowDetected ? " (meow flagged)" : ""}`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] complete via ${evt.finalModel} in ${evt.totalLatencyMs}ms${evt.anomalyDetected ? " (anomaly flagged)" : ""}`,
       };
     }
     case "oscillator.failed": {
@@ -439,12 +467,12 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         text: `Iterative Refinement load-shed: ${evt.concurrentRequests} concurrent requests exceeded threshold ${evt.threshold}`,
       };
     }
-    case "oscillator.meow_detected": {
+    case "oscillator.anomaly_detected": {
       return {
         id: "iterative_refinement",
         ts,
         kind: "warn",
-        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] meow detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] anomaly detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
       };
     }
     case "oscillator.stream_start": {
@@ -453,7 +481,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         id: "iterative_refinement",
         ts,
         kind: "start",
-        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} streaming started`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} streaming started`,
       };
     }
     case "oscillator.stream_delta": {
@@ -462,7 +490,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         id: "iterative_refinement",
         ts,
         kind: "info",
-        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} Δ: "${evt.delta.replace(/\n/g, "⏎").slice(0, 80)}" (${evt.accumulated.length} chars)`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} delta: "${evt.delta.replace(/\n/g, "\\n").slice(0, 80)}" (${evt.accumulated.length} chars)`,
       };
     }
     case "oscillator.stream_step_complete": {
@@ -471,7 +499,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         id: "iterative_refinement",
         ts,
         kind: "done",
-        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} complete (${evt.fullText.length} chars)`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} complete (${evt.fullText.length} chars)`,
       };
     }
     case "oscillator.stream_complete": {
@@ -479,7 +507,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         id: "iterative_refinement",
         ts,
         kind: "done",
-        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] stream complete: ${evt.result.status}${evt.result.meow?.detected ? " (meow flagged)" : ""}`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] stream complete: ${evt.result.status}${evt.result.anomaly?.detected ? " (anomaly flagged)" : ""}`,
       };
     }
     case "oscillator.stream_error": {
@@ -488,7 +516,7 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
         id: "iterative_refinement",
         ts,
         kind: evt.fallback ? "warn" : "error",
-        text: `🐰 Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} error: ${evt.error.slice(0, 80)}${evt.fallback ? " — falling back" : ""}`,
+        text: `Iterative Refinement [${evt.sessionKey.slice(0, 8)}] ${stepLabel} error: ${evt.error.slice(0, 80)}${evt.fallback ? " - falling back" : ""}`,
       };
     }
     case "degradation.hit": {

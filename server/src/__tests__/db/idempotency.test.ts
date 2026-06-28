@@ -79,6 +79,33 @@ describe("Migration idempotency", () => {
     expect(rows).toEqual([]);
   });
 
+  it("creates the per-key stats table used by heartbeat routing", () => {
+    process.env.ENCRYPTION_KEY = "0".repeat(64);
+    const db = initDb(":memory:");
+
+    const columns = (
+      db.prepare("PRAGMA table_info(key_stats_temp)").all() as Array<{
+        name: string;
+      }>
+    ).map((col) => col.name);
+
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        "platform",
+        "model_id",
+        "key_id",
+        "successes",
+        "failures",
+        "tokPerSec",
+        "avgTtfbMs",
+        "totalRequests",
+        "advisorScore",
+        "advisorConfidence",
+        "advisorUpdatedAt",
+      ]),
+    );
+  });
+
   it("V38 preserves fallback rows while normalizing one grouped fallback per group", () => {
     process.env.ENCRYPTION_KEY = "0".repeat(64);
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;

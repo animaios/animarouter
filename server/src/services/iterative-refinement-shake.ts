@@ -34,7 +34,7 @@ export interface OscillatorConfig {
   iterativeRefinementWeights?: RoutingWeights;
   minIntelligenceGap: number;
   injectionMaxSentences: number;
-  meowPatterns: string[];
+  anomalyPatterns: string[];
   loadShedThreshold: number;
   stepTimeoutMs: number;
   fallbackMode: "foundation_only" | "injection_only";
@@ -70,11 +70,12 @@ export interface IterativeRefinementOscillatorDecision {
   skipReason?: IterativeRefinementOscillatorSkipReason;
 }
 
-export interface IterativeRefinementOscillatorDecisionInput extends IterativeRefinementEligibilityInput {
+export interface IterativeRefinementOscillatorDecisionInput
+  extends IterativeRefinementEligibilityInput {
   currentConcurrent?: number;
 }
 
-export interface MeowDetectionResult {
+export interface AnomalyDetectionResult {
   detected: boolean;
   reason?:
     | "custom_pattern"
@@ -139,7 +140,7 @@ export interface ExecuteOscillatorResult {
     injection?: ContextBridgeResult;
     anchor?: ContextBridgeResult;
   };
-  meow?: MeowDetectionResult;
+  anomaly?: AnomalyDetectionResult;
   error?: string;
 }
 
@@ -156,9 +157,10 @@ export interface LogOscillatorResultInput {
   stepLatencies?: OscillatorStepLatencies;
 }
 
-export const ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS: RoutingWeights = BANDIT_PRESETS.smartest;
+export const ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS: RoutingWeights =
+  BANDIT_PRESETS.smartest;
 
-const DEFAULT_MEOW_PATTERNS = [
+const DEFAULT_ANOMALY_PATTERNS = [
   "<\\|[^>]+\\|>",
   "\\[(?:INST|/INST|SYS|/SYS|SYSTEM|ASSISTANT|USER)\\]",
   "(.)\\1{24,}",
@@ -225,7 +227,7 @@ function parseSelection<T extends string>(
 export function getIterativeRefinementWeights(): RoutingWeights {
   return (
     parseIterativeRefinementWeights(
-      getFeatureSetting("iterative_refinement_weights") as string
+      getFeatureSetting("iterative_refinement_weights") as string,
     ) ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS
   );
 }
@@ -251,21 +253,13 @@ export function getOscillatorConfig(): OscillatorConfig {
     injectionMaxSentences: getFeatureSetting(
       "oscillator_injection_max_sentences",
     ) as number,
-    meowPatterns: DEFAULT_MEOW_PATTERNS,
+    anomalyPatterns: DEFAULT_ANOMALY_PATTERNS,
     loadShedThreshold: getFeatureSetting(
       "oscillator_load_shed_threshold",
     ) as number,
     stepTimeoutMs: getFeatureSetting("oscillator_step_timeout_ms") as number,
     fallbackMode: "foundation_only",
   };
-}
-
-export function isComplexReasoningPrompt(promptText?: string | null): boolean {
-  const text = (promptText ?? "").trim();
-  if (text.length >= 180) return true;
-  return /\b(reason|analyze|debug|prove|derive|compare|tradeoff|architecture|plan|why)\b/i.test(
-    text,
-  );
 }
 
 export function isIterativeRefinementLoadShedActive(
@@ -277,14 +271,16 @@ export function isIterativeRefinementLoadShedActive(
   );
 }
 
-export function isIterativeRefinementOscillatorEligible(
-  input: IterativeRefinementEligibilityInput,
-): boolean {
-  return (
-    input.strategy === "iterative_refinement" &&
-    !input.pinnedModelDbId &&
-    !input.loadShedActive &&
-    isComplexReasoningPrompt(input.promptText)
+function isComplexReasoningPrompt(promptText?: string | null): boolean {
+  const normalized = promptText?.trim() ?? "";
+  if (!normalized) return false;
+
+  const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
+  if (wordCount < 4) return false;
+  if (normalized.length >= 240 || wordCount >= 40) return true;
+
+  return /\b(?:analy[sz]e|architecture|trade-?offs?|debug|diagnos[ei]s|root cause|compare|evaluate|reason|strategy|design|plan|prove|derive|optimi[sz]e|refactor|explain)\b/iu.test(
+    normalized,
   );
 }
 
@@ -372,10 +368,10 @@ function hasScriptFragmentation(text: string): boolean {
   return substantialScripts.length >= 4 && switches >= 10;
 }
 
-export function detectMeow(
+export function detectAnomaly(
   text: string,
-  patterns: string[] = DEFAULT_MEOW_PATTERNS,
-): MeowDetectionResult {
+  patterns: string[] = DEFAULT_ANOMALY_PATTERNS,
+): AnomalyDetectionResult {
   const normalized = text.trim();
   if (normalized.length === 0) return { detected: false };
 
@@ -410,7 +406,13 @@ export function detectMeow(
 
 function metadataByModelId(
   modelDbIds: number[],
-): Map<number, Omit<IterativeRefinementCandidate, keyof RoutingScore | "iterativeRefinementScore">> {
+): Map<
+  number,
+  Omit<
+    IterativeRefinementCandidate,
+    keyof RoutingScore | "iterativeRefinementScore"
+  >
+> {
   if (modelDbIds.length === 0) return new Map();
   const db = getDb();
   const placeholders = modelDbIds.map(() => "?").join(", ");
@@ -459,7 +461,8 @@ export function getIterativeRefinementCandidates(
   weights: RoutingWeights = getIterativeRefinementWeights(),
 ): IterativeRefinementCandidate[] {
   const routing = getRoutingScores();
-  const normalizedWeights = normalizeWeights(weights) ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS;
+  const normalizedWeights =
+    normalizeWeights(weights) ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS;
   const keyPlatforms = platformsWithEnabledKeys();
   const metadata = metadataByModelId(
     routing.scores.map((score) => score.modelDbId),
@@ -482,7 +485,8 @@ export function getIterativeRefinementCandidates(
         {
           ...score,
           ...meta,
-          iterativeRefinementScore: base * score.degradationFactor * score.boost,
+          iterativeRefinementScore:
+            base * score.degradationFactor * score.boost,
         },
       ];
     })
@@ -603,9 +607,9 @@ function withStepTimeout<T>(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-          () => reject(new Error(`Iterative Refinement ${step} step timed out`)),
-          timeoutMs,
-        );
+      () => reject(new Error(`Iterative Refinement ${step} step timed out`)),
+      timeoutMs,
+    );
   });
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
@@ -658,7 +662,10 @@ async function callStep(params: {
       params.step,
     ),
   ).trim();
-  if (!text) throw new Error(`Iterative Refinement ${params.step} step returned empty text`);
+  if (!text)
+    throw new Error(
+      `Iterative Refinement ${params.step} step returned empty text`,
+    );
   return text;
 }
 
@@ -677,8 +684,10 @@ export async function executeOscillator(
 ): Promise<ExecuteOscillatorResult> {
   const config = params.config ?? getOscillatorConfig();
   const candidates =
-      params.candidates ??
-      getIterativeRefinementCandidates(config.iterativeRefinementWeights ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS);
+    params.candidates ??
+    getIterativeRefinementCandidates(
+      config.iterativeRefinementWeights ?? ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
+    );
   const foundations = resolveFoundationCandidates(config, candidates);
   const handoffMode = params.handoffMode ?? "off";
   const stream = params.stream ?? false;
@@ -739,7 +748,14 @@ export async function executeOscillator(
           bridges: {},
           error: "No eligible Iterative Refinement injection model",
         };
-        if (stream) emitChunk({ step: "foundation", delta: "", accumulated: foundationText, stepComplete: true, final: result });
+        if (stream)
+          emitChunk({
+            step: "foundation",
+            delta: "",
+            accumulated: foundationText,
+            stepComplete: true,
+            final: result,
+          });
         return result;
       }
 
@@ -881,8 +897,8 @@ export async function executeOscillator(
         stepComplete: true,
       });
 
-      const meow = detectMeow(anchorText, config.meowPatterns);
-      if (meow.detected) {
+      const anomaly = detectAnomaly(anchorText, config.anomalyPatterns);
+      if (anomaly.detected) {
         const result: ExecuteOscillatorResult = {
           status: "foundation_fallback",
           text: foundationText,
@@ -894,7 +910,7 @@ export async function executeOscillator(
           failedStep: "validation",
           foundationAttempts,
           bridges: { injection: injectionBridge, anchor: anchorBridge },
-          meow,
+          anomaly,
         };
         if (stream) {
           emitChunk({
@@ -918,7 +934,7 @@ export async function executeOscillator(
         anchorText,
         foundationAttempts,
         bridges: { injection: injectionBridge, anchor: anchorBridge },
-        meow,
+        anomaly,
       };
 
       if (stream) {
@@ -942,7 +958,9 @@ export async function executeOscillator(
     failedStep: "foundation",
     foundationAttempts,
     bridges: {},
-    error: lastFoundationError ?? "No eligible Iterative Refinement foundation model",
+    error:
+      lastFoundationError ??
+      "No eligible Iterative Refinement foundation model",
   };
 
   if (stream) {
@@ -994,7 +1012,7 @@ export function logOscillatorResult(input: LogOscillatorResultInput): void {
       complete,
       failed_step,
       status,
-      meow_detected,
+      anomaly_detected,
       stripped_artifacts
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1009,7 +1027,7 @@ export function logOscillatorResult(input: LogOscillatorResultInput): void {
     complete,
     failedStepNumber(input.result.failedStep),
     input.result.status,
-    input.result.meow?.detected ? 1 : 0,
+    input.result.anomaly?.detected ? 1 : 0,
     strippedArtifactCount(input.result),
   );
 }
@@ -1030,7 +1048,7 @@ export function collectOscillatorStats(
         SUM(CASE WHEN complete = 1 THEN 1 ELSE 0 END) AS successes,
         SUM(CASE WHEN complete = 0 THEN 1 ELSE 0 END) AS failures,
         AVG(CASE WHEN complete = 1 THEN total_latency_ms ELSE NULL END) AS avg_latency_ms,
-        SUM(meow_detected) AS meow_count
+        SUM(anomaly_detected) AS anomaly_count
       FROM oscillator_results
       WHERE created_at >= ?
     `)
@@ -1040,7 +1058,7 @@ export function collectOscillatorStats(
         successes: number | null;
         failures: number | null;
         avg_latency_ms: number | null;
-        meow_count: number | null;
+        anomaly_count: number | null;
       }
     | undefined;
 
@@ -1049,7 +1067,7 @@ export function collectOscillatorStats(
     successes: row?.successes ?? 0,
     failures: row?.failures ?? 0,
     avgLatencyMs: Math.round(row?.avg_latency_ms ?? 0),
-    meowCount: row?.meow_count ?? 0,
+    anomalyCount: row?.anomaly_count ?? 0,
     loadShedActive: isIterativeRefinementLoadShedActive(),
   };
 }

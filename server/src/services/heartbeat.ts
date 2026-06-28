@@ -43,6 +43,69 @@ export interface KeyHealth {
   lastPingLatencyMs?: number;
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Per-key-per-model performance stats (token speed, TTFB)
+// ──────────────────────────────────────────────────────────────────────
+
+export interface KeyStats {
+  /** Measured tokens per second from successful requests. */
+  tokPerSec: number;
+  /** Average time to first byte (ms) from successful requests. */
+  avgTtfbMs: number | null;
+  /** Total successful requests used for averaging. */
+  successes: number;
+  /** Total failed requests. */
+  failures: number;
+  /** Total requests (success + failure). */
+  totalRequests: number;
+  /** Advisor score for this key/model, normalized from -9..9. */
+  advisorScore: number;
+  /** Advisor confidence for advisorScore, normalized from 0..9. */
+  advisorConfidence: number;
+  /** Epoch ms when advisorScore was last updated. */
+  advisorUpdatedAt: number | null;
+}
+
+/** Get current performance stats for a key+model combo (reads from DB). */
+export function getKeyStats(
+  platform: string,
+  keyId: number,
+  modelId: string,
+): KeyStats | undefined {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT tokPerSec, avgTtfbMs, successes, failures, totalRequests,
+              advisorScore, advisorConfidence, advisorUpdatedAt
+       FROM key_stats_temp WHERE platform = ? AND model_id = ? AND key_id = ?`,
+    )
+    .get(platform, modelId, keyId) as
+    | {
+        tokPerSec: number;
+        avgTtfbMs: number | null;
+        successes: number;
+        failures: number;
+        totalRequests: number;
+        advisorScore: number | null;
+        advisorConfidence: number | null;
+        advisorUpdatedAt: number | null;
+      }
+    | undefined;
+
+  if (!row) return undefined;
+
+  return {
+    tokPerSec: row.tokPerSec ?? 0,
+    avgTtfbMs: row.avgTtfbMs ?? null,
+    successes: row.successes ?? 0,
+    failures: row.failures ?? 0,
+    totalRequests: row.totalRequests ?? 0,
+    advisorScore: row.advisorScore ?? 0,
+    advisorConfidence: row.advisorConfidence ?? 0,
+    advisorUpdatedAt: row.advisorUpdatedAt ?? null,
+  };
+}
+
 /** Composite key for per-key-per-model health map: `${keyId}:${modelId}` */
 export function healthKey(keyId: number, modelId: string): string {
   return `${keyId}:${modelId}`;

@@ -6,26 +6,26 @@ import {
 } from "../../services/feature-settings.js";
 import {
   collectOscillatorStats,
-  detectMeow,
+  detectAnomaly,
   executeOscillator,
-  getOscillatorConfig,
   getIterativeRefinementCandidates,
   getIterativeRefinementOscillatorDecision,
   getIterativeRefinementWeights,
-  isComplexReasoningPrompt,
+  getOscillatorConfig,
+  ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
+  type IterativeRefinementCandidate,
   isIterativeRefinementLoadShedActive,
-  isIterativeRefinementOscillatorEligible,
   logOscillatorResult,
   type OscillatorConfig,
   type OscillatorStreamChunk,
   parseIterativeRefinementWeights,
-  ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
-  type IterativeRefinementCandidate,
   resolveFoundationCandidates,
   resolveInjectionModel,
 } from "../../services/iterative-refinement-shake.js";
 
-function candidate(overrides: Partial<IterativeRefinementCandidate>): IterativeRefinementCandidate {
+function candidate(
+  overrides: Partial<IterativeRefinementCandidate>,
+): IterativeRefinementCandidate {
   return {
     modelDbId: 1,
     platform: "alpha",
@@ -57,7 +57,7 @@ function config(overrides: Partial<OscillatorConfig> = {}): OscillatorConfig {
     iterativeRefinementWeights: ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
     minIntelligenceGap: 0,
     injectionMaxSentences: 2,
-    meowPatterns: [],
+    anomalyPatterns: [],
     loadShedThreshold: 21,
     stepTimeoutMs: 30000,
     fallbackMode: "foundation_only",
@@ -124,7 +124,9 @@ describe("Iterative Refinement Shake routing helpers", () => {
   });
 
   it("defaults Iterative Refinement weights to Smartest and normalizes optional JSON overrides", () => {
-    expect(getIterativeRefinementWeights()).toEqual(ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS);
+    expect(getIterativeRefinementWeights()).toEqual(
+      ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
+    );
     expect(parseIterativeRefinementWeights("")).toBeUndefined();
     expect(parseIterativeRefinementWeights("{bad json")).toBeUndefined();
 
@@ -138,7 +140,9 @@ describe("Iterative Refinement Shake routing helpers", () => {
       }),
     );
 
-    expect(getIterativeRefinementWeights()).toEqual(ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS);
+    expect(getIterativeRefinementWeights()).toEqual(
+      ITERATIVE_REFINEMENT_DEFAULT_WEIGHTS,
+    );
   });
 
   it("reads oscillator config from feature settings", () => {
@@ -509,7 +513,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(result.error).toMatch(/No eligible/);
   });
 
-  it("falls back to foundation output when anchor validation detects meowing", async () => {
+  it("falls back to foundation output when anchor validation detects anomaly", async () => {
     const candidates = [
       candidate({ modelDbId: 1, platform: "alpha", modelId: "foundation" }),
       candidate({ modelDbId: 2, platform: "beta", modelId: "injection" }),
@@ -530,44 +534,28 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(result.status).toBe("foundation_fallback");
     expect(result.failedStep).toBe("validation");
     expect(result.text).toBe("Coherent foundation.");
-    expect(result.meow?.reason).toBe("structural_tag");
-  });
-
-  it("applies basic oscillator eligibility gates", () => {
-    expect(
-      isIterativeRefinementOscillatorEligible({
-        strategy: "iterative_refinement",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
-        config: config(),
-      }),
-    ).toBe(true);
-    expect(
-      isIterativeRefinementOscillatorEligible({
-        strategy: "smartest",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
-        config: config(),
-      }),
-    ).toBe(false);
-    expect(
-      isIterativeRefinementOscillatorEligible({
-        strategy: "iterative_refinement",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
-        pinnedModelDbId: 1,
-        config: config(),
-      }),
-    ).toBe(false);
+    expect(result.anomaly?.reason).toBe("structural_tag");
   });
 
   it("load-sheds only above the configured concurrent request threshold", () => {
-    expect(isIterativeRefinementLoadShedActive(config({ loadShedThreshold: 21 }), 21)).toBe(
-      false,
-    );
-    expect(isIterativeRefinementLoadShedActive(config({ loadShedThreshold: 21 }), 22)).toBe(
-      true,
-    );
-    expect(isIterativeRefinementLoadShedActive(config({ loadShedThreshold: 0 }), 999)).toBe(
-      false,
-    );
+    expect(
+      isIterativeRefinementLoadShedActive(
+        config({ loadShedThreshold: 21 }),
+        21,
+      ),
+    ).toBe(false);
+    expect(
+      isIterativeRefinementLoadShedActive(
+        config({ loadShedThreshold: 21 }),
+        22,
+      ),
+    ).toBe(true);
+    expect(
+      isIterativeRefinementLoadShedActive(
+        config({ loadShedThreshold: 0 }),
+        999,
+      ),
+    ).toBe(false);
   });
 
   it("returns a proxy-facing single-model decision when Iterative Refinement is load-shed", () => {
@@ -599,75 +587,73 @@ describe("Iterative Refinement Shake routing helpers", () => {
     });
   });
 
-  it("explains non-load-shed Iterative Refinement oscillator skips for normal single-model fallback", () => {
-      expect(
-        getIterativeRefinementOscillatorDecision({
-          strategy: "smartest",
-          promptText: "Analyze this architecture.",
-          config: config(),
-        }).skipReason,
-      ).toBe("non_iterative_refinement_strategy");
-      expect(
-        getIterativeRefinementOscillatorDecision({
-          strategy: "iterative_refinement",
-          promptText: "Analyze this architecture.",
-          pinnedModelDbId: 1,
-          config: config(),
-        }).skipReason,
-      ).toBe("pinned_model");
-      expect(
-        getIterativeRefinementOscillatorDecision({
-          strategy: "iterative_refinement",
-          promptText: "Analyze this architecture.",
-          pinnedModelDbId: 0,
-          config: config(),
-        }).skipReason,
-      ).toBe("pinned_model");
+  it("routes simple Iterative Refinement prompts through the normal single-model path", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
         promptText: "hello",
-        config: config(),
-      }).skipReason,
-    ).toBe("simple_prompt");
-  });
-
-  it("treats null prompt text as non-complex instead of throwing", () => {
-    expect(isComplexReasoningPrompt(null)).toBe(false);
-    expect(
-      isIterativeRefinementOscillatorEligible({
-        strategy: "iterative_refinement",
-        promptText: null,
+        currentConcurrent: 0,
         config: config(),
       }),
-    ).toBe(false);
+    ).toMatchObject({
+      mode: "single_model",
+      loadShedActive: false,
+      skipReason: "simple_prompt",
+    });
+  });
+
+  it("explains non-load-shed Iterative Refinement oscillator skips for normal single-model fallback", () => {
+    expect(
+      getIterativeRefinementOscillatorDecision({
+        strategy: "smartest",
+        promptText: "Analyze this architecture.",
+        config: config(),
+      }).skipReason,
+    ).toBe("non_iterative_refinement_strategy");
+    expect(
+      getIterativeRefinementOscillatorDecision({
+        strategy: "iterative_refinement",
+        promptText: "Analyze this architecture.",
+        pinnedModelDbId: 1,
+        config: config(),
+      }).skipReason,
+    ).toBe("pinned_model");
+    expect(
+      getIterativeRefinementOscillatorDecision({
+        strategy: "iterative_refinement",
+        promptText: "Analyze this architecture.",
+        pinnedModelDbId: 0,
+        config: config(),
+      }).skipReason,
+    ).toBe("pinned_model");
   });
 
   it("detects structural tag leakage and obvious corruption", () => {
     expect(
-      detectMeow("Final answer <|assistant|> leaked marker").detected,
+      detectAnomaly("Final answer <|assistant|> leaked marker").detected,
     ).toBe(true);
-    expect(detectMeow("[INST] hidden prompt artifact [/INST]").detected).toBe(
-      true,
-    );
-    expect(detectMeow(`ok ${"x".repeat(30)}`).reason).toBe(
+    expect(
+      detectAnomaly("[INST] hidden prompt artifact [/INST]").detected,
+    ).toBe(true);
+    expect(detectAnomaly(`ok ${"x".repeat(30)}`).reason).toBe(
       "repeated_character",
     );
-    expect(detectMeow("bad replacement chars ���").reason).toBe(
+    expect(detectAnomaly("bad replacement chars ���").reason).toBe(
       "replacement_character",
     );
   });
 
-  it("supports custom meow patterns", () => {
-      expect(
-        detectMeow("the router emitted ITERATIVE_REFINEMENT_BAD_TOKEN", [
-          "ITERATIVE_REFINEMENT_BAD_TOKEN",
-        ]).detected,
-      ).toBe(true);
-      expect(detectMeow("normal response", ["ITERATIVE_REFINEMENT_BAD_TOKEN"]).detected).toBe(
-        false,
-      );
-    });
+  it("supports custom anomaly patterns", () => {
+    expect(
+      detectAnomaly("the router emitted ITERATIVE_REFINEMENT_BAD_TOKEN", [
+        "ITERATIVE_REFINEMENT_BAD_TOKEN",
+      ]).detected,
+    ).toBe(true);
+    expect(
+      detectAnomaly("normal response", ["ITERATIVE_REFINEMENT_BAD_TOKEN"])
+        .detected,
+    ).toBe(false);
+  });
 
   it("flags extreme Unicode script fragmentation but not normal prose", () => {
     const fragmented =
@@ -676,11 +662,11 @@ describe("Iterative Refinement Shake routing helpers", () => {
       "The answer compares latency, reliability, and cost. Короткое пояснение рядом is acceptable.";
     const delayedFragmentation = `${"plain ".repeat(180)}${fragmented}`;
 
-    expect(detectMeow(fragmented).reason).toBe("script_fragmentation");
-    expect(detectMeow(normal).detected).toBe(false);
-    expect(detectMeow(delayedFragmentation).detected).toBe(false);
+    expect(detectAnomaly(fragmented).reason).toBe("script_fragmentation");
+    expect(detectAnomaly(normal).detected).toBe(false);
+    expect(detectAnomaly(delayedFragmentation).detected).toBe(false);
     expect(
-      detectMeow(
+      detectAnomaly(
         "Here is a TypeScript example: const total = 1 + 2; return total.",
       ).detected,
     ).toBe(false);
@@ -753,7 +739,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
       complete: number;
       failed_step: number | null;
       status: string;
-      meow_detected: number;
+      anomaly_detected: number;
     };
 
     expect(row).toMatchObject({
@@ -766,7 +752,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
       complete: 1,
       failed_step: null,
       status: "completed",
-      meow_detected: 0,
+      anomaly_detected: 0,
     });
 
     expect(collectOscillatorStats(60_000)).toMatchObject({
@@ -774,12 +760,12 @@ describe("Iterative Refinement Shake routing helpers", () => {
       successes: 1,
       failures: 0,
       avgLatencyMs: 1234,
-      meowCount: 0,
+      anomalyCount: 0,
       loadShedActive: false,
     });
   });
 
-  it("counts meow validation fallbacks as oscillator failures", async () => {
+  it("counts anomaly validation fallbacks as oscillator failures", async () => {
     const foundationId = addModel({
       platform: "alpha",
       modelId: "foundation",
@@ -801,7 +787,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
 
     const result = await executeOscillator({
       messages: [{ role: "user", content: "Analyze this routing issue." }],
-      sessionKey: "thread-meow",
+      sessionKey: "thread-anomaly",
       config: config(),
       candidates: [
         candidate({
@@ -823,7 +809,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
     });
 
     logOscillatorResult({
-      sessionKey: "thread-meow",
+      sessionKey: "thread-anomaly",
       result,
       totalLatencyMs: 900,
     });
@@ -833,7 +819,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
       successes: 0,
       failures: 1,
       avgLatencyMs: 0,
-      meowCount: 1,
+      anomalyCount: 1,
     });
   });
 
@@ -845,7 +831,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
         total_latency_ms,
         complete,
         status,
-        meow_detected,
+        anomaly_detected,
         created_at
       )
       VALUES
@@ -860,7 +846,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
       successes: 1,
       failures: 0,
       avgLatencyMs: 500,
-      meowCount: 0,
+      anomalyCount: 0,
     });
   });
 
@@ -882,22 +868,20 @@ describe("Iterative Refinement Shake routing helpers", () => {
     const chunks: OscillatorStreamChunk[] = [];
 
     // Simulates a streaming callModel that drives onChunk for each delta
-    const streamingCallModel = vi.fn(
-      async ({ step, onChunk }) => {
-        const steps: Record<string, string[]> = {
-          foundation: ["Hello", " world"],
-          injection: ["Check", " this."],
-          anchor: ["Final", " answer."],
-        };
-        const deltas = steps[step] ?? [];
-        let accumulated = "";
-        for (const delta of deltas) {
-          accumulated += delta;
-          if (onChunk) onChunk(delta, accumulated);
-        }
-        return accumulated;
-      },
-    );
+    const streamingCallModel = vi.fn(async ({ step, onChunk }) => {
+      const steps: Record<string, string[]> = {
+        foundation: ["Hello", " world"],
+        injection: ["Check", " this."],
+        anchor: ["Final", " answer."],
+      };
+      const deltas = steps[step] ?? [];
+      let accumulated = "";
+      for (const delta of deltas) {
+        accumulated += delta;
+        if (onChunk) onChunk(delta, accumulated);
+      }
+      return accumulated;
+    });
 
     const result = await executeOscillator({
       messages: [{ role: "user", content: "Analyze the tradeoffs." }],
@@ -913,9 +897,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(result.text).toBe("Final answer.");
 
     // Each step should emit delta chunks + a stepComplete chunk
-    const foundationChunks = chunks.filter(
-      (c) => c.step === "foundation",
-    );
+    const foundationChunks = chunks.filter((c) => c.step === "foundation");
     expect(foundationChunks.length).toBe(3); // 2 deltas + 1 stepComplete
     expect(foundationChunks[0]).toMatchObject({
       step: "foundation",
@@ -935,9 +917,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
       stepComplete: true,
     });
 
-    const injectionChunks = chunks.filter(
-      (c) => c.step === "injection",
-    );
+    const injectionChunks = chunks.filter((c) => c.step === "injection");
     expect(injectionChunks.length).toBe(3); // 2 deltas + 1 stepComplete
     // The stepComplete chunk uses the limitSentences result
     const injectionStepComplete = chunks.find(
@@ -945,9 +925,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
     );
     expect(injectionStepComplete).toBeDefined();
 
-    const anchorChunks = chunks.filter(
-      (c) => c.step === "anchor",
-    );
+    const anchorChunks = chunks.filter((c) => c.step === "anchor");
     expect(anchorChunks.length).toBe(4); // 2 deltas + 1 stepComplete + 1 final with result
     expect(anchorChunks[2].stepComplete).toBe(true);
     expect(anchorChunks[3].stepComplete).toBe(true);
@@ -977,19 +955,17 @@ describe("Iterative Refinement Shake routing helpers", () => {
     ];
     const chunks: OscillatorStreamChunk[] = [];
 
-    const failingStreamCallModel = vi.fn(
-      async ({ step, onChunk }) => {
-        if (step === "foundation") {
-          if (onChunk) onChunk("Base", "Base");
-          return "Base";
-        }
-        if (step === "injection") {
-          if (onChunk) onChunk("partial", "partial");
-          throw new Error("injection model crashed");
-        }
-        return "unused";
-      },
-    );
+    const failingStreamCallModel = vi.fn(async ({ step, onChunk }) => {
+      if (step === "foundation") {
+        if (onChunk) onChunk("Base", "Base");
+        return "Base";
+      }
+      if (step === "injection") {
+        if (onChunk) onChunk("partial", "partial");
+        throw new Error("injection model crashed");
+      }
+      return "unused";
+    });
 
     const result = await executeOscillator({
       messages: [{ role: "user", content: "Analyze." }],

@@ -16,7 +16,13 @@ import { getFeatureSetting } from "./feature-settings.js";
 // Rate-limit pre-checks removed — routing relies on heartbeat-based health
 // detection instead of predictive quota tracking. See PR: heartbeat per-key.
 // recordRequest/recordTokens still track usage for analytics purposes.
-import { getKeyHealth, isHeartbeatEnabled, isKeyHealthy } from "./heartbeat.js";
+import {
+  getKeyHealth,
+  getKeyStats,
+  isHeartbeatEnabled,
+  isKeyHealthy,
+  type KeyStats,
+} from "./heartbeat.js";
 import { isExhausted } from "./key-exhaustion.js";
 import {
   type TransportId,
@@ -162,37 +168,84 @@ function rotateArray<T>(arr: T[], offset: number): T[] {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Ping-weighted key shuffle
+// Speed-weighted key shuffle (token speed + ping latency + advisor signal)
 // When heartbeat is enabled, healthy keys are shuffled with probability
-// proportional to inverse latency so faster keys are picked more often,
-// while still giving slower keys a chance (Boltzmann exploration).
+// proportional to a combined score of token speed (primary), ping latency
+// (secondary), and bounded AI heartbeat advisor feedback.
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
- * Shuffle keys by perceived ping latency with weighted randomness.
- * Keys with lower latency get higher probability of appearing first.
+ * Shuffle keys by combined token speed and ping latency with weighted randomness.
+ * Keys with higher token speed get higher probability of appearing first.
+ * Token speed is weighted more heavily than ping latency.
  * Uses exponential noise / weight ordering (equivalent to sampling without
- * replacement from a categorical distribution with weights ∝ 1/(latency+baseline)).
+ * replacement from a categorical distribution with combined weights). Advisor
+ * feedback is applied as a bounded multiplier so it can steer between close
+ * keys without overwhelming measured throughput.
  */
-function pingWeightedShuffle(keys: KeyRow[], modelId: string): KeyRow[] {
+function speedWeightedShuffle(
+  keys: KeyRow[],
+  modelId: string,
+  platform: string,
+): KeyRow[] {
   if (keys.length <= 1) return keys;
 
-  // Baseline latency (ms) added to weight denominator so unknown/slow keys
-  // still get nonzero weight. Tuned to ~100ms — roughly network RTT floor.
+  // Baseline latency (ms) used to normalize ping onto a 0..1 score.
   const BASELINE_LATENCY_MS = 100;
+  // Token speed scale: at this tok/s, speed score is about 0.63 (1 - 1/e).
+  const TOK_PER_SEC_SCALE = 60;
+  const SPEED_WEIGHT = 0.7;
+  const PING_WEIGHT = 0.3;
 
   const scored = keys.map((key) => {
     const health = getKeyHealth(key.id, modelId);
-    const latency = Math.max(0, health?.lastPingLatencyMs ?? 2000); // unknown keys get 2s default, clamp to >= 0
-    const weight = 1 / (latency + BASELINE_LATENCY_MS);
-    // Exponential noise: -ln(U) / weight. Higher weight → smaller score → picked earlier.
+    const stats = getKeyStats(platform, key.id, modelId);
+
+    // Ping latency component (lower is better)
+    const latency = Math.max(0, health?.lastPingLatencyMs ?? 2000); // unknown keys get 2s default
+    const pingScore = BASELINE_LATENCY_MS / (latency + BASELINE_LATENCY_MS);
+
+    // Token speed component (higher is better)
+    // Use saturating curve: 1 - exp(-tokPerSec / SCALE)
+    const tokPerSec = stats?.tokPerSec ?? 0;
+    const speedScore =
+      tokPerSec > 0 ? 1 - Math.exp(-tokPerSec / TOK_PER_SEC_SCALE) : 0.1;
+
+    // Combined weight: token speed weighted more heavily than ping.
+    const baseWeight = SPEED_WEIGHT * speedScore + PING_WEIGHT * pingScore;
+    const combinedWeight = baseWeight * advisorMultiplier(stats);
+
+    // Exponential noise: -ln(U) / weight. Higher weight -> smaller score -> picked earlier.
     const noise = -Math.log(Math.random() || 1e-15);
-    const score = noise / weight;
+    const score = noise / combinedWeight;
     return { key, score };
   });
 
   scored.sort((a, b) => a.score - b.score);
   return scored.map((s) => s.key);
+}
+
+function advisorMultiplier(stats: KeyStats | undefined): number {
+  if (
+    !stats ||
+    !stats.advisorUpdatedAt ||
+    stats.advisorConfidence <= 0 ||
+    stats.advisorScore === 0
+  ) {
+    return 1;
+  }
+
+  const maxAgeMs = 24 * 60 * 60 * 1000;
+  const ageMs = Math.max(0, Date.now() - stats.advisorUpdatedAt);
+  const ageFactor = Math.max(0, 1 - ageMs / maxAgeMs);
+  if (ageFactor <= 0) return 1;
+
+  const confidence = Math.min(1, Math.max(0, stats.advisorConfidence / 9));
+  const direction = Math.min(1, Math.max(-1, stats.advisorScore / 9));
+  return Math.min(
+    1.5,
+    Math.max(0.5, 1 + direction * confidence * ageFactor * 0.5),
+  );
 }
 
 // ── Parallel request gating ──
@@ -1154,10 +1207,14 @@ export function routeRequest(
           idx = hashInt % keyOrder.length;
         } else {
           rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-          // When heartbeat is enabled, shuffle healthy keys by ping latency
-          // with weighted randomness so faster keys get more traffic
+          // When heartbeat is enabled, shuffle healthy keys by combined token
+          // speed, ping latency, and advisor feedback.
           const orderedHealthyKeys = heartbeatEnabled
-            ? pingWeightedShuffle(healthyKeys, provider.model_id)
+            ? speedWeightedShuffle(
+                healthyKeys,
+                provider.model_id,
+                provider.platform,
+              )
             : rotateArray(healthyKeys, rrIdx);
           keyOrder = [
             ...orderedHealthyKeys,
@@ -1428,10 +1485,10 @@ export function routeRequest(
       idx = hashInt % keyOrder.length;
     } else {
       rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-      // When heartbeat is enabled, shuffle healthy keys by ping latency
-      // with weighted randomness so faster keys get more traffic
+      // When heartbeat is enabled, shuffle healthy keys by combined token
+      // speed, ping latency, and advisor feedback.
       const orderedHealthyKeys = heartbeatEnabled
-        ? pingWeightedShuffle(healthyKeys, entry.model_id)
+        ? speedWeightedShuffle(healthyKeys, entry.model_id, entry.platform)
         : rotateArray(healthyKeys, rrIdx);
       keyOrder = [...orderedHealthyKeys, ...rotateArray(unhealthyKeys, rrIdx)];
       idx = 0; // start from beginning — healthy-first guaranteed by construction

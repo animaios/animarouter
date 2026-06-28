@@ -272,11 +272,11 @@ function publishIterativeRefinementOscillatorEvents(params: {
     });
   }
 
-  if (result.meow?.detected) {
+  if (result.anomaly?.detected) {
     publish({
-      type: "oscillator.meow_detected",
+      type: "oscillator.anomaly_detected",
       sessionKey,
-      pattern: result.meow.pattern ?? result.meow.reason ?? "unknown",
+      pattern: result.anomaly.pattern ?? result.anomaly.reason ?? "unknown",
       fellBackTo: foundationModel,
       at: Date.now(),
     });
@@ -287,7 +287,7 @@ function publishIterativeRefinementOscillatorEvents(params: {
       type: "oscillator.complete",
       sessionKey,
       totalLatencyMs,
-      meowDetected: !!result.meow?.detected,
+      anomalyDetected: !!result.anomaly?.detected,
       finalModel: foundationModel,
       at: Date.now(),
     });
@@ -1204,23 +1204,18 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
   const providerFailures = new Map<string, Set<number>>();
   const fastFired = new Set<string>();
 
+  const activeRoutingStrategy = getRoutingStrategy();
+  const iterativeRefinementPromptText =
+    promptTextForIterativeRefinement(messages);
   const iterativeRefinementConcurrentRequests = getProviderInFlightTotal();
   const iterativeRefinementDecision = getIterativeRefinementOscillatorDecision({
-    strategy: getRoutingStrategy(),
-    promptText: promptTextForIterativeRefinement(messages),
+    strategy: activeRoutingStrategy,
+    promptText: iterativeRefinementPromptText,
     pinnedModelDbId: isAutoRouted
       ? undefined
       : (strictPinnedModelDbId ?? preferredModel ?? 0),
     currentConcurrent: iterativeRefinementConcurrentRequests,
   });
-  if (iterativeRefinementDecision.skipReason === "load_shed") {
-    publish({
-      type: "oscillator.load_shed",
-      concurrentRequests: iterativeRefinementConcurrentRequests,
-      threshold: iterativeRefinementDecision.config.loadShedThreshold,
-      at: Date.now(),
-    });
-  }
   const shouldTryIterativeRefinementOscillator =
     iterativeRefinementDecision.mode === "oscillator" &&
     !stream &&
@@ -1232,6 +1227,42 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
     !hasImage &&
     !wantsTools &&
     !isPinned;
+  const iterativeRefinementRouteBlock =
+    iterativeRefinementDecision.skipReason ??
+    (hasImage ? "image_request" : wantsTools ? "tools_request" : undefined);
+  publish({
+    type: "oscillator.decision",
+    sessionKey: sessionKey || requestId,
+    strategy: activeRoutingStrategy,
+    mode: iterativeRefinementDecision.mode,
+    skipReason: iterativeRefinementRouteBlock,
+    stream: !!stream,
+    pinned: isPinned,
+    hasImage,
+    wantsTools,
+    loadShedActive: iterativeRefinementDecision.loadShedActive,
+    concurrentRequests: iterativeRefinementConcurrentRequests,
+    threshold: iterativeRefinementDecision.config.loadShedThreshold,
+    foundationSelection: String(
+      iterativeRefinementDecision.config.foundationSelection,
+    ),
+    injectionSelection: String(
+      iterativeRefinementDecision.config.injectionSelection,
+    ),
+    willRunOscillator: Boolean(
+      shouldTryIterativeRefinementOscillator ||
+        shouldTryIterativeRefinementStreaming,
+    ),
+    at: Date.now(),
+  });
+  if (iterativeRefinementDecision.skipReason === "load_shed") {
+    publish({
+      type: "oscillator.load_shed",
+      concurrentRequests: iterativeRefinementConcurrentRequests,
+      threshold: iterativeRefinementDecision.config.loadShedThreshold,
+      at: Date.now(),
+    });
+  }
 
   // ── Iterative Refinement streaming oscillator ────────────────────────────────────
   // Streams the anchor (final) step to the client in real-time via SSE.
@@ -1262,6 +1293,11 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
         res.write(`data: ${JSON.stringify(data)}\n\n`);
       } catch {
         /* socket gone */
+      }
+    };
+    const setHeaderIfOpen = (name: string, value: string) => {
+      if (!headerSent && !res.headersSent) {
+        res.setHeader(name, value);
       }
     };
 
@@ -1450,7 +1486,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
           type: "oscillator.stream_start",
           sessionKey: oscillatorSessionKey,
           step,
-          timestamp: now,
+          at: now,
         });
         stepStarted = true;
       }
@@ -1463,7 +1499,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
           step,
           delta,
           accumulated,
-          timestamp: now,
+          at: now,
         });
       }
 
@@ -1474,7 +1510,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
           sessionKey: oscillatorSessionKey,
           step,
           fullText: accumulated,
-          timestamp: now,
+          at: now,
         });
         stepStarted = false; // Reset for next step
       }
@@ -1486,7 +1522,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
             type: "oscillator.stream_complete",
             sessionKey: oscillatorSessionKey,
             result: final,
-            timestamp: now,
+            at: now,
           });
         } else {
           const failedStep = final.failedStep;
@@ -1506,7 +1542,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
             fallback:
               final.status === "foundation_fallback" ||
               final.status === "single_model_fallback",
-            timestamp: now,
+            at: now,
           });
         }
       }
@@ -1554,13 +1590,13 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
     const completionTokens = Math.ceil(finalText.length / 4);
     const finalModel = oscillator.foundation?.modelId ?? AUTO_MODEL_ID;
 
-    res.setHeader(
+    setHeaderIfOpen(
       "X-Routed-Via",
       oscillator.foundation
         ? `${oscillator.foundation.platform}/${oscillator.foundation.modelId}`
         : "iterative_refinement",
     );
-    res.setHeader("X-Iterative-Refinement-Status", oscillator.status);
+    setHeaderIfOpen("X-Iterative-Refinement-Status", oscillator.status);
 
     flushHeaders();
 
@@ -2874,6 +2910,40 @@ export function logRequest(
       requestedModel,
       reasoningTokens,
     );
+
+    // Also update key-level performance stats for successful requests.
+    if (
+      status === "success" &&
+      latencyMs > 0 &&
+      outputTokens + reasoningTokens > 0
+    ) {
+      const totalTokens = outputTokens + reasoningTokens;
+      const tokPerSec = (totalTokens * 1000) / latencyMs;
+
+      db.prepare(`
+        INSERT INTO key_stats_temp (platform, model_id, key_id, successes, failures, tokPerSec, avgTtfbMs, totalRequests)
+        VALUES (?, ?, ?, 1, 0, ?, ?, 1)
+        ON CONFLICT(platform, model_id, key_id) DO UPDATE SET
+          successes = successes + 1,
+          tokPerSec = (tokPerSec * successes + excluded.tokPerSec) / (successes + 1),
+          avgTtfbMs = CASE
+            WHEN excluded.avgTtfbMs IS NOT NULL AND avgTtfbMs IS NOT NULL
+            THEN (avgTtfbMs * successes + excluded.avgTtfbMs) / (successes + 1)
+            WHEN excluded.avgTtfbMs IS NOT NULL
+            THEN excluded.avgTtfbMs
+            ELSE avgTtfbMs
+          END,
+          totalRequests = totalRequests + 1
+      `).run(platform, modelId, keyId, tokPerSec, ttfbMs);
+    } else if (status !== "success") {
+      db.prepare(`
+        INSERT INTO key_stats_temp (platform, model_id, key_id, successes, failures, tokPerSec, avgTtfbMs, totalRequests)
+        VALUES (?, ?, ?, 0, 1, 0, NULL, 1)
+        ON CONFLICT(platform, model_id, key_id) DO UPDATE SET
+          failures = failures + 1,
+          totalRequests = totalRequests + 1
+      `).run(platform, modelId, keyId);
+    }
   } catch (e) {
     console.error("Failed to log request:", e);
   }

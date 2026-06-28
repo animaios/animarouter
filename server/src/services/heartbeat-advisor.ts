@@ -136,12 +136,33 @@ export function buildAdvisoryPayload(params: {
       .map((model) => {
         const health = params.keyHealth.get(`${key.id}:${model.model_id}`);
         const cooldown = cooldownByKeyModel.get(`${key.id}:${model.model_id}`);
+        const stats = getKeyStatsForAdvisor(
+          params.platform,
+          model.model_id,
+          key.id,
+        );
         return {
           model: model.model_id,
           healthy: health?.healthy ?? false,
           penalty: health?.penalty ?? 0,
           lastError: health?.lastError,
           lastPingLatencyMs: health?.lastPingLatencyMs,
+          stats: stats
+            ? {
+                tokPerSec: stats.tokPerSec,
+                avgTtfbMs: stats.avgTtfbMs,
+                successes: stats.successes,
+                failures: stats.failures,
+                totalRequests: stats.totalRequests,
+              }
+            : undefined,
+          advisor: stats
+            ? {
+                score: stats.advisorScore,
+                confidence: stats.advisorConfidence,
+                updatedAt: stats.advisorUpdatedAt,
+              }
+            : undefined,
           cooldownActive: !!cooldown,
           cooldownTier: cooldown?.tier,
         };
@@ -226,6 +247,28 @@ export function sanitizePayload(payload: AdvisoryPayload): AdvisoryPayload {
         lastError: model.lastError
           ? categorizeError(model.lastError)
           : undefined,
+        stats: model.stats
+          ? {
+              tokPerSec: round(Math.max(0, model.stats.tokPerSec), 2),
+              avgTtfbMs:
+                model.stats.avgTtfbMs === null
+                  ? null
+                  : Math.round(Math.max(0, model.stats.avgTtfbMs)),
+              successes: Math.max(0, Math.round(model.stats.successes)),
+              failures: Math.max(0, Math.round(model.stats.failures)),
+              totalRequests: Math.max(0, Math.round(model.stats.totalRequests)),
+            }
+          : undefined,
+        advisor: model.advisor
+          ? {
+              score: round(clamp(model.advisor.score, -9, 9), 2),
+              confidence: clampInt(model.advisor.confidence, 0, 9),
+              updatedAt:
+                model.advisor.updatedAt === null
+                  ? null
+                  : Math.max(0, Math.round(model.advisor.updatedAt)),
+            }
+          : undefined,
       })),
     })),
     models: payload.models.map((model) => ({
@@ -307,7 +350,7 @@ export function buildAdvisoryMessages(
       {
         role: "system",
         content:
-          'You are a routing advisor. Return compact JSON only: {"confidence":0-9,"selfScore":-9..9,"cooldownHint":0|1|2,"recheckSooner":boolean,"oscillatorHint":"enable|disable|no_opinion","injectionModel":"provider/model|provider:model|intelligence_rank:N","injectionBrevity":"shorter|longer|default"}. Use oscillatorHint for Iterative Refinement oscillator control, injectionModel only for a better divergent injection model, and injectionBrevity only when the two-sentence injection should change. No prose.',
+          "You are a routing advisor. Return one compact key:value line only, no JSON/prose: c:<0-9> self:<-9..9> cooldown:<0|1|2> recheck:<true|false> o:<e|d|n> i:<provider/model|provider:model|intelligence_rank:N> b:<s|l|d>. self scores the pinged key/model for routing. o means oscillatorHint enable/disable/no_opinion. i and b are optional; use them only for a better divergent injection model or injection brevity change.",
       },
       {
         role: "user",
@@ -352,6 +395,13 @@ export function applyAdvice(params: ApplyAdviceParams): AdviceResult[] {
       applied: advice.selfScore > 0 ? "score_boost" : "score_penalty",
       modelDbId: params.modelDbId,
       magnitude: round(nextBoost - currentBoost, 3),
+    });
+
+    recordKeyAdvisorSignal(params, advice);
+    results.push({
+      applied: advice.selfScore > 0 ? "key_score_boost" : "key_score_penalty",
+      modelDbId: params.modelDbId,
+      magnitude: advice.selfScore,
     });
   }
 
@@ -450,6 +500,57 @@ export function applyAdvice(params: ApplyAdviceParams): AdviceResult[] {
     });
   }
   return results;
+}
+
+interface AdvisorKeyStatsRow {
+  tokPerSec: number;
+  avgTtfbMs: number | null;
+  successes: number;
+  failures: number;
+  totalRequests: number;
+  advisorScore: number;
+  advisorConfidence: number;
+  advisorUpdatedAt: number | null;
+}
+
+function getKeyStatsForAdvisor(
+  platform: string,
+  modelId: string,
+  keyId: number,
+): AdvisorKeyStatsRow | undefined {
+  return getDb()
+    .prepare(
+      `SELECT tokPerSec, avgTtfbMs, successes, failures, totalRequests,
+              advisorScore, advisorConfidence, advisorUpdatedAt
+       FROM key_stats_temp
+       WHERE platform = ? AND model_id = ? AND key_id = ?`,
+    )
+    .get(platform, modelId, keyId) as AdvisorKeyStatsRow | undefined;
+}
+
+function recordKeyAdvisorSignal(
+  params: ApplyAdviceParams,
+  advice: RoutingAdvice,
+): void {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO key_stats_temp (
+      platform, model_id, key_id, successes, failures, tokPerSec, avgTtfbMs,
+      totalRequests, advisorScore, advisorConfidence, advisorUpdatedAt
+    )
+    VALUES (?, ?, ?, 0, 0, 0, NULL, 0, ?, ?, ?)
+    ON CONFLICT(platform, model_id, key_id) DO UPDATE SET
+      advisorScore = excluded.advisorScore,
+      advisorConfidence = excluded.advisorConfidence,
+      advisorUpdatedAt = excluded.advisorUpdatedAt
+  `).run(
+    params.platform,
+    params.modelId,
+    params.keyId,
+    clampInt(advice.selfScore, -9, 9),
+    clampInt(advice.confidence, 0, 9),
+    Date.now(),
+  );
 }
 
 function resolveAdviceModelDbId(modelRef: string): number | undefined {
@@ -604,36 +705,74 @@ function parseJsonAdvice(text: string): Partial<RoutingAdvice> | null {
 
 function parseCompactAdvice(text: string): Partial<RoutingAdvice> | null {
   const out: Partial<RoutingAdvice> = {};
-  const fields = text
-    .replace(/[{},]/g, " ")
-    .split(/\s+/)
-    .map((field) => field.trim())
-    .filter(Boolean);
 
-  for (const field of fields) {
-    const match = field.match(/^([a-zA-Z_]+)\s*[:=]\s*(.+)$/);
-    if (!match) continue;
-    const key = match[1].toLowerCase();
-    const value = cleanCompactAdviceValue(match[2]);
-    if (["c", "conf", "confidence"].includes(key))
-      out.confidence = Number(value);
-    if (["self", "selfscore", "self_score"].includes(key))
-      out.selfScore = Number(value);
-    if (["cooldown", "cooldownhint", "cooldown_hint"].includes(key))
-      out.cooldownHint = Number(value);
-    if (["recheck", "rechecksooner", "recheck_sooner"].includes(key)) {
-      out.recheckSooner = /^(1|true|yes)$/i.test(value);
-    }
-    if (key === "alt") out.alt = value.slice(0, 80);
-    if (["o", "oscillator", "oscillatorhint", "oscillator_hint"].includes(key))
-      out.oscillatorHint = parseCompactOscillatorHint(value);
-    if (["i", "injection", "injectionmodel", "injection_model"].includes(key))
-      out.injectionModel = value.slice(0, 80);
-    if (["b", "brevity", "injectionbrevity", "injection_brevity"].includes(key))
-      out.injectionBrevity = parseCompactInjectionBrevity(value);
+  const confidence = readCompactField(text, ["c", "conf", "confidence"]);
+  if (confidence !== undefined) out.confidence = Number(confidence);
+
+  const selfScore = readCompactField(text, ["self", "selfscore", "self_score"]);
+  if (selfScore !== undefined) out.selfScore = Number(selfScore);
+
+  const cooldownHint = readCompactField(text, [
+    "cooldown",
+    "cooldownhint",
+    "cooldown_hint",
+  ]);
+  if (cooldownHint !== undefined) out.cooldownHint = Number(cooldownHint);
+
+  const recheckSooner = readCompactField(text, [
+    "recheck",
+    "rechecksooner",
+    "recheck_sooner",
+  ]);
+  if (recheckSooner !== undefined) {
+    out.recheckSooner = /^(1|true|yes)$/i.test(recheckSooner);
+  }
+
+  const alt = readCompactField(text, ["alt"]);
+  if (alt !== undefined) out.alt = alt.slice(0, 80);
+
+  const oscillatorHint = readCompactField(text, [
+    "o",
+    "oscillator",
+    "oscillatorhint",
+    "oscillator_hint",
+  ]);
+  if (oscillatorHint !== undefined) {
+    out.oscillatorHint = parseCompactOscillatorHint(oscillatorHint);
+  }
+
+  const injectionModel = readCompactField(text, [
+    "i",
+    "injection",
+    "injectionmodel",
+    "injection_model",
+  ]);
+  if (injectionModel !== undefined) {
+    out.injectionModel = injectionModel.slice(0, 80);
+  }
+
+  const injectionBrevity = readCompactField(text, [
+    "b",
+    "brevity",
+    "injectionbrevity",
+    "injection_brevity",
+  ]);
+  if (injectionBrevity !== undefined) {
+    out.injectionBrevity = parseCompactInjectionBrevity(injectionBrevity);
   }
 
   return Object.keys(out).length > 0 ? out : null;
+}
+
+function readCompactField(text: string, aliases: string[]): string | undefined {
+  const escapedAliases = aliases.map(escapeRegExp).join("|");
+  const pattern = new RegExp(
+    `(?:^|[\\s,{])["']?(?:${escapedAliases})["']?\\s*[:=]\\s*(?:"([^"]*)"|'([^']*)'|([^\\s,}]+))`,
+    "i",
+  );
+  const match = text.match(pattern);
+  if (!match) return undefined;
+  return cleanCompactAdviceValue(match[1] ?? match[2] ?? match[3] ?? "");
 }
 
 function parseCompactOscillatorHint(
@@ -671,6 +810,10 @@ function cleanCompactAdviceValue(value: string): string {
     return trimmed.slice(1, -1).trim();
   }
   return trimmed.replace(/^['"]|['"]$/g, "").trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeAdvice(input: Partial<RoutingAdvice>): RoutingAdvice {

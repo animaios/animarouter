@@ -26,7 +26,7 @@ The heartbeat advisor runs passively during health checks. The Iterative Refinem
 │  ★ New: Iterative Refinement oscillator metrics feed BACK into payload:        │
     - oscillator success/failure rates                        │
     - per-model-pair latency & coherence scores              │
-    - meow detection counts                                   │
+    - output anomaly detection counts                         │
 └──────────────────┬──────────────────────────────────────────┘
                    │ advisory adjustments
                    ▼
@@ -42,7 +42,7 @@ The heartbeat advisor runs passively during health checks. The Iterative Refinem
 │       ↓ Context Bridge (sanitize + handoff)                 │
 │    3. [Anchor] Foundation model → final synthesis           │
 │       ↓                                                      │
-│    meow validation → accept or fallback                     │
+│    anomaly validation → accept or fallback                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -162,14 +162,14 @@ interface AdvisoryPayload {
   oscillator?: {
     /** How many oscillator-mode requests were attempted in this scoring window */
     attempts: number;
-    /** How many completed all 3 steps without timeout or meow validation failure */
+    /** How many completed all 3 steps without timeout or anomaly validation failure */
     successes: number;
-    /** How many were terminated early (timeout, meow detected, load-shed) */
+    /** How many were terminated early (timeout, anomaly detected, load-shed) */
     failures: number;
     /** Average end-to-end latency for full 3-step oscillator (ms) */
     avgLatencyMs: number;
-    /** Meow detection count — responses flagged as incoherent/corrupted */
-    meowCount: number;
+    /** Output anomaly detection count — responses flagged as incoherent/corrupted */
+    anomalyCount: number;
     /** Whether the oscillator is currently load-shed disabled */
     loadShedActive: boolean;
   };
@@ -251,8 +251,8 @@ interface OscillatorConfig {
   /** Maximum sentence count for the injection response */
   injectionMaxSentences: number;  // default: 2
 
-  /** Regex or heuristic for detecting meowing (gibberish, structural tag leakage, etc.) */
-  meowPatterns: string[];
+  /** Regex or heuristic for detecting output anomalies (gibberish, structural tag leakage, etc.) */
+  anomalyPatterns: string[];
 
   /** Concurrent request threshold above which the oscillator is load-shed disabled */
   loadShedThreshold: number;  // default: 21
@@ -609,8 +609,8 @@ interface OscillatorResult {
   failedStep?: 1 | 2 | 3;
   /** End-to-end latency */
   latencyMs: number;
-  /** Meow detection result */
-  meowDetected: boolean;
+  /** Output anomaly detection result */
+  anomalyDetected: boolean;
   /** Which model produced the final response */
   finalModelDbId: number;
   /** Context bridge stats */
@@ -653,7 +653,7 @@ async function executeOscillator(params: {
     // All foundation candidates failed → fall back to normal single-model path
     return {
       text: '', complete: false, failedStep: 1,
-      latencyMs: Date.now() - start, meowDetected: false,
+      latencyMs: Date.now() - start, anomalyDetected: false,
       finalModelDbId: 0, bridgeStats,
     };
   }
@@ -701,7 +701,7 @@ async function executeOscillator(params: {
     // Step 2 fails → return Foundation's response as-is (graceful degradation)
     return {
       text: foundationText, complete: false, failedStep: 2,
-      latencyMs: Date.now() - start, meowDetected: false,
+      latencyMs: Date.now() - start, anomalyDetected: false,
       finalModelDbId: foundationModelDbId, bridgeStats,
     };
   }
@@ -745,21 +745,21 @@ async function executeOscillator(params: {
     // Step 3 fails → return Foundation's response as-is
     return {
       text: foundationText, complete: false, failedStep: 3,
-      latencyMs: Date.now() - start, meowDetected: false,
+      latencyMs: Date.now() - start, anomalyDetected: false,
       finalModelDbId: foundationModelDbId, bridgeStats,
     };
   }
 
-  // ─── Stability & Anti-Meow Validation ──────────────────────
-  const meowDetected = detectMeow(anchorText, config.meowPatterns);
+  // ─── Stability & Output Anomaly Validation ─────────────────
+  const anomaly = detectAnomaly(anchorText, config.anomalyPatterns);
   
-  if (meowDetected) {
+  if (anomaly.detected) {
     // Return Foundation's clean response instead of the corrupted synthesis
     return {
       text: foundationText,    // ← fall back to pre-oscillation output
       complete: true,          // technically complete (we have a valid response)
       latencyMs: Date.now() - start,
-      meowDetected: true,
+      anomalyDetected: true,
       finalModelDbId: foundationModelDbId,
       bridgeStats,
     };
@@ -769,34 +769,40 @@ async function executeOscillator(params: {
     text: anchorText,
     complete: true,
     latencyMs: Date.now() - start,
-    meowDetected: false,
+    anomalyDetected: false,
     finalModelDbId: foundationModelDbId,
     bridgeStats,
   };
 }
 ```
 
-### 3.4 Meow Detection ("Anti-Meow" Validation)
+### 3.4 Output Anomaly Detection
 
 Detects context corruption — when the oscillator produces gibberish or structural tag leakage instead of coherent text.
 
 ```typescript
-function detectMeow(text: string, patterns: string[]): boolean {
+function detectAnomaly(text: string, patterns: string[]): AnomalyDetectionResult {
   // 1. Check configured patterns
   for (const pattern of patterns) {
-    if (new RegExp(pattern).test(text)) return true;
+    if (new RegExp(pattern).test(text)) {
+      return { detected: true, reason: 'custom_pattern', pattern };
+    }
   }
 
   // 2. Built-in heuristics (always active)
   
   // 2a. Raw structural tag leakage: any <|...|> tokens survived the bridge
-  if (/<\|[a-z_]+\|>/i.test(text)) return true;
+  if (/<\|[a-z_]+\|>/i.test(text)) {
+    return { detected: true, reason: 'structural_tag', pattern: '<|...|>' };
+  }
 
   // 2b. Sudden linguistic style shift mid-response
   //     e.g., coherent English → random Chinese characters → English
   //     We detect this via Unicode script fragmentation
   const scriptFragments = detectScriptFragmentation(text);
-  if (scriptFragments > 3) return true;  // more than 3 script switches = suspicious
+  if (scriptFragments > 3) {
+    return { detected: true, reason: 'script_fragmentation' };
+  }
 
   // 2c. Model-specific system markers in output
   const SYSTEM_MARKERS = [
@@ -805,13 +811,17 @@ function detectMeow(text: string, patterns: string[]): boolean {
     'AnimaRouter context handoff:',  // ← shouldn't appear in output!
   ];
   for (const marker of SYSTEM_MARKERS) {
-    if (text.includes(marker)) return true;
+    if (text.includes(marker)) {
+      return { detected: true, reason: 'structural_tag', pattern: marker };
+    }
   }
 
-  // 2d. Repeated character sequences (classic "meowing" pattern)
-  if (/(.)\1{10,}/.test(text)) return true;  // 11+ repeated chars
+  // 2d. Repeated character sequences (classic repeated-output anomaly)
+  if (/(.)\1{10,}/.test(text)) {
+    return { detected: true, reason: 'repeated_character' };
+  }
 
-  return false;
+  return { detected: false };
 }
 
 /** Count the number of Unicode script transitions in a string */
@@ -855,7 +865,7 @@ if (oscillatorEligible) {
   logOscillatorResult(result);
   
   if (result.text) {
-    // Return synthesized text, selected-foundation fallback, or meow-safe fallback.
+    // Return synthesized text, selected-foundation fallback, or anomaly-safe fallback.
     return sendResponse(result.text, result.finalModelDbId);
   }
   // If all Step 1 foundation candidates failed before any usable output,
@@ -1051,7 +1061,7 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 | Step 1 cost | Normal routing cost (same as today) |
 | Step 2 cost | Low: small output (≤128 tokens), high temp |
 | Step 3 cost | Medium: full-size output + prior context |
-| Meow fallback | Returns Step 1 output → no wasted re-request |
+| Anomaly fallback | Returns Step 1 output → no wasted re-request |
 | Load shedding | Disabled under high load → zero extra cost during peaks |
 | **Net cost increase** | **~2.3× for ~15% of traffic → ~1.3× overall** |
 
@@ -1067,7 +1077,7 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 - Cooldown escalation levels
 - Routing strategy name
 - Oscillator attempt/success/failure counts
-- Meow detection counts
+- Output anomaly detection counts
 
 ### What the payload DOES NOT include
 - Raw API keys or auth tokens
@@ -1078,7 +1088,7 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 ### Oscillator-Specific Privacy
 - The `[Thought Context: ...]` bridge message contains **only the prior model's response text** — never the user's original prompt (that's already in the message history).
 - Injection model receives sanitized, stripped text — no provider-specific tokens or structural artifacts.
-- Meow detection logs only a boolean flag and matched pattern name, never the corrupted text.
+- Output anomaly detection logs only a boolean flag and matched pattern name, never the corrupted text.
 
 ### Sanitization Rules (unchanged from v1, plus cross-provider)
 1. `lastError` fields: truncated to 80 chars, stripped of URL/path/UUID
@@ -1103,10 +1113,10 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 ```typescript
 | { type: 'oscillator.started'; sessionKey: string; foundationModel: string; injectionModel: string; at: number }
 | { type: 'oscillator.step_complete'; sessionKey: string; step: 1 | 2 | 3; model: string; latencyMs: number; bridgeType: string; strippedArtifacts: number; at: number }
-| { type: 'oscillator.complete'; sessionKey: string; totalLatencyMs: number; meowDetected: boolean; finalModel: string; at: number }
+| { type: 'oscillator.complete'; sessionKey: string; totalLatencyMs: number; anomalyDetected: boolean; finalModel: string; at: number }
 | { type: 'oscillator.failed'; sessionKey: string; failedStep: 1 | 2 | 3; error: string; fellBackTo: string; at: number }
 | { type: 'oscillator.load_shed'; concurrentRequests: number; threshold: number; at: number }
-| { type: 'oscillator.meow_detected'; sessionKey: string; pattern: string; fellBackTo: string; at: number }
+| { type: 'oscillator.anomaly_detected'; sessionKey: string; pattern: string; fellBackTo: string; at: number }
 ```
 
 ---
@@ -1121,8 +1131,8 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 | `applyAdvice` | Score boost/penalty caps, cooldown factors, Iterative Refinement strategy / oscillator controls |
 | **`sanitizeForCrossProvider`** | **Each provider's token patterns, structural block removal, generic `<\|...\|>` fallback** |
 | **`buildContextBridge`** | **Standard handoff path, oscillator handoff with [Thought Context], no artifact leakage** |
-| `detectMeow` | Structural tag leakage, script fragmentation, repeated chars, false positives on normal text |
-| **`executeOscillator`** | **Happy path (3 steps complete), Step 1 candidate failure → next candidate, all Step 1 candidates fail → normal path, Step 2 timeout → selected-foundation fallback, Step 3 meow → selected-foundation fallback** |
+| `detectAnomaly` | Structural tag leakage, script fragmentation, repeated chars, false positives on normal text |
+| **`executeOscillator`** | **Happy path (3 steps complete), Step 1 candidate failure → next candidate, all Step 1 candidates fail → normal path, Step 2 timeout → selected-foundation fallback, Step 3 anomaly → selected-foundation fallback** |
 | **Load shedding** | **Threshold enforcement, automatic re-enable below threshold** |
 | Integration | Advisor enabled → parsed → applied; Iterative Refinement strategy active → eligible request enters 3-step oscillator → events published |
 
@@ -1134,11 +1144,11 @@ The oscillator triples the token cost for eligible requests (3 API calls instead
 |---|---|---|---|
 | Model returns garbage / ignores advisory format | High (early) | Low | Strict parsing + `c:0` sentinel = no-op |
 | Advisory creates feedback loops | Medium | Medium | Ephemeral per-cycle; past adjustments absorbed into stats |
-| **Oscillator Step 2 (injection) amplifies bias instead of diversifying** | Medium | Medium | Higher temperature (0.7) + strict 2-sentence limit; meow validation catches incoherence |
-| **Cross-provider token leakage ("meowing")** | Medium | High | `sanitizeForCrossProvider` strips all known provider tokens; generic `<\|...\|>` regex catches unknowns; meow validation as safety net |
+| **Oscillator Step 2 (injection) amplifies bias instead of diversifying** | Medium | Medium | Higher temperature (0.7) + strict 2-sentence limit; anomaly validation catches incoherence |
+| **Cross-provider token leakage (output anomaly)** | Medium | High | `sanitizeForCrossProvider` strips all known provider tokens; generic `<\|...\|>` regex catches unknowns; anomaly validation as safety net |
 | **Cascading latency timeouts under load** | Medium | High | Load-shed threshold bypasses oscillator; per-step timeout; Step 1 tries the next foundation candidate, Step 2/3 failures fall back to the selected foundation response |
 | **Oscillator cost exceeds value** | Low | Medium | Only eligible for complex reasoning; load-shed disables under pressure; heartbeat advisor can suggest disabling if metrics are poor |
-| **`parseTokenDialect` doesn't cover all provider dialects** | Low | Low | Generic `<\|...\|>` regex as second pass; meow detection catches remaining artifacts |
+| **`parseTokenDialect` doesn't cover all provider dialects** | Low | Low | Generic `<\|...\|>` regex as second pass; output anomaly detection catches remaining artifacts |
 | **Injection model sees too much context → hallucination** | Low | Medium | Only `[Thought Context]` is passed (sanitized, not raw); 2-sentence limit; explicit prompt to provide *alternative*, not *continuation* |
 
 ---
@@ -1161,7 +1171,7 @@ CREATE TABLE IF NOT EXISTS oscillator_results (
   total_latency_ms INTEGER NOT NULL,
   complete INTEGER NOT NULL DEFAULT 0,      -- 1 = all 3 steps succeeded
   failed_step INTEGER,                       -- 1, 2, or 3 if failed
-  meow_detected INTEGER NOT NULL DEFAULT 0, -- 1 = meow triggered fallback
+  anomaly_detected INTEGER NOT NULL DEFAULT 0, -- 1 = anomaly validation triggered fallback
   stripped_artifacts INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -1179,7 +1189,7 @@ function collectOscillatorStats(windowMs: number): AdvisoryPayload['oscillator']
       SUM(CASE WHEN complete = 1 THEN 1 ELSE 0 END) AS successes,
       SUM(CASE WHEN complete = 0 THEN 1 ELSE 0 END) AS failures,
       AVG(CASE WHEN complete = 1 THEN total_latency_ms ELSE NULL END) AS avg_latency_ms,
-      SUM(meow_detected) AS meow_count
+      SUM(anomaly_detected) AS anomaly_count
     FROM oscillator_results
     WHERE created_at >= ?
   `).get(since) as any;
@@ -1189,7 +1199,7 @@ function collectOscillatorStats(windowMs: number): AdvisoryPayload['oscillator']
     successes: row?.successes ?? 0,
     failures: row?.failures ?? 0,
     avgLatencyMs: row?.avg_latency_ms ?? 0,
-    meowCount: row?.meow_count ?? 0,
+    anomalyCount: row?.anomaly_count ?? 0,
     loadShedActive: getCurrentConcurrent() >= getOscillatorLoadShedThreshold(),
   };
 }
