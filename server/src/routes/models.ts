@@ -183,7 +183,7 @@ modelsRouter.post('/groups/aliases', (req: Request, res: Response) => {
 // DELETE /api/models/groups/aliases/:alias — delete an alias
 modelsRouter.delete('/groups/aliases/:alias', (req: Request, res: Response) => {
   const db = getDb();
-  const result = db.prepare('DELETE FROM model_group_aliases WHERE alias = ?').run(normalizeGroupAlias(req.params.alias));
+  const result = db.prepare('DELETE FROM model_group_aliases WHERE alias = ?').run(normalizeGroupAlias(req.params.alias as string));
   if (result.changes === 0) {
     res.status(404).json({ error: 'Alias not found' });
     return;
