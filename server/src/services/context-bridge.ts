@@ -12,6 +12,34 @@ export interface BridgeSanitizer {
   systemMarkerMap: Record<string, string>;
 }
 
+/**
+ * Streaming-compatible context bridge interface.
+ * For streaming: accumulate chunks, emit bridge when step completes.
+ * For non-streaming: use buildContextBridge() directly.
+ */
+export interface StreamingContextBridge {
+  /**
+   * Called when foundation step completes (full text accumulated).
+   * Returns the injection prompt with sanitized foundation context.
+   */
+  onFoundationComplete(fullText: string): string;
+
+  /**
+   * Called when injection step completes (full text accumulated).
+   * Returns the anchor prompt with sanitized injection context.
+   */
+  onInjectionComplete(fullText: string): string;
+
+  /**
+   * Non-streaming variant: builds the complete bridge in one call.
+   * Preserves existing API for non-streaming use cases.
+   */
+  buildContextBridge(
+    previousResponse: string,
+    mode: "injection" | "anchor",
+  ): string;
+}
+
 export interface ContextBridgeResult {
   messages: ChatMessage[];
   strippedArtifacts: number;
@@ -144,10 +172,9 @@ function contentStartsWith(message: ChatMessage, prefix: string): boolean {
 }
 
 /**
- * Sanitize a model response before another provider sees it.
- * The output is plain text suitable for wrapping in a `[Thought Context: ...]` block.
+ * Core sanitization logic shared by both streaming and non-streaming paths.
  */
-export function sanitizeForCrossProvider(
+function sanitizeCore(
   responseText: string | null | undefined,
   sourceProvider?: string | null,
 ): { cleanText: string; strippedCount: number } {
@@ -196,6 +223,38 @@ export function sanitizeForCrossProvider(
     cleanText: safeSlice(normalizeWhitespace(clean), MAX_THOUGHT_CONTEXT_CHARS),
     strippedCount,
   };
+}
+
+/**
+ * Pure sanitization function for bridge context.
+ * Exposed for testing — runs on full accumulated text at step boundary.
+ * No partial sanitization — waits for step complete.
+ */
+export function sanitizeForBridge(
+  text: string,
+  sourceProvider?: string | null,
+): { cleanText: string; strippedCount: number } {
+  return sanitizeCore(text, sourceProvider);
+}
+
+/**
+ * Sanitize a model response before another provider sees it.
+ * The output is plain text suitable for wrapping in a `[Thought Context: ...]` block.
+ * Delegates to sanitizeCore internally.
+ */
+export function sanitizeForCrossProvider(
+  responseText: string | null | undefined,
+  sourceProvider?: string | null,
+): { cleanText: string; strippedCount: number } {
+  return sanitizeCore(responseText, sourceProvider);
+}
+
+/**
+ * Build a thought-context injection string from sanitized text.
+ * Shared by both streaming and non-streaming paths.
+ */
+function buildThoughtContext(cleanText: string): string {
+  return `[Thought Context: ${cleanText}]`;
 }
 
 export function buildContextBridge(params: {
@@ -264,7 +323,7 @@ export function buildContextBridge(params: {
     };
   }
 
-  const thoughtContent = `[Thought Context: ${cleanText}]`;
+  const thoughtContent = buildThoughtContext(cleanText);
   const thoughtMessage: ChatMessage = {
     role: "system",
     content: thoughtContent,
@@ -286,5 +345,80 @@ export function buildContextBridge(params: {
     injectedTokens,
     bridgeType: "oscillator_handoff",
     cleanText,
+  };
+}
+
+
+/**
+ * Creates a streaming-compatible context bridge.
+ * The bridge is a step-boundary transform, not a streaming transform.
+ * Streaming executor accumulates → calls bridge at step end → passes bridge output to next step.
+ *
+ * Usage:
+ *   const bridge = createStreamingContextBridge({ ... });
+ *
+ *   // Streaming flow:
+ *   // 1. Accumulate foundation chunks into full text
+ *   // 2. On foundation complete:
+ *   const injectionPrompt = bridge.onFoundationComplete(foundationFullText);
+ *   // 3. Accumulate injection chunks into full text
+ *   // 4. On injection complete:
+ *   const anchorPrompt = bridge.onInjectionComplete(injectionFullText);
+ *
+ *   // Non-streaming fallback:
+ *   const prompt = bridge.buildContextBridge(previousResponse, 'injection');
+ */
+export function createStreamingContextBridge(params: {
+  foundationProvider: string;
+  injectionProvider: string;
+}): StreamingContextBridge {
+  const { foundationProvider, injectionProvider } = params;
+
+  /**
+   * Called when foundation step completes (full text accumulated).
+   * Sanitizes the full foundation text and returns the injection prompt
+   * wrapping it in [Thought Context: ...].
+   */
+  function onFoundationComplete(fullText: string): string {
+    const { cleanText } = sanitizeForBridge(fullText, foundationProvider);
+    if (!cleanText) {
+      return "";
+    }
+    return buildThoughtContext(cleanText);
+  }
+
+  /**
+   * Called when injection step completes (full text accumulated).
+   * Sanitizes the full injection text and returns the anchor prompt
+   * wrapping it in [Thought Context: ...].
+   */
+  function onInjectionComplete(fullText: string): string {
+    const { cleanText } = sanitizeForBridge(fullText, injectionProvider);
+    if (!cleanText) {
+      return "";
+    }
+    return buildThoughtContext(cleanText);
+  }
+
+  /**
+   * Non-streaming variant: builds the complete bridge in one call.
+   * Preserves existing API for non-streaming use cases.
+   */
+  function buildContextBridgeNonStreaming(
+    previousResponse: string,
+    mode: "injection" | "anchor",
+  ): string {
+    const provider = mode === "injection" ? foundationProvider : injectionProvider;
+    const { cleanText } = sanitizeForBridge(previousResponse, provider);
+    if (!cleanText) {
+      return "";
+    }
+    return buildThoughtContext(cleanText);
+  }
+
+  return {
+    onFoundationComplete,
+    onInjectionComplete,
+    buildContextBridge: buildContextBridgeNonStreaming,
   };
 }

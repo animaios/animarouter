@@ -9,6 +9,7 @@
  */
 import type { Response } from "express";
 import { LogThrottle } from "../lib/log-throttle.js";
+import type { ExecuteOscillatorResult } from "../services/rabbit-shake.js";
 
 /** Base event shape without dedup metadata — what publishers construct. */
 export type LiveEventBase =
@@ -218,7 +219,13 @@ export type LiveEventBase =
       penalty: number;
       at: number;
     }
-  | { type: "stream.chunk"; id: string; text: string; at: number };
+  | { type: "stream.chunk"; id: string; text: string; at: number }
+    // Rabbit Oscillator streaming events
+    | { type: "oscillator.stream_start"; sessionKey: string; step: "foundation" | "injection" | "anchor"; timestamp: number }
+    | { type: "oscillator.stream_delta"; sessionKey: string; step: "foundation" | "injection" | "anchor"; delta: string; accumulated: string; timestamp: number }
+    | { type: "oscillator.stream_step_complete"; sessionKey: string; step: "foundation" | "injection" | "anchor"; fullText: string; timestamp: number }
+    | { type: "oscillator.stream_complete"; sessionKey: string; result: ExecuteOscillatorResult; timestamp: number }
+    | { type: "oscillator.stream_error"; sessionKey: string; step: "foundation" | "injection" | "anchor"; error: string; fallback: boolean; timestamp: number };
 
 /** Live event as delivered to SSE subscribers (may carry dedup metadata). */
 export type LiveEvent = LiveEventBase & { _suppressed?: number };

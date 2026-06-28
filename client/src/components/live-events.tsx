@@ -148,6 +148,56 @@ interface OscillatorMeowDetectedEvent extends TimestampOnly {
   pattern: string;
   fellBackTo: string;
 }
+interface ExecuteOscillatorResult {
+  status: "completed" | "foundation_fallback" | "single_model_fallback";
+  text?: string;
+  foundation?: RabbitCandidate;
+  injection?: RabbitCandidate;
+  foundationText?: string;
+  injectionText?: string;
+  anchorText?: string;
+  failedStep?: string;
+  foundationAttempts: number;
+  bridges: Record<string, unknown>;
+  error?: string;
+  meow?: { detected: boolean; pattern?: string; reason?: string };
+}
+
+interface RabbitCandidate {
+  platform: string;
+  modelId: string;
+}
+
+interface OscillatorStreamStartEvent extends TimestampOnly {
+  type: "oscillator.stream_start";
+  sessionKey: string;
+  step: "foundation" | "injection" | "anchor";
+}
+interface OscillatorStreamDeltaEvent extends TimestampOnly {
+  type: "oscillator.stream_delta";
+  sessionKey: string;
+  step: "foundation" | "injection" | "anchor";
+  delta: string;
+  accumulated: string;
+}
+interface OscillatorStreamStepCompleteEvent extends TimestampOnly {
+  type: "oscillator.stream_step_complete";
+  sessionKey: string;
+  step: "foundation" | "injection" | "anchor";
+  fullText: string;
+}
+interface OscillatorStreamCompleteEvent extends TimestampOnly {
+  type: "oscillator.stream_complete";
+  sessionKey: string;
+  result: ExecuteOscillatorResult;
+}
+interface OscillatorStreamErrorEvent extends TimestampOnly {
+  type: "oscillator.stream_error";
+  sessionKey: string;
+  step: "foundation" | "injection" | "anchor";
+  error: string;
+  fallback: boolean;
+}
 interface DegradationHitEvent extends TimestampOnly {
   type: "degradation.hit";
   modelDbId: number;
@@ -188,8 +238,13 @@ type LiveEventBase =
   | OscillatorLoadShedEvent
   | OscillatorMeowDetectedEvent
   | DegradationHitEvent
-  | DegradationRecoveryEvent
-  | StreamChunkEvent;
+    | DegradationRecoveryEvent
+    | StreamChunkEvent
+    | OscillatorStreamStartEvent
+    | OscillatorStreamDeltaEvent
+    | OscillatorStreamStepCompleteEvent
+    | OscillatorStreamCompleteEvent
+    | OscillatorStreamErrorEvent;
 
 type LiveEvent = LiveEventBase & { _suppressed?: number };
 
@@ -385,14 +440,58 @@ function formatEvent(evt: LiveEvent): LogEntry | null {
       };
     }
     case "oscillator.meow_detected": {
-      return {
-        id: "rabbit",
-        ts,
-        kind: "warn",
-        text: `Rabbit [${evt.sessionKey.slice(0, 8)}] meow detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
-      };
-    }
-    case "degradation.hit": {
+          return {
+            id: "rabbit",
+            ts,
+            kind: "warn",
+            text: `Rabbit [${evt.sessionKey.slice(0, 8)}] meow detected (${evt.pattern}); fallback ${evt.fellBackTo}`,
+          };
+        }
+        case "oscillator.stream_start": {
+          const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+          return {
+            id: "rabbit",
+            ts,
+            kind: "start",
+            text: `🐰 Rabbit [${evt.sessionKey.slice(0, 8)}] ${stepLabel} streaming started`,
+          };
+        }
+        case "oscillator.stream_delta": {
+                  const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+                  return {
+                    id: "rabbit",
+                    ts,
+                    kind: "info",
+                    text: `🐰 Rabbit [${evt.sessionKey.slice(0, 8)}] ${stepLabel} Δ: "${evt.delta.replace(/\n/g, "⏎").slice(0, 80)}" (${evt.accumulated.length} chars)`,
+                  };
+                }
+        case "oscillator.stream_step_complete": {
+          const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+          return {
+            id: "rabbit",
+            ts,
+            kind: "done",
+            text: `🐰 Rabbit [${evt.sessionKey.slice(0, 8)}] ${stepLabel} complete (${evt.fullText.length} chars)`,
+          };
+        }
+        case "oscillator.stream_complete": {
+          return {
+            id: "rabbit",
+            ts,
+            kind: "done",
+            text: `🐰 Rabbit [${evt.sessionKey.slice(0, 8)}] stream complete: ${evt.result.status}${evt.result.meow?.detected ? " (meow flagged)" : ""}`,
+          };
+        }
+        case "oscillator.stream_error": {
+          const stepLabel = evt.step.charAt(0).toUpperCase() + evt.step.slice(1);
+          return {
+            id: "rabbit",
+            ts,
+            kind: evt.fallback ? "warn" : "error",
+            text: `🐰 Rabbit [${evt.sessionKey.slice(0, 8)}] ${stepLabel} error: ${evt.error.slice(0, 80)}${evt.fallback ? " — falling back" : ""}`,
+          };
+        }
+        case "degradation.hit": {
       const sup = evt._suppressed
         ? ` (×${evt._suppressed + 1} suppressed)`
         : "";

@@ -93,6 +93,7 @@ export interface OscillatorModelCallInput {
   step: OscillatorStep;
   candidate: RabbitCandidate;
   messages: ChatMessage[];
+  onChunk?: (delta: string, accumulated: string) => void;
 }
 
 export type OscillatorModelCallResult =
@@ -107,6 +108,14 @@ export type OscillatorModelCall = (
   input: OscillatorModelCallInput,
 ) => Promise<OscillatorModelCallResult>;
 
+export interface OscillatorStreamChunk {
+  step: OscillatorStep;
+  delta: string;
+  accumulated: string;
+  stepComplete: boolean;
+  final?: ExecuteOscillatorResult;
+}
+
 export interface ExecuteOscillatorParams {
   messages: ChatMessage[];
   sessionKey: string;
@@ -114,6 +123,8 @@ export interface ExecuteOscillatorParams {
   config?: OscillatorConfig;
   candidates?: RabbitCandidate[];
   handoffMode?: ContextHandoffMode;
+  stream?: boolean;
+  onChunk?: (chunk: OscillatorStreamChunk) => void;
 }
 
 export interface ExecuteOscillatorResult {
@@ -645,6 +656,7 @@ async function callStep(params: {
   messages: ChatMessage[];
   callModel: OscillatorModelCall;
   timeoutMs: number;
+  onChunk?: (delta: string, accumulated: string) => void;
 }): Promise<string> {
   const text = asText(
     await withStepTimeout(
@@ -652,6 +664,7 @@ async function callStep(params: {
         step: params.step,
         candidate: params.candidate,
         messages: params.messages,
+        onChunk: params.onChunk,
       }),
       params.timeoutMs,
       params.step,
@@ -680,18 +693,46 @@ export async function executeOscillator(
     getRabbitCandidates(config.rabbitWeights ?? RABBIT_DEFAULT_WEIGHTS);
   const foundations = resolveFoundationCandidates(config, candidates);
   const handoffMode = params.handoffMode ?? "off";
+  const stream = params.stream ?? false;
+  const onChunk = params.onChunk;
   let lastFoundationError: string | undefined;
   let foundationAttempts = 0;
+
+  const emitChunk = (chunk: OscillatorStreamChunk) => {
+    if (onChunk) onChunk(chunk);
+  };
 
   for (const foundation of foundations) {
     foundationAttempts++;
     try {
-      const foundationText = await callStep({
+      // Foundation step
+      let foundationText = "";
+      const foundationStreamHandler = stream
+        ? (delta: string, accumulated: string) => {
+            foundationText = accumulated;
+            emitChunk({
+              step: "foundation",
+              delta,
+              accumulated,
+              stepComplete: false,
+            });
+          }
+        : undefined;
+
+      foundationText = await callStep({
         step: "foundation",
         candidate: foundation,
         messages: params.messages,
         callModel: params.callModel,
         timeoutMs: config.stepTimeoutMs,
+        onChunk: foundationStreamHandler,
+      });
+
+      emitChunk({
+        step: "foundation",
+        delta: "",
+        accumulated: foundationText,
+        stepComplete: true,
       });
 
       const injection = resolveInjectionModel(
@@ -700,7 +741,7 @@ export async function executeOscillator(
         candidates,
       );
       if (!injection) {
-        return {
+        const result: ExecuteOscillatorResult = {
           status: "foundation_fallback",
           text: foundationText,
           foundation,
@@ -710,6 +751,8 @@ export async function executeOscillator(
           bridges: {},
           error: "No eligible Rabbit injection model",
         };
+        if (stream) emitChunk({ step: "foundation", delta: "", accumulated: foundationText, stepComplete: true, final: result });
+        return result;
       }
 
       const injectionBridge = buildContextBridge({
@@ -726,6 +769,19 @@ export async function executeOscillator(
       });
 
       let injectionText: string;
+      let injectionAccumulated = "";
+      const injectionStreamHandler = stream
+        ? (delta: string, accumulated: string) => {
+            injectionAccumulated = accumulated;
+            emitChunk({
+              step: "injection",
+              delta,
+              accumulated,
+              stepComplete: false,
+            });
+          }
+        : undefined;
+
       try {
         injectionText = await callStep({
           step: "injection",
@@ -733,13 +789,15 @@ export async function executeOscillator(
           messages: injectionBridge.messages,
           callModel: params.callModel,
           timeoutMs: config.stepTimeoutMs,
+          onChunk: injectionStreamHandler,
         });
         injectionText = limitSentences(
           injectionText,
           config.injectionMaxSentences,
         );
+        injectionAccumulated = injectionText;
       } catch (error) {
-        return {
+        const result: ExecuteOscillatorResult = {
           status: "foundation_fallback",
           text: foundationText,
           foundation,
@@ -750,7 +808,24 @@ export async function executeOscillator(
           bridges: { injection: injectionBridge },
           error: errorMessage(error),
         };
+        if (stream) {
+          emitChunk({
+            step: "injection",
+            delta: "",
+            accumulated: injectionAccumulated,
+            stepComplete: true,
+            final: result,
+          });
+        }
+        return result;
       }
+
+      emitChunk({
+        step: "injection",
+        delta: "",
+        accumulated: injectionAccumulated,
+        stepComplete: true,
+      });
 
       const anchorBridge = buildContextBridge({
         mode: handoffMode,
@@ -763,6 +838,19 @@ export async function executeOscillator(
       });
 
       let anchorText: string;
+      let anchorAccumulated = "";
+      const anchorStreamHandler = stream
+        ? (delta: string, accumulated: string) => {
+            anchorAccumulated = accumulated;
+            emitChunk({
+              step: "anchor",
+              delta,
+              accumulated,
+              stepComplete: false,
+            });
+          }
+        : undefined;
+
       try {
         anchorText = await callStep({
           step: "anchor",
@@ -770,9 +858,11 @@ export async function executeOscillator(
           messages: anchorBridge.messages,
           callModel: params.callModel,
           timeoutMs: config.stepTimeoutMs,
+          onChunk: anchorStreamHandler,
         });
+        anchorAccumulated = anchorText;
       } catch (error) {
-        return {
+        const result: ExecuteOscillatorResult = {
           status: "foundation_fallback",
           text: foundationText,
           foundation,
@@ -784,11 +874,28 @@ export async function executeOscillator(
           bridges: { injection: injectionBridge, anchor: anchorBridge },
           error: errorMessage(error),
         };
+        if (stream) {
+          emitChunk({
+            step: "anchor",
+            delta: "",
+            accumulated: anchorAccumulated,
+            stepComplete: true,
+            final: result,
+          });
+        }
+        return result;
       }
+
+      emitChunk({
+        step: "anchor",
+        delta: "",
+        accumulated: anchorAccumulated,
+        stepComplete: true,
+      });
 
       const meow = detectMeow(anchorText, config.meowPatterns);
       if (meow.detected) {
-        return {
+        const result: ExecuteOscillatorResult = {
           status: "foundation_fallback",
           text: foundationText,
           foundation,
@@ -801,9 +908,19 @@ export async function executeOscillator(
           bridges: { injection: injectionBridge, anchor: anchorBridge },
           meow,
         };
+        if (stream) {
+          emitChunk({
+            step: "anchor",
+            delta: "",
+            accumulated: anchorAccumulated,
+            stepComplete: true,
+            final: result,
+          });
+        }
+        return result;
       }
 
-      return {
+      const result: ExecuteOscillatorResult = {
         status: "completed",
         text: anchorText,
         foundation,
@@ -815,18 +932,42 @@ export async function executeOscillator(
         bridges: { injection: injectionBridge, anchor: anchorBridge },
         meow,
       };
+
+      if (stream) {
+        emitChunk({
+          step: "anchor",
+          delta: "",
+          accumulated: anchorAccumulated,
+          stepComplete: true,
+          final: result,
+        });
+      }
+
+      return result;
     } catch (error) {
       lastFoundationError = errorMessage(error);
     }
   }
 
-  return {
+  const result: ExecuteOscillatorResult = {
     status: "single_model_fallback",
     failedStep: "foundation",
     foundationAttempts,
     bridges: {},
     error: lastFoundationError ?? "No eligible Rabbit foundation model",
   };
+
+  if (stream) {
+    emitChunk({
+      step: "foundation",
+      delta: "",
+      accumulated: "",
+      stepComplete: true,
+      final: result,
+    });
+  }
+
+  return result;
 }
 
 function failedStepNumber(

@@ -17,6 +17,7 @@ import {
   isRabbitOscillatorEligible,
   logOscillatorResult,
   type OscillatorConfig,
+  type OscillatorStreamChunk,
   parseRabbitWeights,
   RABBIT_DEFAULT_WEIGHTS,
   type RabbitCandidate,
@@ -869,5 +870,187 @@ describe("Rabbit Shake routing helpers", () => {
       avgLatencyMs: 500,
       meowCount: 0,
     });
+  });
+
+  it("streams chunks via onChunk callback when stream: true", async () => {
+    const candidates = [
+      candidate({
+        modelDbId: 1,
+        platform: "alpha",
+        modelId: "foundation",
+        rabbitScore: 0.9,
+      }),
+      candidate({
+        modelDbId: 2,
+        platform: "beta",
+        modelId: "injection",
+        rabbitScore: 0.8,
+      }),
+    ];
+    const chunks: OscillatorStreamChunk[] = [];
+
+    // Simulates a streaming callModel that drives onChunk for each delta
+    const streamingCallModel = vi.fn(
+      async ({ step, onChunk }) => {
+        const steps: Record<string, string[]> = {
+          foundation: ["Hello", " world"],
+          injection: ["Check", " this."],
+          anchor: ["Final", " answer."],
+        };
+        const deltas = steps[step] ?? [];
+        let accumulated = "";
+        for (const delta of deltas) {
+          accumulated += delta;
+          if (onChunk) onChunk(delta, accumulated);
+        }
+        return accumulated;
+      },
+    );
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze the tradeoffs." }],
+      sessionKey: "stream-1",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: streamingCallModel,
+      stream: true,
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("Final answer.");
+
+    // Each step should emit delta chunks + a stepComplete chunk
+    const foundationChunks = chunks.filter(
+      (c) => c.step === "foundation",
+    );
+    expect(foundationChunks.length).toBe(3); // 2 deltas + 1 stepComplete
+    expect(foundationChunks[0]).toMatchObject({
+      step: "foundation",
+      delta: "Hello",
+      accumulated: "Hello",
+      stepComplete: false,
+    });
+    expect(foundationChunks[1]).toMatchObject({
+      step: "foundation",
+      delta: " world",
+      accumulated: "Hello world",
+      stepComplete: false,
+    });
+    expect(foundationChunks[2]).toMatchObject({
+      step: "foundation",
+      accumulated: "Hello world",
+      stepComplete: true,
+    });
+
+    const injectionChunks = chunks.filter(
+      (c) => c.step === "injection",
+    );
+    expect(injectionChunks.length).toBe(3); // 2 deltas + 1 stepComplete
+    // The stepComplete chunk uses the limitSentences result
+    const injectionStepComplete = chunks.find(
+      (c) => c.step === "injection" && c.stepComplete,
+    );
+    expect(injectionStepComplete).toBeDefined();
+
+    const anchorChunks = chunks.filter(
+      (c) => c.step === "anchor",
+    );
+    expect(anchorChunks.length).toBe(4); // 2 deltas + 1 stepComplete + 1 final with result
+    expect(anchorChunks[2].stepComplete).toBe(true);
+    expect(anchorChunks[3].stepComplete).toBe(true);
+    expect(anchorChunks[3].final).toBeDefined();
+
+    // The final chunk includes the complete result
+    const finalChunk = chunks.find((c) => c.final != null);
+    expect(finalChunk).toBeDefined();
+    expect(finalChunk!.final!.status).toBe("completed");
+    expect(finalChunk!.final!.text).toBe("Final answer.");
+  });
+
+  it("emits error chunk and falls back when streaming injection step fails", async () => {
+    const candidates = [
+      candidate({
+        modelDbId: 1,
+        platform: "alpha",
+        modelId: "foundation",
+        rabbitScore: 0.9,
+      }),
+      candidate({
+        modelDbId: 2,
+        platform: "beta",
+        modelId: "injection",
+        rabbitScore: 0.8,
+      }),
+    ];
+    const chunks: OscillatorStreamChunk[] = [];
+
+    const failingStreamCallModel = vi.fn(
+      async ({ step, onChunk }) => {
+        if (step === "foundation") {
+          if (onChunk) onChunk("Base", "Base");
+          return "Base";
+        }
+        if (step === "injection") {
+          if (onChunk) onChunk("partial", "partial");
+          throw new Error("injection model crashed");
+        }
+        return "unused";
+      },
+    );
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze." }],
+      sessionKey: "stream-err-1",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: failingStreamCallModel,
+      stream: true,
+      onChunk: (chunk) => chunks.push(chunk),
+    });
+
+    expect(result.status).toBe("foundation_fallback");
+    expect(result.failedStep).toBe("injection");
+    expect(result.error).toContain("injection model crashed");
+
+    // The final chunk should carry the fallback result
+    const finalChunk = chunks.find((c) => c.final != null);
+    expect(finalChunk).toBeDefined();
+    expect(finalChunk!.final!.status).toBe("foundation_fallback");
+  });
+
+  it("preserves non-streaming behavior when stream: false (default)", async () => {
+    const candidates = [
+      candidate({
+        modelDbId: 1,
+        platform: "alpha",
+        modelId: "foundation",
+        rabbitScore: 0.9,
+      }),
+      candidate({
+        modelDbId: 2,
+        platform: "beta",
+        modelId: "injection",
+        rabbitScore: 0.8,
+      }),
+    ];
+
+    const result = await executeOscillator({
+      messages: [{ role: "user", content: "Analyze the tradeoffs." }],
+      sessionKey: "no-stream-1",
+      config: config({ stepTimeoutMs: 1000 }),
+      candidates,
+      callModel: async ({ step }) => {
+        if (step === "foundation") return "Base logic.";
+        if (step === "injection") return "Alternative view.";
+        return "Final answer.";
+      },
+    });
+
+    // No onChunk callback = no chunks, just the result
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("Final answer.");
+    // No stream field = no streaming behavior
+    expect(result.foundation?.modelId).toBe("foundation");
   });
 });
