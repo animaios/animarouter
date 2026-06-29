@@ -1,19 +1,22 @@
 import type {
-  ChatMessage,
-  ChatCompletionResponse,
   ChatCompletionChunk,
+  ChatCompletionResponse,
+  ChatMessage,
   ChatToolCall,
   ChatToolChoice,
   ChatToolDefinition,
   TokenUsage,
-  ThinkingConfig,
-  ThinkingEffort,
-} from '@animarouter/shared/types.js';
-import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
-import { contentToString } from '../lib/content.js';
-import { extractErrorMessage } from '../lib/error-body.js';
-import { geminiThinkingConfig, normalizeThinking } from '../lib/thinking.js';
-const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+} from "@animarouter/shared/types.js";
+import { contentToString } from "../lib/content.js";
+import { extractErrorMessage } from "../lib/error-body.js";
+import { geminiThinkingConfig, normalizeThinking } from "../lib/thinking.js";
+import {
+  BaseProvider,
+  type CompletionOptions,
+  providerHttpError,
+} from "./base.js";
+
+const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 // Gemini 3 REQUIRES the `thoughtSignature` that accompanied a function call to
 // be echoed back whenever that call appears in conversation history, or it
@@ -28,7 +31,10 @@ const THOUGHT_SIG_TTL_MS = 30 * 60 * 1000; // 30 min — longer than any single 
 const THOUGHT_SIG_MAX = 5000;
 const thoughtSigCache = new Map<string, { sig: string; exp: number }>();
 
-function rememberThoughtSig(callId: string | undefined, sig: string | undefined): void {
+function rememberThoughtSig(
+  callId: string | undefined,
+  sig: string | undefined,
+): void {
   if (!callId || !sig) return;
   // Cheap eviction: when full, drop the oldest insertion (Map preserves order).
   if (thoughtSigCache.size >= THOUGHT_SIG_MAX) {
@@ -90,7 +96,7 @@ interface GeminiResponse {
 function safeParseObject(raw: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
     return { value: parsed };
@@ -100,47 +106,73 @@ function safeParseObject(raw: string): Record<string, unknown> {
 }
 
 function normalizeGeminiArgs(args: unknown): string {
-  if (typeof args === 'string') return args;
+  if (typeof args === "string") return args;
   return JSON.stringify(args ?? {});
 }
 
 function toGeminiFinishReason(finishReason?: string): string {
-  const r = (finishReason ?? '').toUpperCase();
-  if (!r) return 'stop';
-  if (r === 'MAX_TOKENS') return 'length';
-  if (r === 'SAFETY' || r === 'RECITATION' || r === 'BLOCKLIST' || r === 'PROHIBITED_CONTENT' || r === 'SPII') {
-    return 'content_filter';
+  const r = (finishReason ?? "").toUpperCase();
+  if (!r) return "stop";
+  if (r === "MAX_TOKENS") return "length";
+  if (
+    r === "SAFETY" ||
+    r === "RECITATION" ||
+    r === "BLOCKLIST" ||
+    r === "PROHIBITED_CONTENT" ||
+    r === "SPII"
+  ) {
+    return "content_filter";
   }
-  return 'stop';
+  return "stop";
 }
 
 // Google Gemini accepts only a subset of JSON Schema (~OpenAPI 3.0).
 // Strip fields that opencode / other strict-JSON-Schema clients send but
 // Google rejects with 400 "Unknown name '<field>'".
 const GEMINI_UNSUPPORTED_SCHEMA_KEYS = new Set([
-  '$schema', '$id', '$ref', '$defs', '$comment',
-  'definitions',
-  'exclusiveMinimum', 'exclusiveMaximum',
-  'patternProperties', 'unevaluatedProperties', 'unevaluatedItems',
-  'if', 'then', 'else',
-  'contentEncoding', 'contentMediaType', 'contentSchema',
-  'dependentRequired', 'dependentSchemas', 'dependencies',
-  'additionalProperties',
-  'examples', 'const', 'readOnly', 'writeOnly',
-  'uniqueItems',
-  'not', 'allOf', 'oneOf',
-  'prefixItems',
-  'contains', 'minContains', 'maxContains',
-  'propertyNames',
-  'multipleOf',
-  'deprecated',
+  "$schema",
+  "$id",
+  "$ref",
+  "$defs",
+  "$comment",
+  "definitions",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "patternProperties",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "if",
+  "then",
+  "else",
+  "contentEncoding",
+  "contentMediaType",
+  "contentSchema",
+  "dependentRequired",
+  "dependentSchemas",
+  "dependencies",
+  "additionalProperties",
+  "examples",
+  "const",
+  "readOnly",
+  "writeOnly",
+  "uniqueItems",
+  "not",
+  "allOf",
+  "oneOf",
+  "prefixItems",
+  "contains",
+  "minContains",
+  "maxContains",
+  "propertyNames",
+  "multipleOf",
+  "deprecated",
 ]);
 
 export function sanitizeForGemini(schema: unknown): unknown {
   if (Array.isArray(schema)) {
     return schema.map(sanitizeForGemini);
   }
-  if (schema && typeof schema === 'object') {
+  if (schema && typeof schema === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
       if (GEMINI_UNSUPPORTED_SCHEMA_KEYS.has(k)) continue;
@@ -151,34 +183,40 @@ export function sanitizeForGemini(schema: unknown): unknown {
   return schema;
 }
 
-function toGeminiTools(tools?: ChatToolDefinition[]): Array<{ functionDeclarations: Array<Record<string, unknown>> }> | undefined {
+function toGeminiTools(
+  tools?: ChatToolDefinition[],
+): Array<{ functionDeclarations: Array<Record<string, unknown>> }> | undefined {
   if (!tools || tools.length === 0) return undefined;
 
-  return [{
-    functionDeclarations: tools.map(t => ({
-      name: t.function.name,
-      description: t.function.description,
-      parameters: sanitizeForGemini(t.function.parameters),
-    })),
-  }];
+  return [
+    {
+      functionDeclarations: tools.map((t) => ({
+        name: t.function.name,
+        description: t.function.description,
+        parameters: sanitizeForGemini(t.function.parameters),
+      })),
+    },
+  ];
 }
 
-function toGeminiToolConfig(toolChoice?: ChatToolChoice): { functionCallingConfig: Record<string, unknown> } | undefined {
+function toGeminiToolConfig(
+  toolChoice?: ChatToolChoice,
+): { functionCallingConfig: Record<string, unknown> } | undefined {
   if (!toolChoice) return undefined;
 
-  if (typeof toolChoice === 'string') {
+  if (typeof toolChoice === "string") {
     const mode =
-      toolChoice === 'none'
-        ? 'NONE'
-        : toolChoice === 'required'
-          ? 'ANY'
-          : 'AUTO';
+      toolChoice === "none"
+        ? "NONE"
+        : toolChoice === "required"
+          ? "ANY"
+          : "AUTO";
     return { functionCallingConfig: { mode } };
   }
 
   return {
     functionCallingConfig: {
-      mode: 'ANY',
+      mode: "ANY",
       allowedFunctionNames: [toolChoice.function.name],
     },
   };
@@ -190,8 +228,9 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB cap on fetched/inlined images
 // form `{ image_url: { url } }` and the shorthand `{ image_url: '...' }`.
 function extractImageUrl(block: unknown): string | undefined {
   const iu = (block as { image_url?: unknown })?.image_url;
-  if (typeof iu === 'string') return iu;
-  if (iu && typeof (iu as { url?: unknown }).url === 'string') return (iu as { url: string }).url;
+  if (typeof iu === "string") return iu;
+  if (iu && typeof (iu as { url?: unknown }).url === "string")
+    return (iu as { url: string }).url;
   return undefined;
 }
 
@@ -217,15 +256,17 @@ async function fetchWithTimeout(
   }
 }
 
-async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; data: string } | null> {
+async function imageUrlToInlineData(
+  url: string,
+): Promise<{ mimeType: string; data: string } | null> {
   const dataMatch = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(url);
   if (dataMatch) {
-    const mimeType = dataMatch[1] || 'application/octet-stream';
+    const mimeType = dataMatch[1] || "application/octet-stream";
     const isBase64 = Boolean(dataMatch[2]);
-    const payload = dataMatch[3] ?? '';
+    const payload = dataMatch[3] ?? "";
     const data = isBase64
       ? payload
-      : Buffer.from(decodeURIComponent(payload)).toString('base64');
+      : Buffer.from(decodeURIComponent(payload)).toString("base64");
     return { mimeType, data };
   }
   if (/^https?:\/\//i.test(url)) {
@@ -239,8 +280,9 @@ async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; da
       if (!res.ok) return null;
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) return null;
-      const mimeType = res.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg';
-      return { mimeType, data: buf.toString('base64') };
+      const mimeType =
+        res.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
+      return { mimeType, data: buf.toString("base64") };
     } catch {
       return null;
     }
@@ -251,17 +293,26 @@ async function imageUrlToInlineData(url: string): Promise<{ mimeType: string; da
 /** Check whether hostname resolves to a private/internal IP range. */
 function isInternalHost(hostname: string): boolean {
   // IPv4 loopback / private ranges
-  if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname)) return true;
+  if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname))
+    return true;
   // IPv6 loopback / link-local / ULA / unique-local
-  if (hostname === '::1' || hostname.startsWith('fe80:') || hostname.startsWith('fc') || hostname.startsWith('fd')) return true;
+  if (
+    hostname === "::1" ||
+    hostname.startsWith("fe80:") ||
+    hostname.startsWith("fc") ||
+    hostname.startsWith("fd")
+  )
+    return true;
   // localhost / .local mDNS
-  if (hostname === 'localhost' || hostname.endsWith('.local')) return true;
+  if (hostname === "localhost" || hostname.endsWith(".local")) return true;
   return false;
 }
 
 // Build Gemini parts for a user message: joined text first, then any images as
 // inlineData. Non-array content (string/null) collapses to a single text part.
-async function userContentToParts(content: ChatMessage['content']): Promise<GeminiPart[]> {
+async function userContentToParts(
+  content: ChatMessage["content"],
+): Promise<GeminiPart[]> {
   const parts: GeminiPart[] = [];
   const text = contentToString(content);
   if (text.length > 0) parts.push({ text });
@@ -269,7 +320,7 @@ async function userContentToParts(content: ChatMessage['content']): Promise<Gemi
   if (Array.isArray(content)) {
     for (const block of content) {
       const type = (block as { type?: string })?.type;
-      if (type !== 'image_url' && type !== 'image') continue;
+      if (type !== "image_url" && type !== "image") continue;
       const url = extractImageUrl(block);
       if (!url) continue;
       const inlineData = await imageUrlToInlineData(url);
@@ -278,7 +329,7 @@ async function userContentToParts(content: ChatMessage['content']): Promise<Gemi
   }
 
   // Gemini rejects empty `parts`; keep at least one (possibly empty) text part.
-  if (parts.length === 0) parts.push({ text: '' });
+  if (parts.length === 0) parts.push({ text: "" });
   return parts;
 }
 
@@ -287,9 +338,9 @@ async function userContentToParts(content: ChatMessage['content']): Promise<Gemi
 // flatten to text; user messages additionally carry images as inlineData parts.
 async function toGeminiContents(messages: ChatMessage[]) {
   const systemMessages = messages
-    .filter(m => m.role === 'system')
-    .map(m => contentToString(m.content))
-    .filter(s => s.length > 0);
+    .filter((m) => m.role === "system")
+    .map((m) => contentToString(m.content))
+    .filter((s) => s.length > 0);
 
   const toolNameByCallId = new Map<string, string>();
   for (const m of messages) {
@@ -298,78 +349,98 @@ async function toGeminiContents(messages: ChatMessage[]) {
     }
   }
 
-  const contents = (await Promise.all(messages
-    .filter(m => m.role !== 'system')
-    .map(async (m): Promise<{ role: 'user' | 'model'; parts: GeminiPart[] } | null> => {
-      if (m.role === 'assistant') {
-        const parts: GeminiPart[] = [];
+  const contents = (
+    await Promise.all(
+      messages
+        .filter((m) => m.role !== "system")
+        .map(
+          async (
+            m,
+          ): Promise<{
+            role: "user" | "model";
+            parts: GeminiPart[];
+          } | null> => {
+            if (m.role === "assistant") {
+              const parts: GeminiPart[] = [];
 
-        // Replay any preserved reasoning trace as a thought part BEFORE any
-        // text/tool_use so the model sees the same shape it produced. Gemini
-        // uses thought:true parts to tie the new turn to the prior trace;
-        // absent the part, a follow-up tool-use round is rejected. (#290)
-        if (typeof m.reasoning_content === 'string' && m.reasoning_content.length > 0) {
-          parts.push({ thought: true, text: m.reasoning_content });
-        }
+              // Replay any preserved reasoning trace as a thought part BEFORE any
+              // text/tool_use so the model sees the same shape it produced. Gemini
+              // uses thought:true parts to tie the new turn to the prior trace;
+              // absent the part, a follow-up tool-use round is rejected. (#290)
+              if (
+                typeof m.reasoning_content === "string" &&
+                m.reasoning_content.length > 0
+              ) {
+                parts.push({ thought: true, text: m.reasoning_content });
+              }
 
-        const assistantText = contentToString(m.content);
-        if (assistantText.length > 0) {
-          parts.push({ text: assistantText });
-        }
+              const assistantText = contentToString(m.content);
+              if (assistantText.length > 0) {
+                parts.push({ text: assistantText });
+              }
 
-        for (const call of m.tool_calls ?? []) {
-          // Prefer a signature the client preserved; otherwise recover the one
-          // we cached when this call was first produced (OpenAI-format clients
-          // drop the field, so this is the common path for Gemini multi-turn).
-          const sig = call.thought_signature ?? recallThoughtSig(call.id);
-          parts.push({
-            thoughtSignature: sig,
-            functionCall: {
-              id: call.id,
-              name: call.function.name,
-              args: safeParseObject(call.function.arguments),
-            },
-          });
-        }
+              for (const call of m.tool_calls ?? []) {
+                // Prefer a signature the client preserved; otherwise recover the one
+                // we cached when this call was first produced (OpenAI-format clients
+                // drop the field, so this is the common path for Gemini multi-turn).
+                const sig = call.thought_signature ?? recallThoughtSig(call.id);
+                parts.push({
+                  thoughtSignature: sig,
+                  functionCall: {
+                    id: call.id,
+                    name: call.function.name,
+                    args: safeParseObject(call.function.arguments),
+                  },
+                });
+              }
 
-        if (parts.length === 0) return null;
-        return {
-          role: 'model',
-          parts,
-        };
-      }
+              if (parts.length === 0) return null;
+              return {
+                role: "model",
+                parts,
+              };
+            }
 
-      if (m.role === 'tool') {
-        const toolCallId = m.tool_call_id;
-        if (!toolCallId) return null;
+            if (m.role === "tool") {
+              const toolCallId = m.tool_call_id;
+              if (!toolCallId) return null;
 
-        const toolName = m.name ?? toolNameByCallId.get(toolCallId) ?? 'tool';
-        const response = safeParseObject(contentToString(m.content));
+              const toolName =
+                m.name ?? toolNameByCallId.get(toolCallId) ?? "tool";
+              const response = safeParseObject(contentToString(m.content));
 
-        return {
-          role: 'user',
-          parts: [{
-            functionResponse: {
-              id: toolCallId,
-              name: toolName,
-              response,
-            },
-          }],
-        };
-      }
+              return {
+                role: "user",
+                parts: [
+                  {
+                    functionResponse: {
+                      id: toolCallId,
+                      name: toolName,
+                      response,
+                    },
+                  },
+                ],
+              };
+            }
 
-      return {
-        role: 'user',
-        parts: await userContentToParts(m.content),
-      };
-    })))
-    .filter((entry): entry is { role: 'user' | 'model'; parts: GeminiPart[] } => entry !== null);
+            return {
+              role: "user",
+              parts: await userContentToParts(m.content),
+            };
+          },
+        ),
+    )
+  ).filter(
+    (entry): entry is { role: "user" | "model"; parts: GeminiPart[] } =>
+      entry !== null,
+  );
 
   return {
     contents,
-    systemInstruction: systemMessages.length > 0
-      ? { parts: [{ text: systemMessages.join('\n\n') }] }
-      : undefined,
+    systemInstruction:
+      systemMessages.length > 0
+        ? { parts: [{ text: systemMessages.join("\n\n") }] }
+        : undefined,
   };
 }
 
@@ -388,7 +459,7 @@ function extractToolCalls(parts: GeminiPart[] | undefined): ChatToolCall[] {
     rememberThoughtSig(id, part.thoughtSignature);
     calls.push({
       id,
-      type: 'function',
+      type: "function",
       function: {
         name: part.functionCall.name,
         arguments: normalizeGeminiArgs(part.functionCall.args),
@@ -405,24 +476,24 @@ function extractText(parts: GeminiPart[] | undefined): string | null {
   // `thought: true` parts carry the reasoning trace and MUST stay out of the
   // user-visible text. (#290)
   const text = parts
-    .filter(p => !p.thought)
-    .map(p => p.text ?? '')
-    .join('');
+    .filter((p) => !p.thought)
+    .map((p) => p.text ?? "")
+    .join("");
   return text.length > 0 ? text : null;
 }
 
 function extractReasoning(parts: GeminiPart[] | undefined): string | null {
   if (!parts) return null;
   const text = parts
-    .filter(p => p.thought && typeof p.text === 'string' && p.text.length > 0)
-    .map(p => p.text ?? '')
-    .join('');
+    .filter((p) => p.thought && typeof p.text === "string" && p.text.length > 0)
+    .map((p) => p.text ?? "")
+    .join("");
   return text.length > 0 ? text : null;
 }
 
 export class GoogleProvider extends BaseProvider {
-  readonly platform = 'google' as const;
-  readonly name = 'Google AI Studio';
+  readonly platform = "google" as const;
+  readonly name = "Google AI Studio";
 
   async chatCompletion(
     apiKey: string,
@@ -447,21 +518,25 @@ export class GoogleProvider extends BaseProvider {
 
     const url = `${API_BASE}/models/${modelId}:generateContent?key=${apiKey}`;
     const res = await this.fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Google API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`);
+      throw providerHttpError(
+        res,
+        `Google API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`,
+      );
     }
 
-    const data = await res.json() as GeminiResponse;
+    const data = (await res.json()) as GeminiResponse;
     // Safety/prompt block: Gemini may refuse the request and return an empty
     // candidates array with a blockReason. Throw so the proxy relays the error
     // to the user instead of silently falling over to the next model.
     if (!data.candidates || data.candidates.length === 0) {
-      const reason = data.promptFeedback?.blockReason ?? 'UNKNOWN';
+      const reason = data.promptFeedback?.blockReason ?? "UNKNOWN";
       throw new Error(`Gemini blocked the request: ${reason}`);
     }
     const candidate = data.candidates?.[0];
@@ -478,19 +553,24 @@ export class GoogleProvider extends BaseProvider {
 
     return {
       id: this.makeId(),
-      object: 'chat.completion',
+      object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
       model: modelId,
-      choices: [{
-        index: 0,
-        message: {
-          role: 'assistant',
-          content: text,
-          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-          ...(reasoning ? { reasoning_content: reasoning } : {}),
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: text,
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            ...(reasoning ? { reasoning_content: reasoning } : {}),
+          },
+          finish_reason:
+            toolCalls.length > 0
+              ? "tool_calls"
+              : toGeminiFinishReason(candidate?.finishReason),
         },
-        finish_reason: toolCalls.length > 0 ? 'tool_calls' : toGeminiFinishReason(candidate?.finishReason),
-      }],
+      ],
       usage,
       _routed_via: { platform: this.platform, model: modelId },
     };
@@ -519,21 +599,25 @@ export class GoogleProvider extends BaseProvider {
 
     const url = `${API_BASE}/models/${modelId}:streamGenerateContent?alt=sse&key=${apiKey}`;
     const res = await this.fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Google API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`);
+      throw providerHttpError(
+        res,
+        `Google API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`,
+      );
     }
 
     const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response body');
+    if (!reader) throw new Error("No response body");
 
     const decoder = new TextDecoder();
     const id = this.makeId();
-    let buffer = '';
+    let buffer = "";
     let emittedFinish = false;
     let sawToolCalls = false;
 
@@ -546,7 +630,12 @@ export class GoogleProvider extends BaseProvider {
           reader.read(),
           new Promise<never>((_, reject) => {
             timer = setTimeout(
-              () => reject(new Error(`Google AI Studio stream stalled: no data for 300000ms (timeout)`)),
+              () =>
+                reject(
+                  new Error(
+                    `Google AI Studio stream stalled: no data for 300000ms (timeout)`,
+                  ),
+                ),
               300000,
             );
           }),
@@ -556,26 +645,28 @@ export class GoogleProvider extends BaseProvider {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
           const raw = trimmed.slice(6);
-          if (raw === '[DONE]') {
+          if (raw === "[DONE]") {
             if (!emittedFinish) {
               emittedFinish = true;
               yield {
                 id,
-                object: 'chat.completion.chunk',
+                object: "chat.completion.chunk",
                 created: Math.floor(Date.now() / 1000),
                 model: modelId,
-                choices: [{
-                  index: 0,
-                  delta: {},
-                  finish_reason: sawToolCalls ? 'tool_calls' : 'stop',
-                }],
+                choices: [
+                  {
+                    index: 0,
+                    delta: {},
+                    finish_reason: sawToolCalls ? "tool_calls" : "stop",
+                  },
+                ],
               };
             }
             return;
@@ -594,32 +685,38 @@ export class GoogleProvider extends BaseProvider {
           const parts = candidate?.content?.parts ?? [];
           const text = extractText(parts);
           const reasoning = extractReasoning(parts);
-          const toolCalls = extractToolCalls(parts).filter(call => {
+          const toolCalls = extractToolCalls(parts).filter((call) => {
             const key = `${call.id}:${call.function.name}:${call.function.arguments}`;
             if (seenToolCallKeys.has(key)) return false;
             seenToolCallKeys.add(key);
             return true;
           });
 
-          if ((text && text.length > 0) || toolCalls.length > 0 || (reasoning && reasoning.length > 0)) {
+          if (
+            (text && text.length > 0) ||
+            toolCalls.length > 0 ||
+            (reasoning && reasoning.length > 0)
+          ) {
             sawToolCalls = sawToolCalls || toolCalls.length > 0;
             yield {
               id,
-              object: 'chat.completion.chunk',
+              object: "chat.completion.chunk",
               created: Math.floor(Date.now() / 1000),
               model: modelId,
-              choices: [{
-                index: 0,
-                delta: {
-                  ...(text ? { content: text } : {}),
-                  ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-                  // Emit reasoning as a separate delta so clients that
-                  // preserve `reasoning_content` for multi-turn replay see
-                  // the trace incrementally. (#290)
-                  ...(reasoning ? { reasoning_content: reasoning } : {}),
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    ...(text ? { content: text } : {}),
+                    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+                    // Emit reasoning as a separate delta so clients that
+                    // preserve `reasoning_content` for multi-turn replay see
+                    // the trace incrementally. (#290)
+                    ...(reasoning ? { reasoning_content: reasoning } : {}),
+                  },
+                  finish_reason: null,
                 },
-                finish_reason: null,
-              }],
+              ],
             };
           }
 
@@ -627,14 +724,18 @@ export class GoogleProvider extends BaseProvider {
             emittedFinish = true;
             yield {
               id,
-              object: 'chat.completion.chunk',
+              object: "chat.completion.chunk",
               created: Math.floor(Date.now() / 1000),
               model: modelId,
-              choices: [{
-                index: 0,
-                delta: {},
-                finish_reason: sawToolCalls ? 'tool_calls' : toGeminiFinishReason(candidate.finishReason),
-              }],
+              choices: [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: sawToolCalls
+                    ? "tool_calls"
+                    : toGeminiFinishReason(candidate.finishReason),
+                },
+              ],
             };
             return;
           }
@@ -644,18 +745,22 @@ export class GoogleProvider extends BaseProvider {
       if (!emittedFinish) {
         yield {
           id,
-          object: 'chat.completion.chunk',
+          object: "chat.completion.chunk",
           created: Math.floor(Date.now() / 1000),
           model: modelId,
-          choices: [{
-            index: 0,
-            delta: {},
-            finish_reason: sawToolCalls ? 'tool_calls' : 'stop',
-          }],
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: sawToolCalls ? "tool_calls" : "stop",
+            },
+          ],
         };
       }
     } finally {
-      reader.cancel().catch(() => { /* upstream already gone */ });
+      reader.cancel().catch(() => {
+        /* upstream already gone */
+      });
     }
   }
 
@@ -677,13 +782,12 @@ export class GoogleProvider extends BaseProvider {
     return cfg ? { thinkingConfig: cfg } : {};
   }
 
-
   async validateKey(apiKey: string): Promise<boolean> {
     // Transport errors propagate — health.ts marks status='error' without
     // marking the key invalid. Only confirmed 401/403 returns false.
     const res = await this.fetchWithTimeout(
       `${API_BASE}/models?key=${apiKey}`,
-      { method: 'GET' },
+      { method: "GET" },
       10000,
     );
     return res.status !== 401 && res.status !== 403;
