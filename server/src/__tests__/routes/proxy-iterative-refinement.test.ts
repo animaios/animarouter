@@ -424,10 +424,10 @@ describe("Iterative Refinement proxy integration", () => {
     });
   });
 
-  it("uses normal single-model routing for simple Iterative Refinement requests", async () => {
+  it("uses oscillator for simple Iterative Refinement requests", async () => {
     chatCompletion.mockResolvedValue({
       choices: [
-        { message: { role: "assistant", content: "Single model answer." } },
+        { message: { role: "assistant", content: "Oscillator answer." } },
       ],
       usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
     });
@@ -443,15 +443,15 @@ describe("Iterative Refinement proxy integration", () => {
     );
 
     expect(status).toBe(200);
-    expect(responseText(body)).toBe("Single model answer.");
-    expect(headers.get("x-iterative-refinement-status")).toBeNull();
-    expect(chatCompletion).toHaveBeenCalledTimes(1);
+    expect(responseText(body)).toBe("Oscillator answer.");
+    expect(headers.get("x-iterative-refinement-status")).toBe("completed");
+    expect(chatCompletion).toHaveBeenCalledTimes(3); // Foundation + Injection + Anchor
     expect(
       publishedEvents.find((event) => event.type === "oscillator.decision"),
     ).toMatchObject({
-      mode: "single_model",
-      skipReason: "simple_prompt",
-      willRunOscillator: false,
+      mode: "oscillator",
+      skipReason: undefined,
+      willRunOscillator: true,
     });
   });
 

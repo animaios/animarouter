@@ -316,15 +316,6 @@ export function getIterativeRefinementOscillatorDecision(
       skipReason: "load_shed",
     };
   }
-  if (!isComplexReasoningPrompt(input.promptText)) {
-    return {
-      mode: "single_model",
-      config,
-      loadShedActive,
-      skipReason: "simple_prompt",
-    };
-  }
-
   return { mode: "oscillator", config, loadShedActive };
 }
 

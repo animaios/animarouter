@@ -587,7 +587,7 @@ describe("Iterative Refinement Shake routing helpers", () => {
     });
   });
 
-  it("routes simple Iterative Refinement prompts through the normal single-model path", () => {
+  it("routes simple Iterative Refinement prompts through the oscillator", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
@@ -596,9 +596,8 @@ describe("Iterative Refinement Shake routing helpers", () => {
         config: config(),
       }),
     ).toMatchObject({
-      mode: "single_model",
+      mode: "oscillator",
       loadShedActive: false,
-      skipReason: "simple_prompt",
     });
   });
 
