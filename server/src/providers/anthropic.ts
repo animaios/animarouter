@@ -1,16 +1,20 @@
 import type {
-  ChatMessage,
-  ChatCompletionResponse,
   ChatCompletionChunk,
+  ChatCompletionResponse,
+  ChatMessage,
   ChatToolCall,
   ChatToolChoice,
   ChatToolDefinition,
-  TokenUsage,
   Platform,
-} from '@animarouter/shared/types.js';
-import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
-import { contentToString, normalizeOutboundContent } from '../lib/content.js';
-import { anthropicThinking, normalizeThinking } from '../lib/thinking.js';
+  TokenUsage,
+} from "@animarouter/shared/types.js";
+import { contentToString, normalizeOutboundContent } from "../lib/content.js";
+import { anthropicThinking, normalizeThinking } from "../lib/thinking.js";
+import {
+  BaseProvider,
+  type CompletionOptions,
+  providerHttpError,
+} from "./base.js";
 
 // Anthropic Messages API. The 2023-06-01 revision is the current stable version
 // (Anthropic pins clients to a specific date and the server negotiates the wire
@@ -19,8 +23,8 @@ import { anthropicThinking, normalizeThinking } from '../lib/thinking.js';
 // endpoint, but the beta header is required to expose `tools` / `tool_use` /
 // `tool_result` content blocks. See https://docs.anthropic.com/en/api/versioning
 // and https://docs.anthropic.com/en/docs/tool-use.
-const ANTHROPIC_VERSION = '2023-06-01';
-const ANTHROPIC_BETA = 'tools-2025-05-14';
+const ANTHROPIC_VERSION = "2023-06-01";
+const ANTHROPIC_BETA = "tools-2025-05-14";
 
 // Anthropic requires `max_tokens` on every request; the API rejects calls that
 // omit it with 400 "max_tokens is required". The proxy accepts OpenAI-shaped
@@ -42,24 +46,28 @@ interface AnthropicRequestBody {
   temperature?: number;
   top_p?: number;
   /** Anthropic adaptive/extended-thinking control. See lib/thinking.ts. */
-  thinking?: { type: 'enabled' | 'adaptive' | 'disabled'; budget_tokens?: number; display?: 'summarized' | 'omitted' };
+  thinking?: {
+    type: "enabled" | "adaptive" | "disabled";
+    budget_tokens?: number;
+    display?: "summarized" | "omitted";
+  };
   /** Effort is the Claude Opus 4.6/4.7/4.8 + Sonnet 4.6 lever for thinking depth. */
-  output_config?: { effort?: 'max' | 'xhigh' | 'high' | 'medium' | 'low' };
+  output_config?: { effort?: "max" | "xhigh" | "high" | "medium" | "low" };
   stream?: boolean;
 }
 
 type AnthropicWireMessage =
-  | { role: 'user'; content: string | AnthropicUserContentBlock[] }
-  | { role: 'assistant'; content: string | AnthropicAssistantContentBlock[] };
+  | { role: "user"; content: string | AnthropicUserContentBlock[] }
+  | { role: "assistant"; content: string | AnthropicAssistantContentBlock[] };
 
 type AnthropicUserContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool_result'; tool_use_id: string; content: string };
+  | { type: "text"; text: string }
+  | { type: "tool_result"; tool_use_id: string; content: string };
 
 type AnthropicAssistantContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string; signature?: string }
-  | { type: 'tool_use'; id: string; name: string; input: unknown };
+  | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string; signature?: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown };
 
 interface AnthropicTool {
   name: string;
@@ -68,42 +76,61 @@ interface AnthropicTool {
 }
 
 type AnthropicToolChoice =
-  | { type: 'auto' }
-  | { type: 'any' }
-  | { type: 'tool'; name: string };
+  | { type: "auto" }
+  | { type: "any" }
+  | { type: "tool"; name: string };
 
 interface AnthropicResponse {
   id: string;
-  type: 'message';
-  role: 'assistant';
+  type: "message";
+  role: "assistant";
   model: string;
   content: AnthropicResponseBlock[];
-  stop_reason: 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence' | null;
+  stop_reason: "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" | null;
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
   };
 }
 type AnthropicResponseBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "thinking"; thinking: string; signature?: string }
   | { type: string; [key: string]: unknown };
 
 interface AnthropicStreamEvent {
   type: string;
   // Event-specific fields. We only model the ones we actually consume; the
   // rest pass through to the parser and are ignored if unmatched.
-  message?: { id: string; model: string; usage?: { input_tokens?: number; output_tokens?: number } };
+  message?: {
+    id: string;
+    model: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
   index?: number;
-  content_block?: { type: string; id?: string; name?: string; signature?: string };
+  content_block?: {
+    type: string;
+    id?: string;
+    name?: string;
+    signature?: string;
+  };
   delta?: {
-    type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta' | string;
+    type:
+      | "text_delta"
+      | "input_json_delta"
+      | "thinking_delta"
+      | "signature_delta"
+      | string;
     text?: string;
     thinking?: string;
     partial_json?: string;
     signature?: string;
-    stop_reason?: 'end_turn' | 'max_tokens' | 'tool_use' | 'stop_sequence' | null;
+    stop_reason?:
+      | "end_turn"
+      | "max_tokens"
+      | "tool_use"
+      | "stop_sequence"
+      | null;
     stop_sequence?: string | null;
   };
   usage?: { output_tokens?: number };
@@ -146,14 +173,21 @@ export class AnthropicCompatProvider extends BaseProvider {
 
   /** OpenAI tools are wrapped as `{ type: 'function', function: { ... } }`;
    * Anthropic tools are flat `{ name, description, input_schema }`. */
-  private translateTools(tools?: ChatToolDefinition[]): AnthropicTool[] | undefined {
+  private translateTools(
+    tools?: ChatToolDefinition[],
+  ): AnthropicTool[] | undefined {
     if (!tools || tools.length === 0) return undefined;
     const out: AnthropicTool[] = [];
     for (const t of tools) {
       out.push({
         name: t.function.name,
-        ...(t.function.description ? { description: t.function.description } : {}),
-        input_schema: (t.function.parameters ?? { type: 'object', properties: {} }) as Record<string, unknown>,
+        ...(t.function.description
+          ? { description: t.function.description }
+          : {}),
+        input_schema: (t.function.parameters ?? {
+          type: "object",
+          properties: {},
+        }) as Record<string, unknown>,
       });
     }
     return out;
@@ -163,14 +197,16 @@ export class AnthropicCompatProvider extends BaseProvider {
    * map cleanly. 'none' can't be expressed as a value in Anthropic's shape (no
    * `disable_tools` field), so we still return the literal and let
    * `chatCompletion` skip emitting the `tools` field when it's used. */
-  private translateToolChoice(choice?: ChatToolChoice): AnthropicToolChoice | undefined {
+  private translateToolChoice(
+    choice?: ChatToolChoice,
+  ): AnthropicToolChoice | undefined {
     if (choice == null) return undefined;
-    if (choice === 'none') return { type: 'auto' };
-    if (choice === 'auto') return { type: 'auto' };
-    if (choice === 'required') return { type: 'any' };
+    if (choice === "none") return { type: "auto" };
+    if (choice === "auto") return { type: "auto" };
+    if (choice === "required") return { type: "any" };
     // Specific function: 'auto' is the closest legal Anthropic value (they
     // support forcing a specific tool via `{ type: 'tool', name }`).
-    return { type: 'tool', name: choice.function.name };
+    return { type: "tool", name: choice.function.name };
   }
 
   /** Translate OpenAI messages to Anthropic's content-block shape. System
@@ -180,7 +216,10 @@ export class AnthropicCompatProvider extends BaseProvider {
    * Tool / function messages are collapsed into user-side `tool_result` blocks
    * (Anthropic has no tool role — tool outputs are user messages carrying
    * `tool_result` blocks). Assistant tool calls become `tool_use` blocks. */
-  private translateMessages(messages: ChatMessage[]): { system?: string; messages: AnthropicWireMessage[] } {
+  private translateMessages(messages: ChatMessage[]): {
+    system?: string;
+    messages: AnthropicWireMessage[];
+  } {
     let system: string | undefined;
     const result: AnthropicWireMessage[] = [];
 
@@ -189,33 +228,38 @@ export class AnthropicCompatProvider extends BaseProvider {
       // 'developer' (a newer OpenAI role used by some clients) to 'system'
       // the same way the other providers do.
       const role = m.role;
-      if (role === 'system') {
+      if (role === "system") {
         const text = contentToString(m.content);
         if (text) system = system ? `${system}\n${text}` : text;
         continue;
       }
 
-      if (role === 'assistant') {
+      if (role === "assistant") {
         // When the client preserves prior-turn reasoning, Anthropic requires
         // the original thinking block be replayed alongside any tool_use —
         // otherwise multi-turn tool loops reject with 400. We synthesize a
         // block from the unified `reasoning_content` / `thinking_signature`
         // pair carried on the assistant message. (#290)
-        const priorThinking = (m.reasoning_content && typeof m.reasoning_content === 'string' && m.reasoning_content.length > 0)
-          || (typeof m.thinking_signature === 'string' && m.thinking_signature.length > 0);
+        const priorThinking =
+          (m.reasoning_content &&
+            typeof m.reasoning_content === "string" &&
+            m.reasoning_content.length > 0) ||
+          (typeof m.thinking_signature === "string" &&
+            m.thinking_signature.length > 0);
         if (m.tool_calls && m.tool_calls.length > 0) {
           const blocks: AnthropicAssistantContentBlock[] = [];
           if (priorThinking) {
             blocks.push({
-              type: 'thinking',
-              thinking: m.reasoning_content ?? '',
-              ...(typeof m.thinking_signature === 'string' && m.thinking_signature.length > 0
+              type: "thinking",
+              thinking: m.reasoning_content ?? "",
+              ...(typeof m.thinking_signature === "string" &&
+              m.thinking_signature.length > 0
                 ? { signature: m.thinking_signature }
                 : {}),
             });
           }
           const text = contentToString(m.content);
-          if (text) blocks.push({ type: 'text', text });
+          if (text) blocks.push({ type: "text", text });
           for (const tc of m.tool_calls) {
             let input: unknown;
             try {
@@ -226,9 +270,14 @@ export class AnthropicCompatProvider extends BaseProvider {
               // (the model is more useful seeing the call attempt than not).
               input = {};
             }
-            blocks.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
+            blocks.push({
+              type: "tool_use",
+              id: tc.id,
+              name: tc.function.name,
+              input,
+            });
           }
-          result.push({ role: 'assistant', content: blocks });
+          result.push({ role: "assistant", content: blocks });
           continue;
         }
         // Plain assistant turn. Anthropic requires that any assistant turn
@@ -237,38 +286,46 @@ export class AnthropicCompatProvider extends BaseProvider {
         // Anthropic ignores an unrelated thinking block when thinking is now
         // disabled. (#290)
         if (priorThinking) {
-          const blocks: AnthropicAssistantContentBlock[] = [{
-            type: 'thinking',
-            thinking: m.reasoning_content ?? '',
-            ...(typeof m.thinking_signature === 'string' && m.thinking_signature.length > 0
-              ? { signature: m.thinking_signature }
-              : {}),
-          }];
-          const text = contentToString(m.content) || '';
-          if (text) blocks.push({ type: 'text', text });
-          result.push({ role: 'assistant', content: blocks });
+          const blocks: AnthropicAssistantContentBlock[] = [
+            {
+              type: "thinking",
+              thinking: m.reasoning_content ?? "",
+              ...(typeof m.thinking_signature === "string" &&
+              m.thinking_signature.length > 0
+                ? { signature: m.thinking_signature }
+                : {}),
+            },
+          ];
+          const text = contentToString(m.content) || "";
+          if (text) blocks.push({ type: "text", text });
+          result.push({ role: "assistant", content: blocks });
           continue;
         }
         // Plain assistant turn. Anthropic allows content: '' here (e.g. a
         // turn that's a sequence of tool calls on a different assistant
         // message) but `null` is not legal — coerce to '' to avoid 400s.
-        result.push({ role: 'assistant', content: contentToString(m.content) || '' });
+        result.push({
+          role: "assistant",
+          content: contentToString(m.content) || "",
+        });
         continue;
       }
 
-      if (role === 'tool') {
+      if (role === "tool") {
         // OpenAI 'tool' role carries the output of a prior tool call. Anthropic
         // expresses this as a user message containing a tool_result block.
         // tool_call_id is required by OpenAI's spec; fall back to '' if a
         // misbehaving client omitted it (Anthropic will 400, which is correct
         // — there's no good answer to "tool result for which call?").
         result.push({
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            tool_use_id: m.tool_call_id ?? '',
-            content: contentToString(m.content),
-          }],
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: m.tool_call_id ?? "",
+              content: contentToString(m.content),
+            },
+          ],
         });
         continue;
       }
@@ -276,7 +333,7 @@ export class AnthropicCompatProvider extends BaseProvider {
       // 'user' (or any future role we don't recognize). Flatten to a string;
       // Anthropic accepts both a string and a content-block array, and the
       // string form is what every non-multimodal code path uses.
-      result.push({ role: 'user', content: contentToString(m.content) });
+      result.push({ role: "user", content: contentToString(m.content) });
     }
 
     return { system, messages: result };
@@ -293,31 +350,42 @@ export class AnthropicCompatProvider extends BaseProvider {
    *    tool_calls, stop_sequence→stop
    *  - usage: input_tokens→prompt_tokens, output_tokens→completion_tokens
    */
-  private translateResponse(body: AnthropicResponse, modelId: string): ChatCompletionResponse {
-    let content = '';
+  private translateResponse(
+    body: AnthropicResponse,
+    modelId: string,
+  ): ChatCompletionResponse {
+    let content = "";
     const toolCalls: ChatToolCall[] = [];
-    let reasoning = '';
+    let reasoning = "";
     let lastSignature: string | undefined;
 
     for (const block of body.content) {
-      if (block.type === 'text') {
+      if (block.type === "text") {
         content += block.text;
-      } else if (block.type === 'tool_use') {
+      } else if (block.type === "tool_use") {
         const tu = block as typeof block & { id: string; name: string };
         toolCalls.push({
           id: tu.id,
-          type: 'function',
+          type: "function",
           function: {
             name: tu.name,
             arguments: JSON.stringify(tu.input ?? {}),
           },
         });
-      } else if (block.type === 'thinking') {
+      } else if (block.type === "thinking") {
         const thinkBlock = block as { thinking?: string; signature?: string };
-        if (typeof thinkBlock.thinking === 'string' && thinkBlock.thinking.length > 0) {
-          reasoning = reasoning ? `${reasoning}\n${thinkBlock.thinking}` : thinkBlock.thinking;
+        if (
+          typeof thinkBlock.thinking === "string" &&
+          thinkBlock.thinking.length > 0
+        ) {
+          reasoning = reasoning
+            ? `${reasoning}\n${thinkBlock.thinking}`
+            : thinkBlock.thinking;
         }
-        if (typeof thinkBlock.signature === 'string' && thinkBlock.signature.length > 0) {
+        if (
+          typeof thinkBlock.signature === "string" &&
+          thinkBlock.signature.length > 0
+        ) {
           lastSignature = thinkBlock.signature;
         }
       }
@@ -327,50 +395,54 @@ export class AnthropicCompatProvider extends BaseProvider {
 
     return {
       id: body.id,
-      object: 'chat.completion',
+      object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
       model: modelId,
-      choices: [{
-        index: 0,
-        message: {
-          role: 'assistant',
-          // Per OpenAI: when tool_calls are present, content is typically null
-          // (clients branch on the presence of tool_calls). Preserve a text
-          // answer when both are returned.
-          content: content || null,
-          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-          ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
-          ...(lastSignature ? { thinking_signature: lastSignature } : {}),
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            // Per OpenAI: when tool_calls are present, content is typically null
+            // (clients branch on the presence of tool_calls). Preserve a text
+            // answer when both are returned.
+            content: content || null,
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            ...(reasoning.length > 0 ? { reasoning_content: reasoning } : {}),
+            ...(lastSignature ? { thinking_signature: lastSignature } : {}),
+          },
+          finish_reason: this.translateStopReason(body.stop_reason),
         },
-        finish_reason: this.translateStopReason(body.stop_reason),
-      }],
+      ],
       usage: this.translateUsage(body.usage),
       _routed_via: { platform: this.platform, model: modelId },
     };
   }
 
-  private translateStopReason(reason: AnthropicResponse['stop_reason']): string {
+  private translateStopReason(
+    reason: AnthropicResponse["stop_reason"],
+  ): string {
     switch (reason) {
-      case 'end_turn':
-      case 'stop_sequence':
-        return 'stop';
-      case 'max_tokens':
-        return 'length';
-      case 'tool_use':
-        return 'tool_calls';
+      case "end_turn":
+      case "stop_sequence":
+        return "stop";
+      case "max_tokens":
+        return "length";
+      case "tool_use":
+        return "tool_calls";
       default:
-        return 'stop';
+        return "stop";
     }
   }
 
-  private translateUsage(usage?: AnthropicResponse['usage']): TokenUsage {
+  private translateUsage(usage?: AnthropicResponse["usage"]): TokenUsage {
     const input = usage?.input_tokens ?? 0;
     const output = usage?.output_tokens ?? 0;
     return {
       prompt_tokens: input,
-      completion_tokens: output,  // Anthropic: this already includes thinking
+      completion_tokens: output, // Anthropic: this already includes thinking
       total_tokens: input + output,
-      reasoning_tokens: 0,  // not broken out by Anthropic; counted at proxy level
+      reasoning_tokens: 0, // not broken out by Anthropic; counted at proxy level
     };
   }
 
@@ -382,7 +454,7 @@ export class AnthropicCompatProvider extends BaseProvider {
     stream = false,
   ): AnthropicRequestBody {
     const { system, messages: wireMessages } = this.translateMessages(messages);
-    const suppressTools = options?.tool_choice === 'none';
+    const suppressTools = options?.tool_choice === "none";
 
     const body: AnthropicRequestBody = {
       model: modelId,
@@ -396,7 +468,8 @@ export class AnthropicCompatProvider extends BaseProvider {
       const toolChoice = this.translateToolChoice(options?.tool_choice);
       if (toolChoice) body.tool_choice = toolChoice;
     }
-    if (options?.temperature !== undefined) body.temperature = options.temperature;
+    if (options?.temperature !== undefined)
+      body.temperature = options.temperature;
     if (options?.top_p !== undefined) body.top_p = options.top_p;
     if (stream) body.stream = true;
     // Wire the thinking/effort knobs into the Anthropic request body. We
@@ -404,25 +477,29 @@ export class AnthropicCompatProvider extends BaseProvider {
     // — `thinking` vs `output_config.effort` never varies by call site. The
     // proxy is responsible for choosing `enabled`/`adaptive` based on the
     // model it routed to. (#290)
-    const thinkingWire = anthropicThinking(normalizeThinking({
-      reasoning_effort: options?.reasoning_effort,
-      thinking: options?.thinking,
-    }));
-    if (thinkingWire.thinking) body.thinking = thinkingWire.thinking as AnthropicRequestBody['thinking'];
-    if (thinkingWire.output_config) body.output_config = thinkingWire.output_config as AnthropicRequestBody['output_config'];
+    const thinkingWire = anthropicThinking(
+      normalizeThinking({
+        reasoning_effort: options?.reasoning_effort,
+        thinking: options?.thinking,
+      }),
+    );
+    if (thinkingWire.thinking)
+      body.thinking = thinkingWire.thinking as AnthropicRequestBody["thinking"];
+    if (thinkingWire.output_config)
+      body.output_config =
+        thinkingWire.output_config as AnthropicRequestBody["output_config"];
     return body;
   }
-
 
   private buildRequestHeaders(apiKey: string): Record<string, string> {
     // Keyless providers (self-hosted proxies that need no key) get an empty
     // header bag so we never send a `x-api-key: undefined` string the upstream
     // might reject.
     return {
-      ...(this.keyless ? {} : { 'x-api-key': apiKey }),
-      'anthropic-version': ANTHROPIC_VERSION,
-      'anthropic-beta': ANTHROPIC_BETA,
-      'Content-Type': 'application/json',
+      ...(this.keyless ? {} : { "x-api-key": apiKey }),
+      "anthropic-version": ANTHROPIC_VERSION,
+      "anthropic-beta": ANTHROPIC_BETA,
+      "Content-Type": "application/json",
     };
   }
 
@@ -436,9 +513,10 @@ export class AnthropicCompatProvider extends BaseProvider {
     const res = await this.fetchWithTimeout(
       `${this.baseUrl}/v1/messages`,
       {
-        method: 'POST',
+        method: "POST",
         headers: this.buildRequestHeaders(apiKey),
         body: JSON.stringify(body),
+        signal: options?.signal,
       },
       options?.timeoutMs ?? this.timeoutMs,
     );
@@ -453,11 +531,11 @@ export class AnthropicCompatProvider extends BaseProvider {
 
     let raw: AnthropicResponse;
     try {
-      raw = await res.json() as AnthropicResponse;
+      raw = (await res.json()) as AnthropicResponse;
     } catch {
       throw new Error(
         `${this.name} returned 200 with a non-JSON body — the endpoint is not Anthropic-compatible. ` +
-        `Check the base URL points at an Anthropic Messages API root (e.g. https://api.anthropic.com).`,
+          `Check the base URL points at an Anthropic Messages API root (e.g. https://api.anthropic.com).`,
       );
     }
 
@@ -478,9 +556,10 @@ export class AnthropicCompatProvider extends BaseProvider {
     const res = await this.fetchWithTimeout(
       `${this.baseUrl}/v1/messages`,
       {
-        method: 'POST',
+        method: "POST",
         headers: this.buildRequestHeaders(apiKey),
         body: JSON.stringify(body),
+        signal: options?.signal,
       },
       options?.timeoutMs ?? this.timeoutMs,
     );
@@ -518,19 +597,19 @@ export class AnthropicCompatProvider extends BaseProvider {
     modelId: string,
   ): AsyncGenerator<ChatCompletionChunk> {
     const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response body');
+    if (!reader) throw new Error("No response body");
 
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buffer = "";
     let upstreamId: string | undefined;
     let currentEvent: string | undefined;
     // Block type per index. Anthropic lets a message carry text, tool_use,
     // AND thinking blocks; we need to track each so the second- and third-
     // branch delta handlers dispatch correctly. (#290)
-    const blockTypes = new Map<number, 'text' | 'tool_use' | 'thinking'>();
+    const blockTypes = new Map<number, "text" | "tool_use" | "thinking">();
     const toolUseBuffers = new Map<number, string>();
     const toolUseMeta = new Map<number, { id: string; name: string }>();
-    let lastSignature = ''; // Anthropic thought signature, replay (#290)
+    let lastSignature = ""; // Anthropic thought signature, replay (#290)
     let finalStopReason: string | null = null;
     let finalUsage: TokenUsage | null = null;
     let emittedFinish = false;
@@ -541,14 +620,16 @@ export class AnthropicCompatProvider extends BaseProvider {
       sawFinishReason = true;
       const chunk: ChatCompletionChunk = {
         id: upstreamId ?? this.makeId(),
-        object: 'chat.completion.chunk',
+        object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
         model: modelId,
-        choices: [{
-          index: 0,
-          delta: {},
-          finish_reason: finalStopReason ?? 'stop',
-      },],
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: finalStopReason ?? "stop",
+          },
+        ],
       };
       if (finalUsage) chunk.usage = finalUsage;
       return chunk;
@@ -561,7 +642,12 @@ export class AnthropicCompatProvider extends BaseProvider {
           reader.read(),
           new Promise<never>((_, reject) => {
             timer = setTimeout(
-              () => reject(new Error(`${this.name} stream stalled: no data for ${STREAM_INACTIVITY_TIMEOUT_MS}ms (timeout)`)),
+              () =>
+                reject(
+                  new Error(
+                    `${this.name} stream stalled: no data for ${STREAM_INACTIVITY_TIMEOUT_MS}ms (timeout)`,
+                  ),
+                ),
               STREAM_INACTIVITY_TIMEOUT_MS,
             );
           }),
@@ -576,19 +662,19 @@ export class AnthropicCompatProvider extends BaseProvider {
         buffer += decoder.decode(value, { stream: true });
         // Anthropic events are separated by a blank line (\n\n). Split on
         // \n\n and keep the trailing partial in the buffer.
-        const events = buffer.split('\n\n');
-        buffer = events.pop() ?? '';
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
 
         for (const rawEvent of events) {
           // Parse the event: / data: lines. Anthropic events are short
           // (~200B), so this is cheap.
           let eventType = currentEvent;
           let dataLine: string | undefined;
-          for (const line of rawEvent.split('\n')) {
+          for (const line of rawEvent.split("\n")) {
             const trimmed = line.trimEnd();
-            if (trimmed.startsWith('event: ')) {
+            if (trimmed.startsWith("event: ")) {
               eventType = trimmed.slice(7).trim();
-            } else if (trimmed.startsWith('data: ')) {
+            } else if (trimmed.startsWith("data: ")) {
               dataLine = trimmed.slice(6);
             }
           }
@@ -605,116 +691,149 @@ export class AnthropicCompatProvider extends BaseProvider {
           }
 
           switch (eventType) {
-            case 'message_start': {
+            case "message_start": {
               if (payload.message?.id) upstreamId = payload.message.id;
               break;
             }
-            case 'content_block_start': {
+            case "content_block_start": {
               const idx = payload.index ?? 0;
               const block = payload.content_block;
-              if (block?.type === 'text') {
-                blockTypes.set(idx, 'text');
-              } else if (block?.type === 'tool_use') {
-                blockTypes.set(idx, 'tool_use');
-                toolUseBuffers.set(idx, '');
+              if (block?.type === "text") {
+                blockTypes.set(idx, "text");
+              } else if (block?.type === "tool_use") {
+                blockTypes.set(idx, "tool_use");
+                toolUseBuffers.set(idx, "");
                 if (block.id && block.name) {
                   toolUseMeta.set(idx, { id: block.id, name: block.name });
                 }
-              } else if (block?.type === 'thinking') {
+              } else if (block?.type === "thinking") {
                 // Anthropic emits a single `signature_delta` against the
                 // thinking block; capture the block-level signature here if
                 // the start event carries one (rare; the deltas carry it). (#290)
-                blockTypes.set(idx, 'thinking');
-                if (typeof block.signature === 'string' && block.signature.length > 0) {
+                blockTypes.set(idx, "thinking");
+                if (
+                  typeof block.signature === "string" &&
+                  block.signature.length > 0
+                ) {
                   lastSignature = block.signature;
                 }
               }
               break;
             }
-            case 'content_block_delta': {
+            case "content_block_delta": {
               const idx = payload.index ?? 0;
               const delta = payload.delta;
               if (!delta) break;
-              if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-                blockTypes.set(idx, 'text');
+              if (
+                delta.type === "text_delta" &&
+                typeof delta.text === "string"
+              ) {
+                blockTypes.set(idx, "text");
                 yield {
                   id: upstreamId ?? this.makeId(),
-                  object: 'chat.completion.chunk',
+                  object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
                   model: modelId,
-                  choices: [{
-                    index: 0,
-                    delta: { content: delta.text },
-                    finish_reason: null,
-                  }],
+                  choices: [
+                    {
+                      index: 0,
+                      delta: { content: delta.text },
+                      finish_reason: null,
+                    },
+                  ],
                 };
-              } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
-                toolUseBuffers.set(idx, (toolUseBuffers.get(idx) ?? '') + delta.partial_json);
-              } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking.length > 0) {
-                blockTypes.set(idx, 'thinking');
+              } else if (
+                delta.type === "input_json_delta" &&
+                typeof delta.partial_json === "string"
+              ) {
+                toolUseBuffers.set(
+                  idx,
+                  (toolUseBuffers.get(idx) ?? "") + delta.partial_json,
+                );
+              } else if (
+                delta.type === "thinking_delta" &&
+                typeof delta.thinking === "string" &&
+                delta.thinking.length > 0
+              ) {
+                blockTypes.set(idx, "thinking");
                 yield {
                   id: upstreamId ?? this.makeId(),
-                  object: 'chat.completion.chunk',
+                  object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
                   model: modelId,
-                  choices: [{
-                    index: 0,
-                    // OpenAI-shaped reasoning trace delta. Clients that
-                    // preserve it on the assistant message get the trace
-                    // replayed on the next turn. (#290)
-                    delta: { reasoning_content: delta.thinking },
-                    finish_reason: null,
-                  }],
+                  choices: [
+                    {
+                      index: 0,
+                      // OpenAI-shaped reasoning trace delta. Clients that
+                      // preserve it on the assistant message get the trace
+                      // replayed on the next turn. (#290)
+                      delta: { reasoning_content: delta.thinking },
+                      finish_reason: null,
+                    },
+                  ],
                 };
-              } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string' && delta.signature.length > 0) {
+              } else if (
+                delta.type === "signature_delta" &&
+                typeof delta.signature === "string" &&
+                delta.signature.length > 0
+              ) {
                 lastSignature = delta.signature;
               }
               break;
             }
-            case 'content_block_stop': {
+            case "content_block_stop": {
               const idx = payload.index ?? 0;
-              if (blockTypes.get(idx) === 'tool_use') {
-                const meta = toolUseMeta.get(idx) ?? { id: `toolu_${idx}`, name: '' };
-                const args = toolUseBuffers.get(idx) ?? '';
+              if (blockTypes.get(idx) === "tool_use") {
+                const meta = toolUseMeta.get(idx) ?? {
+                  id: `toolu_${idx}`,
+                  name: "",
+                };
+                const args = toolUseBuffers.get(idx) ?? "";
                 yield {
                   id: upstreamId ?? this.makeId(),
-                  object: 'chat.completion.chunk',
+                  object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
                   model: modelId,
-                  choices: [{
-                    index: 0,
-                    delta: {
-                      tool_calls: [{
-                        id: meta.id,
-                        type: 'function',
-                        function: { name: meta.name, arguments: args },
-                      }],
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [
+                          {
+                            id: meta.id,
+                            type: "function",
+                            function: { name: meta.name, arguments: args },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
                     },
-                    finish_reason: null,
-                  }],
+                  ],
                 };
-              } else if (blockTypes.get(idx) === 'thinking' && lastSignature) {
+              } else if (blockTypes.get(idx) === "thinking" && lastSignature) {
                 // Emit a single terminating chunk carrying the signature so
                 // clients can persist it on the assistant message. Clients
                 // that build a this-turn assistant message emit just the
                 // text chunks + this signature chunk. (#290)
                 const sig = lastSignature;
-                lastSignature = '';
+                lastSignature = "";
                 yield {
                   id: upstreamId ?? this.makeId(),
-                  object: 'chat.completion.chunk',
+                  object: "chat.completion.chunk",
                   created: Math.floor(Date.now() / 1000),
                   model: modelId,
-                  choices: [{
-                    index: 0,
-                    delta: { thinking_signature: sig },
-                    finish_reason: null,
-                  }],
+                  choices: [
+                    {
+                      index: 0,
+                      delta: { thinking_signature: sig },
+                      finish_reason: null,
+                    },
+                  ],
                 };
               }
               break;
             }
-            case 'message_delta': {
+            case "message_delta": {
               const delta = payload.delta;
               if (delta?.stop_reason) {
                 finalStopReason = this.translateStopReason(delta.stop_reason);
@@ -733,7 +852,7 @@ export class AnthropicCompatProvider extends BaseProvider {
               if (finish) yield finish;
               break;
             }
-            case 'message_stop': {
+            case "message_stop": {
               const finish = yieldFinishIfNeeded();
               if (finish) yield finish;
               return;
@@ -750,11 +869,15 @@ export class AnthropicCompatProvider extends BaseProvider {
       const finish = yieldFinishIfNeeded();
       if (finish) yield finish;
     } finally {
-      reader.cancel().catch(() => { /* upstream already gone */ });
+      reader.cancel().catch(() => {
+        /* upstream already gone */
+      });
     }
 
     if (!sawFinishReason) {
-      throw new Error(`${this.name} stream ended unexpectedly (no message_stop, no stop_reason) — connection reset or truncated upstream`);
+      throw new Error(
+        `${this.name} stream ended unexpectedly (no message_stop, no stop_reason) — connection reset or truncated upstream`,
+      );
     }
   }
 
@@ -772,12 +895,12 @@ export class AnthropicCompatProvider extends BaseProvider {
     const res = await this.fetchWithTimeout(
       url,
       {
-        method: 'POST',
+        method: "POST",
         headers: this.buildRequestHeaders(apiKey),
         body: JSON.stringify({
-          model: 'claude-3-haiku-20240307',
+          model: "claude-3-haiku-20240307",
           max_tokens: 1,
-          messages: [{ role: 'user', content: 'hi' }],
+          messages: [{ role: "user", content: "hi" }],
         }),
       },
       30000,

@@ -105,7 +105,8 @@ type RoutingStrategy =
   | "iterative_refinement"
   | "fastest"
   | "reliable"
-  | "custom";
+  | "custom"
+  | "racing";
 
 type RoutingWeights = {
   reliability: number;
@@ -240,6 +241,12 @@ const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
     label: "Custom",
     blurb:
       "Set your own balance of reliability, speed, intelligence and latency with sliders. Same engine as the presets, just your weights.",
+  },
+  {
+    key: "racing",
+    label: "Racing",
+    blurb:
+      "Fire requests to all available models in parallel (1 key per model). The first model to respond wins — its stream is forwarded to you, and the rest are cancelled. No scoring, no fallback chain; pure speed. Best for latency-sensitive queries where any capable model will do.",
   },
 ];
 

@@ -38,10 +38,11 @@ export type RoutingStrategy =
   | "iterative_refinement"
   | "fastest"
   | "reliable"
-  | "custom";
+  | "custom"
+  | "racing";
 
 export const BANDIT_PRESETS: Record<
-  Exclude<RoutingStrategy, "priority" | "custom">,
+  Exclude<RoutingStrategy, "priority" | "custom" | "racing">,
   RoutingWeights
 > = {
   // Reliability leads; speed, intelligence, latency split the rest evenly.

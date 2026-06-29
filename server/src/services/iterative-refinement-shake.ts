@@ -92,6 +92,7 @@ export type OscillatorModelCallResult =
   | string
   | {
       text?: string | null;
+      toolCalls?: ChatToolCall[];
     }
   | null
   | undefined;
@@ -119,9 +120,12 @@ export interface ExecuteOscillatorParams {
   onChunk?: (chunk: OscillatorStreamChunk) => void;
 }
 
+import type { ChatToolCall } from "@animarouter/shared/types.js";
+
 export interface ExecuteOscillatorResult {
   status: "completed" | "foundation_fallback" | "single_model_fallback";
   text?: string;
+  toolCalls?: ChatToolCall[];
   foundation?: IterativeRefinementCandidate;
   injection?: IterativeRefinementCandidate;
   foundationText?: string;
@@ -567,6 +571,20 @@ function asText(result: OscillatorModelCallResult): string {
   return typeof result === "string" ? result : (result.text ?? "");
 }
 
+function hasToolCalls(result: OscillatorModelCallResult): boolean {
+  return (
+    result != null &&
+    typeof result !== "string" &&
+    (result as { toolCalls?: ChatToolCall[] }).toolCalls != null &&
+    (result as { toolCalls?: ChatToolCall[] }).toolCalls!.length > 0
+  );
+}
+
+function extractToolCalls(result: OscillatorModelCallResult): ChatToolCall[] | undefined {
+  if (result == null || typeof result === "string") return undefined;
+  return (result as { toolCalls?: ChatToolCall[] }).toolCalls;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -622,24 +640,23 @@ async function callStep(params: {
   callModel: OscillatorModelCall;
   timeoutMs: number;
   onChunk?: (delta: string, accumulated: string) => void;
-}): Promise<string> {
-  const text = asText(
-    await withStepTimeout(
-      params.callModel({
-        step: params.step,
-        candidate: params.candidate,
-        messages: params.messages,
-        onChunk: params.onChunk,
-      }),
-      params.timeoutMs,
-      params.step,
-    ),
-  ).trim();
-  if (!text)
+}): Promise<OscillatorModelCallResult> {
+  const result = await withStepTimeout(
+    params.callModel({
+      step: params.step,
+      candidate: params.candidate,
+      messages: params.messages,
+      onChunk: params.onChunk,
+    }),
+    params.timeoutMs,
+    params.step,
+  );
+  const text = asText(result).trim();
+  if (!text && !hasToolCalls(result))
     throw new Error(
       `Iterative Refinement ${params.step} step returned empty text`,
     );
-  return text;
+  return result;
 }
 
 function limitSentences(text: string, maxSentences: number): string {
@@ -676,10 +693,9 @@ export async function executeOscillator(
     foundationAttempts++;
     try {
       // Foundation step
-      let foundationText = "";
+      let foundationResult: OscillatorModelCallResult;
       const foundationStreamHandler = stream
         ? (delta: string, accumulated: string) => {
-            foundationText = accumulated;
             emitChunk({
               step: "foundation",
               delta,
@@ -689,7 +705,7 @@ export async function executeOscillator(
           }
         : undefined;
 
-      foundationText = await callStep({
+      foundationResult = await callStep({
         step: "foundation",
         candidate: foundation,
         messages: params.messages,
@@ -698,12 +714,46 @@ export async function executeOscillator(
         onChunk: foundationStreamHandler,
       });
 
+      const foundationText = asText(foundationResult).trim();
+      const foundationToolCalls = extractToolCalls(foundationResult);
+
       emitChunk({
         step: "foundation",
         delta: "",
         accumulated: foundationText,
         stepComplete: true,
       });
+
+      // Foundation returned tool_calls — short-circuit: the client's agent
+      // loop must execute the tool before the next turn, so injection and
+      // anchor refinement cannot improve a structured tool call anyway.
+      // Return with status "completed" and include the tool_calls payload.
+      if (foundationToolCalls && foundationToolCalls.length > 0) {
+        const result: ExecuteOscillatorResult = {
+          status: "completed",
+          text: foundationText || undefined,
+          toolCalls: foundationToolCalls,
+          foundation,
+          foundationText,
+          foundationAttempts,
+          bridges: {},
+        };
+        if (stream)
+          emitChunk({
+            step: "foundation",
+            delta: "",
+            accumulated: foundationText,
+            stepComplete: true,
+            final: result,
+          });
+        return result;
+      }
+
+      if (!foundationText) {
+        // Foundation returned neither text nor tool_calls — try next candidate
+        lastFoundationError = `Iterative Refinement foundation step returned empty text`;
+        continue;
+      }
 
       const injection = resolveInjectionModel(
         config,
@@ -760,14 +810,16 @@ export async function executeOscillator(
         : undefined;
 
       try {
-        injectionText = await callStep({
-          step: "injection",
-          candidate: injection,
-          messages: injectionBridge.messages,
-          callModel: params.callModel,
-          timeoutMs: config.stepTimeoutMs,
-          onChunk: injectionStreamHandler,
-        });
+        injectionText = asText(
+          await callStep({
+            step: "injection",
+            candidate: injection,
+            messages: injectionBridge.messages,
+            callModel: params.callModel,
+            timeoutMs: config.stepTimeoutMs,
+            onChunk: injectionStreamHandler,
+          }),
+        );
         injectionText = limitSentences(
           injectionText,
           config.injectionMaxSentences,
@@ -829,14 +881,16 @@ export async function executeOscillator(
         : undefined;
 
       try {
-        anchorText = await callStep({
-          step: "anchor",
-          candidate: foundation,
-          messages: anchorBridge.messages,
-          callModel: params.callModel,
-          timeoutMs: config.stepTimeoutMs,
-          onChunk: anchorStreamHandler,
-        });
+        anchorText = asText(
+          await callStep({
+            step: "anchor",
+            candidate: foundation,
+            messages: anchorBridge.messages,
+            callModel: params.callModel,
+            timeoutMs: config.stepTimeoutMs,
+            onChunk: anchorStreamHandler,
+          }),
+        );
         anchorAccumulated = anchorText;
       } catch (error) {
         const result: ExecuteOscillatorResult = {
