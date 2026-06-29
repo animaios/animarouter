@@ -51,23 +51,16 @@ export interface IterativeRefinementCandidate extends RoutingScore {
 
 export interface IterativeRefinementEligibilityInput {
   strategy: RoutingStrategy;
-  promptText?: string | null;
   pinnedModelDbId?: number | null;
   loadShedActive?: boolean;
   config?: OscillatorConfig;
 }
 
-export type IterativeRefinementOscillatorSkipReason =
-  | "non_iterative_refinement_strategy"
-  | "pinned_model"
-  | "load_shed"
-  | "simple_prompt";
-
 export interface IterativeRefinementOscillatorDecision {
   mode: "oscillator" | "single_model";
   config: OscillatorConfig;
   loadShedActive: boolean;
-  skipReason?: IterativeRefinementOscillatorSkipReason;
+  skipReason?: "non_iterative_refinement_strategy" | "pinned_model" | "load_shed";
 }
 
 export interface IterativeRefinementOscillatorDecisionInput
@@ -271,18 +264,7 @@ export function isIterativeRefinementLoadShedActive(
   );
 }
 
-function isComplexReasoningPrompt(promptText?: string | null): boolean {
-  const normalized = promptText?.trim() ?? "";
-  if (!normalized) return false;
 
-  const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
-  if (wordCount < 4) return false;
-  if (normalized.length >= 240 || wordCount >= 40) return true;
-
-  return /\b(?:analy[sz]e|architecture|trade-?offs?|debug|diagnos[ei]s|root cause|compare|evaluate|reason|strategy|design|plan|prove|derive|optimi[sz]e|refactor|explain)\b/iu.test(
-    normalized,
-  );
-}
 
 export function getIterativeRefinementOscillatorDecision(
   input: IterativeRefinementOscillatorDecisionInput,
@@ -316,15 +298,6 @@ export function getIterativeRefinementOscillatorDecision(
       skipReason: "load_shed",
     };
   }
-  if (!isComplexReasoningPrompt(input.promptText)) {
-    return {
-      mode: "single_model",
-      config,
-      loadShedActive,
-      skipReason: "simple_prompt",
-    };
-  }
-
   return { mode: "oscillator", config, loadShedActive };
 }
 

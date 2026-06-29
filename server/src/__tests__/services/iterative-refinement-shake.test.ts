@@ -562,7 +562,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
         currentConcurrent: 22,
         config: config({ loadShedThreshold: 21 }),
       }),
@@ -577,7 +576,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
         currentConcurrent: 21,
         config: config({ loadShedThreshold: 21 }),
       }),
@@ -587,18 +585,16 @@ describe("Iterative Refinement Shake routing helpers", () => {
     });
   });
 
-  it("routes simple Iterative Refinement prompts through the normal single-model path", () => {
+  it("routes simple Iterative Refinement prompts through the oscillator", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "hello",
         currentConcurrent: 0,
         config: config(),
       }),
     ).toMatchObject({
-      mode: "single_model",
+      mode: "oscillator",
       loadShedActive: false,
-      skipReason: "simple_prompt",
     });
   });
 
@@ -606,14 +602,12 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "smartest",
-        promptText: "Analyze this architecture.",
         config: config(),
       }).skipReason,
     ).toBe("non_iterative_refinement_strategy");
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
         pinnedModelDbId: 1,
         config: config(),
       }).skipReason,
@@ -621,7 +615,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
         pinnedModelDbId: 0,
         config: config(),
       }).skipReason,
