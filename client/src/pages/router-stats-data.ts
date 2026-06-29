@@ -1,4 +1,4 @@
-import type { ModelStats } from "../../../shared/types";
+import type { ModelStats, ModelTimelineResponse } from "../../../shared/types";
 
 export interface ProviderMixSlice {
   id: string;
@@ -30,8 +30,20 @@ interface ProviderAccumulator {
   successfulRequests: number;
 }
 
+const EMPTY_MODEL_TIMELINE: ModelTimelineResponse = { series: [], points: [] };
+
+export function coerceRows<T>(rows: T[] | null | undefined): T[] {
+  return rows ?? [];
+}
+
+export function coerceModelTimeline(
+  modelTimeline: ModelTimelineResponse | null | undefined,
+): ModelTimelineResponse {
+  return modelTimeline ?? EMPTY_MODEL_TIMELINE;
+}
+
 function successCount(row: ModelStats) {
-  return (row.requests * row.successRate) / 100;
+  return (row.requests * (row.successRate ?? 0)) / 100;
 }
 
 function weightedSuccessRate(successfulRequests: number, requests: number) {

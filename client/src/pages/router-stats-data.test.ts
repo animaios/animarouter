@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { ModelStats } from "../../../shared/types";
-import { buildModelMixData } from "./router-stats-data";
+import type { ModelStats, ModelTimelineResponse } from "../../../shared/types";
+import {
+  buildModelMixData,
+  coerceModelTimeline,
+  coerceRows,
+} from "./router-stats-data";
 
 const base = {
   successRate: 100,
@@ -92,5 +96,59 @@ describe("buildModelMixData", () => {
       },
       { id: "other", label: "Other", provider: "Multiple", requests: 20 },
     ]);
+  });
+
+  it("treats missing runtime success rates as zero", () => {
+    const result = buildModelMixData([
+      {
+        ...base,
+        platform: "openai",
+        modelId: "a",
+        displayName: "A",
+        requests: 10,
+        successRate: null as unknown as number,
+      },
+      {
+        ...base,
+        platform: "google",
+        modelId: "b",
+        displayName: "B",
+        requests: 5,
+        successRate: undefined as unknown as number,
+      },
+    ]);
+
+    expect(result.providerRing).toEqual([
+      { id: "openai", label: "openai", requests: 10, successRate: 0 },
+      { id: "google", label: "google", requests: 5, successRate: 0 },
+    ]);
+  });
+});
+
+describe("router stats query payload guards", () => {
+  it("normalizes null row arrays to empty arrays", () => {
+    expect(coerceRows<ModelStats>(null)).toEqual([]);
+    expect(coerceRows<ModelStats>(undefined)).toEqual([]);
+  });
+
+  it("normalizes a null model timeline to an empty timeline", () => {
+    expect(coerceModelTimeline(null)).toEqual({ series: [], points: [] });
+  });
+
+  it("preserves a non-null model timeline", () => {
+    const timeline: ModelTimelineResponse = {
+      series: [
+        {
+          key: "model_0",
+          platform: "openai",
+          modelId: "a",
+          displayName: "A",
+          requests: 1,
+        },
+      ],
+      points: [{ timestamp: "2026-06-30T00:00:00.000Z", model_0: 1 }],
+    };
+
+    expect(coerceModelTimeline(timeline)).toBe(timeline);
   });
 });

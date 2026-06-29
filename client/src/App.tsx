@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { AuthGate } from '@/components/auth-gate'
 import { Toaster } from '@/components/toaster'
+import { isRouterStatsPathname } from '@/lib/router-shell'
 import { drainPersisted } from '@/lib/toast'
 import { ErrorBoundary } from '@/components/error-boundary'
 
@@ -199,7 +200,7 @@ function Navbar() {
 
 function MainContent() {
   const location = useLocation()
-  const isRouterStatsRoute = location.pathname === '/router-stats'
+  const isRouterStatsRoute = isRouterStatsPathname(location.pathname)
 
   return (
     <main className={`${isRouterStatsRoute ? 'max-w-7xl' : 'max-w-6xl'} mx-auto px-6 py-8`}>

@@ -36,7 +36,12 @@ import type {
   ModelTimelineResponse,
   PlatformStats,
 } from "../../../shared/types";
-import { buildModelMixData, type ModelMixData } from "./router-stats-data";
+import {
+  buildModelMixData,
+  coerceModelTimeline,
+  coerceRows,
+  type ModelMixData,
+} from "./router-stats-data";
 
 type TimeRange = "15m" | "1h" | "24h" | "7d" | "30d";
 type ChartInterval = "minute" | "5min" | "hour" | "day";
@@ -50,8 +55,6 @@ type ProviderBarDatum = {
 
 const TIME_RANGES: TimeRange[] = ["15m", "1h", "24h", "7d", "30d"];
 const RGB_MODE_STORAGE_KEY = "routerStatsRgbMode";
-const EMPTY_MODEL_TIMELINE: ModelTimelineResponse = { series: [], points: [] };
-
 const ROUTER_STATS_COLORS = {
   requests: "var(--router-stat-green)",
   latency: "var(--router-stat-cyan)",
@@ -633,24 +636,26 @@ export default function RouterStatsPage() {
       apiFetch<AnalyticsSummary>(`/api/analytics/summary?range=${range}`),
   });
 
-  const { data: byPlatform = [] } = useQuery({
+  const { data: byPlatform } = useQuery({
     queryKey: ["analytics", "by-platform", range],
     queryFn: () =>
-      apiFetch<PlatformStats[]>(`/api/analytics/by-platform?range=${range}`),
+      apiFetch<PlatformStats[] | null>(
+        `/api/analytics/by-platform?range=${range}`,
+      ),
   });
 
-  const { data: modelTimeline = EMPTY_MODEL_TIMELINE } = useQuery({
+  const { data: modelTimelineResponse } = useQuery({
     queryKey: ["analytics", "model-timeline", range],
     queryFn: () =>
-      apiFetch<ModelTimelineResponse>(
+      apiFetch<ModelTimelineResponse | null>(
         `/api/analytics/model-timeline?range=${range}`,
       ),
   });
 
-  const { data: byModel = [] } = useQuery({
+  const { data: byModel } = useQuery({
     queryKey: ["analytics", "by-model", range],
     queryFn: () =>
-      apiFetch<ModelStats[]>(`/api/analytics/by-model?range=${range}`),
+      apiFetch<ModelStats[] | null>(`/api/analytics/by-model?range=${range}`),
   });
 
   const { data: errors = [] } = useQuery({
@@ -666,6 +671,11 @@ export default function RouterStatsPage() {
         `/api/analytics/error-distribution?range=${range}`,
       ),
   });
+
+  const modelTimeline = useMemo(
+    () => coerceModelTimeline(modelTimelineResponse),
+    [modelTimelineResponse],
+  );
 
   const formattedModelTimeline = useMemo(
     () =>
@@ -686,7 +696,7 @@ export default function RouterStatsPage() {
     formattedModelTimeline.some((d) => Number(d.totalRequests ?? 0) > 0);
 
   const modelLeaderboard = useMemo(
-    () => [...byModel].sort((a, b) => b.requests - a.requests),
+    () => [...coerceRows(byModel)].sort((a, b) => b.requests - a.requests),
     [byModel],
   );
   const showPinnedCol = useMemo(
@@ -698,11 +708,14 @@ export default function RouterStatsPage() {
     [modelLeaderboard],
   );
   const providerByRequests = useMemo(
-    () => [...byPlatform].sort((a, b) => b.requests - a.requests),
+    () => [...coerceRows(byPlatform)].sort((a, b) => b.requests - a.requests),
     [byPlatform],
   );
   const providerByLatency = useMemo(
-    () => [...byPlatform].sort((a, b) => b.avgLatencyMs - a.avgLatencyMs),
+    () =>
+      [...coerceRows(byPlatform)].sort(
+        (a, b) => b.avgLatencyMs - a.avgLatencyMs,
+      ),
     [byPlatform],
   );
   const errorByProvider = useMemo(
