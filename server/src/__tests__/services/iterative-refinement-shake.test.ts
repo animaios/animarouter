@@ -562,7 +562,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
         currentConcurrent: 22,
         config: config({ loadShedThreshold: 21 }),
       }),
@@ -577,7 +576,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture and explain the tradeoffs.",
         currentConcurrent: 21,
         config: config({ loadShedThreshold: 21 }),
       }),
@@ -591,7 +589,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "hello",
         currentConcurrent: 0,
         config: config(),
       }),
@@ -605,14 +602,12 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "smartest",
-        promptText: "Analyze this architecture.",
         config: config(),
       }).skipReason,
     ).toBe("non_iterative_refinement_strategy");
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
         pinnedModelDbId: 1,
         config: config(),
       }).skipReason,
@@ -620,7 +615,6 @@ describe("Iterative Refinement Shake routing helpers", () => {
     expect(
       getIterativeRefinementOscillatorDecision({
         strategy: "iterative_refinement",
-        promptText: "Analyze this architecture.",
         pinnedModelDbId: 0,
         config: config(),
       }).skipReason,

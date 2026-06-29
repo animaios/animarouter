@@ -179,13 +179,7 @@ function getSessionKeyWithApiKey(
   return `${apiKey}:${sessionKey}`;
 }
 
-function promptTextForIterativeRefinement(messages: ChatMessage[]): string {
-  return messages
-    .filter((m) => m.role === "user")
-    .map((m) => contentToString(m.content))
-    .filter(Boolean)
-    .join("\n");
-}
+
 
 function oscillatorFailedStepNumber(
   step: ExecuteOscillatorResult["failedStep"],
@@ -1205,12 +1199,9 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
   const fastFired = new Set<string>();
 
   const activeRoutingStrategy = getRoutingStrategy();
-  const iterativeRefinementPromptText =
-    promptTextForIterativeRefinement(messages);
   const iterativeRefinementConcurrentRequests = getProviderInFlightTotal();
   const iterativeRefinementDecision = getIterativeRefinementOscillatorDecision({
     strategy: activeRoutingStrategy,
-    promptText: iterativeRefinementPromptText,
     pinnedModelDbId: isAutoRouted
       ? undefined
       : (strictPinnedModelDbId ?? preferredModel ?? 0),
