@@ -160,3 +160,117 @@
         font-feature-settings: 'ss01';
     }
 }
+
+@layer components {
+    .router-stats {
+        --router-stat-bg: color-mix(in oklab, var(--background) 94%, oklch(0.72 0.2 182) 6%);
+        --router-stat-panel: color-mix(in oklab, var(--card) 91%, oklch(0.8 0.16 192) 9%);
+        --router-stat-border: color-mix(in oklab, var(--border) 70%, oklch(0.68 0.18 192) 30%);
+        --router-stat-grid: color-mix(in oklab, var(--border) 72%, oklch(0.68 0.18 192) 28%);
+        --router-stat-green: oklch(0.7 0.22 151);
+        --router-stat-cyan: oklch(0.68 0.18 210);
+        --router-stat-magenta: oklch(0.68 0.22 330);
+        --router-stat-yellow: oklch(0.78 0.18 92);
+        --router-stat-red: oklch(0.62 0.22 28);
+        background: var(--router-stat-bg);
+    }
+
+    .dark .router-stats {
+        --router-stat-bg: color-mix(in oklab, var(--background) 88%, oklch(0.32 0.12 210) 12%);
+        --router-stat-panel: color-mix(in oklab, var(--card) 84%, oklch(0.34 0.1 210) 16%);
+        --router-stat-border: color-mix(in oklab, var(--border) 64%, oklch(0.76 0.16 210) 36%);
+        --router-stat-grid: color-mix(in oklab, var(--border) 68%, oklch(0.66 0.16 210) 32%);
+        --router-stat-green: oklch(0.78 0.2 151);
+        --router-stat-cyan: oklch(0.76 0.18 210);
+        --router-stat-magenta: oklch(0.75 0.2 330);
+        --router-stat-yellow: oklch(0.83 0.17 92);
+        --router-stat-red: oklch(0.72 0.2 28);
+    }
+
+    .router-stats-panel,
+    .router-stats-metric,
+    .router-stats-control {
+        background: var(--router-stat-panel);
+        border-color: var(--router-stat-border);
+        box-shadow: inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent);
+    }
+
+    .router-stats-control [aria-pressed="true"],
+    .router-stats-rgb-toggle[aria-pressed="true"] {
+        border-color: color-mix(in oklab, var(--router-stat-cyan) 42%, var(--border));
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--router-stat-cyan) 22%, transparent);
+    }
+
+    .router-stats-live-feed > .rounded-3xl {
+        margin-bottom: 0;
+        border-color: var(--router-stat-border);
+        border-radius: var(--radius-lg);
+        background: var(--router-stat-panel);
+    }
+
+    .router-stats-live-feed .rounded-b-3xl {
+        border-bottom-right-radius: var(--radius-lg);
+        border-bottom-left-radius: var(--radius-lg);
+    }
+
+    .router-stats-live-feed .animate-ping {
+        animation: none;
+    }
+
+    .router-stats-live-feed .transition-all {
+        transition-property: none;
+        transition-duration: 0s;
+    }
+
+    .router-stats.rgb-mode .router-stats-panel,
+    .router-stats.rgb-mode .router-stats-metric {
+        animation: router-stat-rgb-panel 8s linear infinite;
+    }
+
+    .router-stats.rgb-mode .router-stats-control [aria-pressed="true"],
+    .router-stats.rgb-mode .router-stats-rgb-toggle {
+        animation: router-stat-rgb-control 5s linear infinite;
+    }
+
+    @keyframes router-stat-rgb-panel {
+        0%, 100% {
+            border-color: color-mix(in oklab, var(--router-stat-green) 42%, var(--border));
+            box-shadow:
+                inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent),
+                0 0 22px color-mix(in oklab, var(--router-stat-green) 12%, transparent);
+        }
+        33% {
+            border-color: color-mix(in oklab, var(--router-stat-cyan) 42%, var(--border));
+            box-shadow:
+                inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent),
+                0 0 22px color-mix(in oklab, var(--router-stat-cyan) 12%, transparent);
+        }
+        66% {
+            border-color: color-mix(in oklab, var(--router-stat-magenta) 42%, var(--border));
+            box-shadow:
+                inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent),
+                0 0 22px color-mix(in oklab, var(--router-stat-magenta) 12%, transparent);
+        }
+    }
+
+    @keyframes router-stat-rgb-control {
+        0%, 100% {
+            box-shadow: 0 0 0 1px color-mix(in oklab, var(--router-stat-green) 36%, transparent);
+        }
+        33% {
+            box-shadow: 0 0 0 1px color-mix(in oklab, var(--router-stat-cyan) 36%, transparent);
+        }
+        66% {
+            box-shadow: 0 0 0 1px color-mix(in oklab, var(--router-stat-magenta) 36%, transparent);
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .router-stats.rgb-mode .router-stats-panel,
+        .router-stats.rgb-mode .router-stats-metric,
+        .router-stats.rgb-mode .router-stats-control [aria-pressed="true"],
+        .router-stats.rgb-mode .router-stats-rgb-toggle {
+            animation: none;
+        }
+    }
+}

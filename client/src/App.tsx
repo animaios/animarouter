@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { AuthGate } from '@/components/auth-gate'
 import { Toaster } from '@/components/toaster'
+import { isRouterStatsPathname } from '@/lib/router-shell'
 import { drainPersisted } from '@/lib/toast'
 import { ErrorBoundary } from '@/components/error-boundary'
 
@@ -21,7 +22,6 @@ const KeysPage = lazy(() => import('@/pages/KeysPage'))
 const PlaygroundPage = lazy(() => import('@/pages/PlaygroundPage'))
 const FallbackPage = lazy(() => import('@/pages/FallbackPage'))
 const EmbeddingsPage = lazy(() => import('@/pages/EmbeddingsPage'))
-const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
 const RouterStatsPage = lazy(() => import('@/pages/RouterStatsPage'))
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 
@@ -31,7 +31,6 @@ const navItems = [
   { to: '/models', label: 'Models' },
   { to: '/playground', label: 'Playground' },
   { to: '/keys', label: 'Keys' },
-  { to: '/analytics', label: 'Analytics' },
   { to: '/router-stats', label: 'Router Stats' },
   { to: '/settings', label: 'Settings' },
 ]
@@ -198,6 +197,35 @@ function Navbar() {
     </header>
   )
 }
+
+function MainContent() {
+  const location = useLocation()
+  const isRouterStatsRoute = isRouterStatsPathname(location.pathname)
+
+  return (
+    <main className={`${isRouterStatsRoute ? 'max-w-7xl' : 'max-w-6xl'} mx-auto px-6 py-8`}>
+      <Suspense fallback={<PageLoader />}>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/" element={<Navigate to="/models/chat" replace />} />
+            <Route path="/models" element={<Navigate to="/models/chat" replace />} />
+            <Route path="/models/chat" element={<FallbackPage />} />
+            <Route path="/models/embeddings" element={<EmbeddingsPage />} />
+            <Route path="/playground" element={<PlaygroundPage />} />
+            <Route path="/keys" element={<KeysPage />} />
+            <Route path="/fallback" element={<Navigate to="/models/chat" replace />} />
+            <Route path="/analytics" element={<Navigate to="/router-stats" replace />} />
+            <Route path="/router-stats" element={<RouterStatsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/test" element={<Navigate to="/playground" replace />} />
+            <Route path="/health" element={<Navigate to="/keys" replace />} />
+          </Routes>
+        </ErrorBoundary>
+      </Suspense>
+    </main>
+  )
+}
+
 function App() {
   // Replay any toasts that were queued while the tab was hidden (auto-
   // discovered models, fallbacks exhausted, etc.) so the user sees them on
@@ -211,26 +239,7 @@ function App() {
           <Toaster />
           <div className={`min-h-screen ${isDesktopApp ? 'desktop-backdrop' : 'bg-background'}`}>
             <Navbar />
-            <main className="max-w-6xl mx-auto px-6 py-8">
-              <Suspense fallback={<PageLoader />}>
-                <ErrorBoundary>
-                  <Routes>
-                    <Route path="/" element={<Navigate to="/models/chat" replace />} />
-                    <Route path="/models" element={<Navigate to="/models/chat" replace />} />
-                    <Route path="/models/chat" element={<FallbackPage />} />
-                    <Route path="/models/embeddings" element={<EmbeddingsPage />} />
-                    <Route path="/playground" element={<PlaygroundPage />} />
-                    <Route path="/keys" element={<KeysPage />} />
-                    <Route path="/fallback" element={<Navigate to="/models/chat" replace />} />
-                    <Route path="/analytics" element={<AnalyticsPage />} />
-                    <Route path="/router-stats" element={<RouterStatsPage />} />
-                    <Route path="/settings" element={<SettingsPage />} />
-                    <Route path="/test" element={<Navigate to="/playground" replace />} />
-                    <Route path="/health" element={<Navigate to="/keys" replace />} />
-                  </Routes>
-                </ErrorBoundary>
-              </Suspense>
-            </main>
+            <MainContent />
           </div>
         </AuthGate>
       </BrowserRouter>
