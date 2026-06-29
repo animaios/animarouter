@@ -22,6 +22,7 @@ const PlaygroundPage = lazy(() => import('@/pages/PlaygroundPage'))
 const FallbackPage = lazy(() => import('@/pages/FallbackPage'))
 const EmbeddingsPage = lazy(() => import('@/pages/EmbeddingsPage'))
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
+const RouterStatsPage = lazy(() => import('@/pages/RouterStatsPage'))
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 
 const queryClient = new QueryClient()
@@ -31,6 +32,7 @@ const navItems = [
   { to: '/playground', label: 'Playground' },
   { to: '/keys', label: 'Keys' },
   { to: '/analytics', label: 'Analytics' },
+  { to: '/router-stats', label: 'Router Stats' },
   { to: '/settings', label: 'Settings' },
 ]
 
@@ -221,6 +223,7 @@ function App() {
                     <Route path="/keys" element={<KeysPage />} />
                     <Route path="/fallback" element={<Navigate to="/models/chat" replace />} />
                     <Route path="/analytics" element={<AnalyticsPage />} />
+                    <Route path="/router-stats" element={<RouterStatsPage />} />
                     <Route path="/settings" element={<SettingsPage />} />
                     <Route path="/test" element={<Navigate to="/playground" replace />} />
                     <Route path="/health" element={<Navigate to="/keys" replace />} />

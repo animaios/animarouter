@@ -267,13 +267,33 @@ export type LiveEventBase =
       at: number;
     }
   | {
-      type: "oscillator.stream_error";
-      sessionKey: string;
-      step: "foundation" | "injection" | "anchor";
-      error: string;
-      fallback: boolean;
-      at: number;
-    };
+        type: "oscillator.stream_error";
+        sessionKey: string;
+        step: "foundation" | "injection" | "anchor";
+        error: string;
+        fallback: boolean;
+        at: number;
+      }
+    | {
+        type: "racing.start";
+        id: string;
+        candidates: string[];
+        stream: boolean;
+        at: number;
+      }
+    | {
+        type: "racing.winner";
+        id: string;
+        model: string;
+        keyId: number;
+        ttfbMs: number;
+        at: number;
+      }
+    | {
+        type: "racing.all_failed";
+        id: string;
+        at: number;
+      };
 
 /** Live event as delivered to SSE subscribers (may carry dedup metadata). */
 export type LiveEvent = LiveEventBase & { _suppressed?: number };

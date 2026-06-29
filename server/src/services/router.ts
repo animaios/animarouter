@@ -339,6 +339,7 @@ const VALID_STRATEGIES: RoutingStrategy[] = [
   "fastest",
   "reliable",
   "custom",
+  "racing",
 ];
 
 export function getRoutingStrategy(): RoutingStrategy {
@@ -410,7 +411,7 @@ export function setCustomWeights(weights: RoutingWeights): void {
 }
 
 function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
-  if (strategy === "priority") return null;
+  if (strategy === "priority" || strategy === "racing") return null;
   if (strategy === "custom") return getCustomWeights();
   return BANDIT_PRESETS[strategy];
 }
@@ -1608,6 +1609,181 @@ export function routeRequest(
   ) as any;
   err.status = 429;
   throw err;
+}
+/**
+ * Racing mode: return one viable key per distinct model in the fallback chain.
+ * Used for concurrent "race" requests where the first responder wins.
+ */
+export function routeRacingRequest(
+  estimatedTokens = 1000,
+  requireVision = false,
+  requireTools = false,
+): RouteResult[] {
+  const db = getDb();
+  const groupingEnabled = getSetting("model_grouping_enabled") === "true";
+  const results: RouteResult[] = [];
+
+  const getOneHealthyKey = (platform: string, modelId: string): KeyRow | null => {
+    const keys = db
+      .prepare(
+        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
+      )
+      .all(platform) as KeyRow[];
+    const heartbeatEnabled = isHeartbeatEnabled();
+
+    let candidates: KeyRow[];
+    if (heartbeatEnabled) {
+      candidates = keys.filter((k) => isKeyHealthy(k.id, modelId));
+      if (candidates.length === 0) return null;
+    } else {
+      candidates = keys;
+    }
+
+    // Round-robin selection
+    const rrKey = `${platform}:${modelId}`;
+    const rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+    const key = candidates[rrIdx % candidates.length];
+
+    // Check if exhausted
+    if (isExhausted(key.id, modelId)) return null;
+
+    // Check parallel request gating
+    const cp = db
+      .prepare(
+        "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
+      )
+      .get(platform) as { max_parallel_requests: number | null } | undefined;
+    const maxPar = cp?.max_parallel_requests ?? null;
+    if (!tryReserveSlot(platform, maxPar)) return null;
+
+    return key;
+  };
+
+  // Helper to build a single route result
+  const buildRouteResult = (
+    platform: string,
+    modelId: string,
+    modelDbId: number,
+    displayName: string,
+    rpdLimit: number | null,
+    tpdLimit: number | null,
+    maxOutputTokens: number | null,
+    groupId?: number,
+  ): RouteResult | null => {
+    const provider = buildProviderFor(platform);
+    if (!provider) return null;
+
+    const key = getOneHealthyKey(platform, modelId);
+    if (!key) return null;
+
+    let decryptedKey: string;
+    try {
+      decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
+    } catch {
+      return null;
+    }
+
+    const release = () => releaseSlot(platform);
+
+    return {
+      provider,
+      modelId,
+      modelDbId,
+      apiKey: decryptedKey,
+      keyId: key.id,
+      platform,
+      displayName,
+      rpdLimit,
+      tpdLimit,
+      maxOutputTokens,
+      release,
+      useProxy: key.use_proxy === 1,
+      transportId: transportIdFromUseProxy(key.use_proxy === 1),
+      groupId,
+    };
+  };
+
+  if (groupingEnabled) {
+    const groupChain = db
+      .prepare(`
+      SELECT fc.group_id, fc.priority, fc.enabled,
+             mg.group_key, mg.display_name, mg.benchmark_score,
+             mg.intelligence_rank, mg.size_label, mg.context_window,
+             mg.max_output_tokens, mg.supports_vision, mg.supports_tools
+      FROM fallback_config fc
+      JOIN model_groups mg ON mg.id = fc.group_id
+      WHERE fc.enabled = 1 AND mg.enabled = 1
+    `)
+      .all() as GroupChainRow[];
+
+    const allGroupIds = groupChain.map((g) => g.group_id);
+    let allProviders: ProviderRow[] = [];
+    if (allGroupIds.length > 0) {
+      const ph = allGroupIds.map(() => "?").join(", ");
+      allProviders = db
+        .prepare(
+          `SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
+                  m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+                  m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+                  m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+                  m.max_output_tokens
+           FROM models m
+           WHERE m.group_id IN (${ph}) AND m.enabled = 1`,
+        )
+        .all(...allGroupIds) as ProviderRow[];
+    }
+
+    for (const provider of allProviders) {
+      if (requireVision && !provider.supports_vision) continue;
+      if (requireTools && !provider.supports_tools) continue;
+      if (provider.context_window != null && estimatedTokens > provider.context_window) continue;
+
+      const route = buildRouteResult(
+        provider.platform,
+        provider.model_id,
+        provider.model_db_id,
+        provider.display_name,
+        provider.rpd_limit,
+        provider.tpd_limit,
+        provider.max_output_tokens,
+        provider.group_id,
+      );
+      if (route) results.push(route);
+    }
+  } else {
+    const chain = db
+      .prepare(`
+      SELECT fc.model_db_id, fc.priority, fc.enabled,
+             m.platform, m.model_id, m.display_name, m.intelligence_rank,
+             m.speed_rank, m.size_label,
+             m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit, m.supports_vision,
+             m.supports_tools, m.context_window, m.max_output_tokens, m.key_id,
+             m.benchmark_score
+      FROM fallback_config fc
+      JOIN models m ON m.id = fc.model_db_id
+      WHERE fc.enabled = 1 AND m.enabled = 1
+    `)
+      .all() as ChainRow[];
+
+    for (const entry of chain) {
+      if (requireVision && !entry.supports_vision) continue;
+      if (requireTools && !entry.supports_tools) continue;
+      if (entry.context_window != null && estimatedTokens > entry.context_window) continue;
+
+      const route = buildRouteResult(
+        entry.platform,
+        entry.model_id,
+        entry.model_db_id,
+        entry.display_name,
+        entry.rpd_limit,
+        entry.tpd_limit,
+        entry.max_output_tokens,
+      );
+      if (route) results.push(route);
+    }
+  }
+
+  return results;
 }
 
 /**

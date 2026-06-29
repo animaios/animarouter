@@ -1,3 +1,4 @@
+import { handleRacingMode } from "../services/racing-mode.js";
 import type { ChatMessage, ModelListRow } from "@animarouter/shared/types.js";
 import crypto from "crypto";
 import type { Request, Response } from "express";
@@ -69,6 +70,7 @@ import {
   hasEnabledVisionModel,
   type RouteResult,
   routeRequest,
+  routeRacingRequest,
 } from "../services/router.js";
 
 /** Resolve the upstream base URL for proxy transport. Falls back to the provider's
@@ -1210,17 +1212,15 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
   const shouldTryIterativeRefinementOscillator =
     iterativeRefinementDecision.mode === "oscillator" &&
     !stream &&
-    !hasImage &&
-    !wantsTools;
+    !hasImage;
   const shouldTryIterativeRefinementStreaming =
     iterativeRefinementDecision.mode === "oscillator" &&
     stream &&
     !hasImage &&
-    !wantsTools &&
     !isPinned;
   const iterativeRefinementRouteBlock =
     iterativeRefinementDecision.skipReason ??
-    (hasImage ? "image_request" : wantsTools ? "tools_request" : undefined);
+    (hasImage ? "image_request" : undefined);
   publish({
     type: "oscillator.decision",
     sessionKey: sessionKey || requestId,
@@ -1319,13 +1319,22 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
           step === "injection"
             ? Math.min(max_tokens ?? 150, 150)
             : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
-        const stepOptions = {
+        const stepOptions: Record<string, unknown> = {
           temperature,
           max_tokens: stepMaxTokens,
           top_p,
           reasoning_effort,
           thinking,
         };
+        // Only Foundation receives tools — if the model calls a tool,
+        // the client must execute it before the next turn, so injection
+        // and anchor refinement must wait.
+        if (step === "foundation" && wantsTools) {
+          stepOptions.tools = tools;
+          if (tool_choice != null) stepOptions.tool_choice = tool_choice;
+          if (parallel_tool_calls != null)
+            stepOptions.parallel_tool_calls = parallel_tool_calls;
+        }
         const relayTransport = getRelayTransport(stepRoute.transportId);
         const useProxyTransport =
           !!relayTransport &&
@@ -1351,6 +1360,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
             );
 
         let accumulated = "";
+        let foundationToolCallsAccum: any[] = [];
 
         for await (const chunk of gen) {
           const anyChunk = chunk as Record<string, any>;
@@ -1377,7 +1387,33 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
               : "";
           if (text) accumulated += text;
 
-          // Stream anchor (final) step chunks to the client in real-time
+          // Collect Foundation tool_call deltas for short-circuit
+          if (step === "foundation" && choice.delta?.tool_calls) {
+            interface StreamingToolDelta {
+              index?: number;
+              id?: string;
+              type?: "function";
+              function?: { name?: string; arguments?: string };
+            }
+            for (const tc of choice.delta.tool_calls as StreamingToolDelta[]) {
+              const idx = tc.index ?? foundationToolCallsAccum.length;
+              if (!foundationToolCallsAccum[idx]) {
+                foundationToolCallsAccum[idx] = {
+                  id: tc.id ?? "",
+                  type: "function",
+                  function: { name: "", arguments: "" },
+                };
+              }
+              if (tc.id) foundationToolCallsAccum[idx].id = tc.id;
+              if (tc.function?.name)
+                foundationToolCallsAccum[idx].function.name += tc.function.name;
+              if (tc.function?.arguments)
+                foundationToolCallsAccum[idx].function.arguments +=
+                  tc.function.arguments;
+            }
+          }
+
+          // Stream anchor (final) step text chunks to the client in real-time
           if (step === "anchor" && text) {
             flushHeaders();
             writeSSE({
@@ -1396,6 +1432,43 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
               at: Date.now(),
             });
           }
+        }
+
+        // Foundation returned tool_calls via streaming — return structured
+        // result so the oscillator short-circuits injection/anchor.
+        if (
+          step === "foundation" &&
+          wantsTools &&
+          foundationToolCallsAccum.length > 0
+        ) {
+          const promptTokens = stepInputTokens;
+          const completionTokens = Math.ceil(accumulated.length / 4);
+          recordRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId);
+          recordTokens(
+            stepRoute.platform,
+            stepRoute.modelId,
+            stepRoute.keyId,
+            promptTokens + completionTokens,
+          );
+          recordSuccess(stepRoute.modelDbId);
+          logRequest(
+            stepRoute.platform,
+            stepRoute.modelId,
+            stepRoute.keyId,
+            "success",
+            promptTokens,
+            completionTokens,
+            Date.now() - stepStart,
+            null,
+            null,
+            pinnedModelId,
+            0,
+          );
+          clearExhausted(stepRoute.keyId, stepRoute.modelId);
+          return {
+            text: accumulated.trim() || null,
+            toolCalls: foundationToolCallsAccum as import("@animarouter/shared/types.js").ChatToolCall[],
+          };
         }
 
         if (!accumulated.trim()) {
@@ -1575,8 +1648,8 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
       );
     }
 
-    // For "foundation_fallback", the anchor step didn\'t run, so the
-    // foundation text hasn\'t been streamed. Emit it now.
+    // For "foundation_fallback" or completed with tool_calls, the anchor step
+    // didn't run, so the foundation text hasn't been streamed. Emit it now.
     const finalText = oscillator.text ?? "";
     const completionTokens = Math.ceil(finalText.length / 4);
     const finalModel = oscillator.foundation?.modelId ?? AUTO_MODEL_ID;
@@ -1591,27 +1664,69 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
 
     flushHeaders();
 
-    if (oscillator.status === "foundation_fallback" && finalText) {
-      // Foundation succeeded but injection/anchor failed — stream the
-      // foundation text as a single chunk.
+    if (
+      (oscillator.status === "foundation_fallback" || oscillator.toolCalls) &&
+      finalText
+    ) {
+      // Foundation succeeded but injection/anchor failed (or short-circuited on
+      // tool_calls) — stream the foundation text as a single chunk.
       writeSSE({
         id: anchorChunkId,
         object: "chat.completion.chunk",
         created: anchorCreated,
         model: finalModel,
         choices: [
-          { index: 0, delta: { content: finalText }, finish_reason: null },
+          {
+            index: 0,
+            delta: { content: finalText },
+            finish_reason: null,
+          },
         ],
       });
     }
 
+    // If Foundation short-circuited with tool_calls, stream them now
+    if (oscillator.toolCalls && oscillator.toolCalls.length > 0) {
+      for (let i = 0; i < oscillator.toolCalls.length; i++) {
+        const tc = oscillator.toolCalls[i];
+        writeSSE({
+          id: anchorChunkId,
+          object: "chat.completion.chunk",
+          created: anchorCreated,
+          model: finalModel,
+          choices: [
+            {
+              index: 0,
+              delta: {
+                tool_calls: [
+                  {
+                    index: i,
+                    id: tc.id,
+                    type: "function",
+                    function: {
+                      name: tc.function.name,
+                      arguments: tc.function.arguments,
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        });
+      }
+    }
+
     // Terminal finish chunk
+    const finishReason = oscillator.toolCalls && oscillator.toolCalls.length > 0
+      ? "tool_calls"
+      : "stop";
     writeSSE({
       id: anchorChunkId,
       object: "chat.completion.chunk",
       created: anchorCreated,
       model: finalModel,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
     });
     res.write("data: [DONE]\n\n");
     try {
@@ -1713,13 +1828,23 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
           step === "injection"
             ? Math.min(max_tokens ?? 150, 150)
             : (max_tokens ?? stepRoute.maxOutputTokens ?? undefined);
-        const stepOptions = {
+        const stepOptions: Record<string, unknown> = {
           temperature,
           max_tokens: stepMaxTokens,
           top_p,
           reasoning_effort,
           thinking,
         };
+        // Only the Foundation step receives tools — if the model calls a tool
+        // the client must execute it before the next turn, so injection/anchor
+        // refinement must wait.  Injection and anchor are text-only refinement
+        // steps that improve the answer after Foundation returned pure text.
+        if (step === "foundation" && wantsTools) {
+          stepOptions.tools = tools;
+          if (tool_choice != null) stepOptions.tool_choice = tool_choice;
+          if (parallel_tool_calls != null)
+            stepOptions.parallel_tool_calls = parallel_tool_calls;
+        }
         const relayTransport = getRelayTransport(stepRoute.transportId);
         const useProxyTransport =
           !!relayTransport &&
@@ -1745,6 +1870,51 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
 
         const respMsg = result.choices?.[0]?.message;
         const text = contentToString(respMsg?.content ?? "").trim();
+        const foundationToolCalls =
+          step === "foundation" && wantsTools
+            ? respMsg?.tool_calls
+            : undefined;
+
+        // Foundation returned tool_calls — short-circuit: the client's agent
+        // loop needs to execute the tool before the next turn, so injection
+        // and anchor refinement would be wasted (and injection can't improve
+        // a structured tool call anyway).  Return the full message including
+        // tool_calls so the proxy can forward them verbatim.
+        if (foundationToolCalls && foundationToolCalls.length > 0) {
+          const promptTokens = result.usage?.prompt_tokens ?? stepInputTokens;
+          const completionTokens =
+            result.usage?.completion_tokens ?? Math.ceil(text.length / 4);
+          const totalTokens =
+            result.usage?.total_tokens ?? promptTokens + completionTokens;
+          recordRequest(stepRoute.platform, stepRoute.modelId, stepRoute.keyId);
+          recordTokens(
+            stepRoute.platform,
+            stepRoute.modelId,
+            stepRoute.keyId,
+            totalTokens,
+          );
+          recordSuccess(stepRoute.modelDbId);
+          logRequest(
+            stepRoute.platform,
+            stepRoute.modelId,
+            stepRoute.keyId,
+            "success",
+            promptTokens,
+            completionTokens,
+            Date.now() - stepStart,
+            null,
+            null,
+            pinnedModelId,
+            (result.usage as any)?.completion_tokens_details?.reasoning_tokens ??
+              0,
+          );
+          clearExhausted(stepRoute.keyId, stepRoute.modelId);
+          // Return a structured result so the oscillator can propagate tool_calls
+          // up to the proxy layer.  The accompanying text (if any) is included
+          // as the text payload; tool_calls are carried separately.
+          return { text: text || null, toolCalls: foundationToolCalls };
+        }
+
         if (!text)
           throw new Error(
             `empty Iterative Refinement oscillator completion from ${stepRoute.displayName}`,
@@ -1832,8 +2002,8 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
       stepLatencies: iterativeRefinementStepLatencies,
     });
 
-    if (oscillator.status !== "single_model_fallback" && oscillator.text) {
-      const completionTokens = Math.ceil(oscillator.text.length / 4);
+    if (oscillator.status !== "single_model_fallback" && (oscillator.text || oscillator.toolCalls)) {
+      const completionTokens = Math.ceil((oscillator.text?.length ?? 0) / 4);
       const response = {
         id: `chatcmpl-${Date.now()}`,
         object: "chat.completion",
@@ -1842,8 +2012,12 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
         choices: [
           {
             index: 0,
-            message: { role: "assistant", content: oscillator.text },
-            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: oscillator.text ?? null,
+              ...(oscillator.toolCalls ? { tool_calls: oscillator.toolCalls } : {}),
+            },
+            finish_reason: oscillator.toolCalls ? "tool_calls" : "stop",
           },
         ],
         usage: {
@@ -1883,6 +2057,35 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
       });
       return;
     }
+  }
+
+  // ─── Racing mode: fire all models in parallel, first response wins ───
+  // This bypasses the normal retry loop entirely. Proxy transport is
+  // resolved per-route inside racing-mode.ts itself.
+  if (activeRoutingStrategy === "racing") {
+    await handleRacingMode({
+      req,
+      res,
+      requestId,
+      messages,
+      estimatedTotal,
+      estimatedInputTokens,
+      hasImage,
+      wantsTools,
+      stream,
+      temperature,
+      max_tokens,
+      top_p,
+      tools,
+      tool_choice,
+      parallel_tool_calls,
+      reasoning_effort,
+      thinking,
+      sessionKey,
+      start,
+      pinnedModelId,
+    });
+    return;
   }
 
   // Client-disconnect detection: if the agent presses Stop or closes the
