@@ -1629,7 +1629,10 @@ export function routeRacingRequest(
   const groupingEnabled = getSetting("model_grouping_enabled") === "true";
   const results: RouteResult[] = [];
 
-  const getOneHealthyKey = (platform: string, modelId: string): KeyRow | null => {
+  const getOneHealthyKey = (
+    platform: string,
+    modelId: string,
+  ): KeyRow | null => {
     const keys = db
       .prepare(
         "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
@@ -1686,6 +1689,7 @@ export function routeRacingRequest(
     try {
       decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
     } catch {
+      releaseSlot(platform);
       return null;
     }
 
@@ -1742,7 +1746,11 @@ export function routeRacingRequest(
     for (const provider of allProviders) {
       if (requireVision && !provider.supports_vision) continue;
       if (requireTools && !provider.supports_tools) continue;
-      if (provider.context_window != null && estimatedTokens > provider.context_window) continue;
+      if (
+        provider.context_window != null &&
+        estimatedTokens > provider.context_window
+      )
+        continue;
 
       const route = buildRouteResult(
         provider.platform,
@@ -1774,7 +1782,11 @@ export function routeRacingRequest(
     for (const entry of chain) {
       if (requireVision && !entry.supports_vision) continue;
       if (requireTools && !entry.supports_tools) continue;
-      if (entry.context_window != null && estimatedTokens > entry.context_window) continue;
+      if (
+        entry.context_window != null &&
+        estimatedTokens > entry.context_window
+      )
+        continue;
 
       const route = buildRouteResult(
         entry.platform,

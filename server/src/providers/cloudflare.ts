@@ -1,23 +1,30 @@
 import type {
-  ChatMessage,
-  ChatCompletionResponse,
   ChatCompletionChunk,
-} from '@animarouter/shared/types.js';
-import { BaseProvider, providerHttpError, type CompletionOptions } from './base.js';
-import { contentToString } from '../lib/content.js';
-import { extractErrorMessage } from '../lib/error-body.js';
+  ChatCompletionResponse,
+  ChatMessage,
+} from "@animarouter/shared/types.js";
+import { contentToString } from "../lib/content.js";
+import { extractErrorMessage } from "../lib/error-body.js";
+import {
+  BaseProvider,
+  type CompletionOptions,
+  providerHttpError,
+} from "./base.js";
 /**
  * Cloudflare Workers AI provider.
  * API key format expected: "account_id:api_token"
  * The account_id is extracted from the key to build the URL.
  */
 export class CloudflareProvider extends BaseProvider {
-  readonly platform = 'cloudflare' as const;
-  readonly name = 'Cloudflare Workers AI';
+  readonly platform = "cloudflare" as const;
+  readonly name = "Cloudflare Workers AI";
 
   private parseKey(apiKey: string): { accountId: string; token: string } {
-    const sep = apiKey.indexOf(':');
-    if (sep === -1) throw new Error('Cloudflare key must be in format "account_id:api_token"');
+    const sep = apiKey.indexOf(":");
+    if (sep === -1)
+      throw new Error(
+        'Cloudflare key must be in format "account_id:api_token"',
+      );
     return { accountId: apiKey.slice(0, sep), token: apiKey.slice(sep + 1) };
   }
 
@@ -26,7 +33,7 @@ export class CloudflareProvider extends BaseProvider {
   //     even though the OpenAI spec allows it (collapse to '');
   //   - doesn't accept the array content envelope, so flatten to string.
   private normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
-    return messages.map(m => ({ ...m, content: contentToString(m.content) }));
+    return messages.map((m) => ({ ...m, content: contentToString(m.content) }));
   }
 
   async chatCompletion(
@@ -40,8 +47,8 @@ export class CloudflareProvider extends BaseProvider {
 
     const res = await this.fetchWithTimeout(url, {
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: modelId,
@@ -56,18 +63,24 @@ export class CloudflareProvider extends BaseProvider {
         // it doesn't recognize for now, but newer reasoning models (DeepSeek
         // R1 distill etc.) read `reasoning_effort` and pick the right depth.
         // (#290)
-        ...(options?.reasoning_effort ? { reasoning_effort: options.reasoning_effort } : {}),
+        ...(options?.reasoning_effort
+          ? { reasoning_effort: options.reasoning_effort }
+          : {}),
         ...(options?.thinking ? { thinking: options.thinking } : {}),
       }),
+      signal: options?.signal,
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Cloudflare API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`);
+      throw providerHttpError(
+        res,
+        `Cloudflare API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`,
+      );
     }
 
-    const data = await res.json() as ChatCompletionResponse;
-    data._routed_via = { platform: 'cloudflare', model: modelId };
+    const data = (await res.json()) as ChatCompletionResponse;
+    data._routed_via = { platform: "cloudflare", model: modelId };
     return data;
   }
 
@@ -81,10 +94,10 @@ export class CloudflareProvider extends BaseProvider {
     const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
 
     const res = await this.fetchWithTimeout(url, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: modelId,
@@ -97,14 +110,20 @@ export class CloudflareProvider extends BaseProvider {
         parallel_tool_calls: options?.parallel_tool_calls,
         stream: true,
         // Thinking knobs — same rationale as the non-streaming path. (#290)
-        ...(options?.reasoning_effort ? { reasoning_effort: options.reasoning_effort } : {}),
+        ...(options?.reasoning_effort
+          ? { reasoning_effort: options.reasoning_effort }
+          : {}),
         ...(options?.thinking ? { thinking: options.thinking } : {}),
       }),
+      signal: options?.signal,
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw providerHttpError(res, `Cloudflare API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`);
+      throw providerHttpError(
+        res,
+        `Cloudflare API error ${res.status}: ${extractErrorMessage(err) ?? res.statusText}`,
+      );
     }
 
     yield* this.readSseStream(res);
@@ -115,8 +134,8 @@ export class CloudflareProvider extends BaseProvider {
     // marking the key invalid. Only confirmed bad/inactive tokens return false.
     const { token } = this.parseKey(apiKey);
     const res = await this.fetchWithTimeout(
-      'https://api.cloudflare.com/client/v4/user/tokens/verify',
-      { method: 'GET', headers: { 'Authorization': `Bearer ${token}` } },
+      "https://api.cloudflare.com/client/v4/user/tokens/verify",
+      { method: "GET", headers: { Authorization: `Bearer ${token}` } },
       10000,
     );
     if (res.status === 401 || res.status === 403) return false;
@@ -127,7 +146,10 @@ export class CloudflareProvider extends BaseProvider {
     // disabling it. Use `unknown` instead of `any` so the API stays typed:
     // the cast through `unknown` is a one-way boundary at the JSON-parse
     // gateway, which is the only safe place to lose tracking. (#290)
-    const data = await res.json().catch(() => null) as unknown as { success?: unknown; result?: { status?: unknown } } | null;
-    return data?.success === true && data.result?.status === 'active';
+    const data = (await res.json().catch(() => null)) as unknown as {
+      success?: unknown;
+      result?: { status?: unknown };
+    } | null;
+    return data?.success === true && data.result?.status === "active";
   }
 }

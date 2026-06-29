@@ -52,17 +52,8 @@ interface RacingModeParams {
 export async function handleRacingMode(
   params: RacingModeParams,
 ): Promise<void> {
-  const {
-    req,
-    res,
-    requestId,
-    messages,
-    estimatedTotal,
-    hasImage,
-    wantsTools,
-    stream,
-    start,
-  } = params;
+  const { res, requestId, estimatedTotal, hasImage, wantsTools, stream } =
+    params;
 
   // ── Get all racing candidates (one key per model) ──
   let candidates: RouteResult[];
@@ -196,6 +187,15 @@ function wrapAsyncGen<T>(gen: AsyncGenerator<T>): AsyncIterable<unknown> {
   return gen as unknown as AsyncIterable<unknown>;
 }
 
+function createRouteReleaser(): (route: RouteResult) => void {
+  const released = new Set<RouteResult>();
+  return (route: RouteResult) => {
+    if (released.has(route)) return;
+    released.add(route);
+    route.release();
+  };
+}
+
 /**
  * Racing mode for streaming requests.
  * Fire all candidates in parallel; the first to produce a valid SSE chunk wins.
@@ -221,6 +221,9 @@ async function handleRacingStream(
     firstChunk: null,
   };
 
+  const safeRelease = createRouteReleaser();
+  const controllers = new Map<RouteResult, AbortController>();
+
   await new Promise<void>((resolve) => {
     let settled = false;
     let failed = 0;
@@ -229,6 +232,13 @@ async function handleRacingStream(
       (async () => {
         try {
           const { useProxy, transport } = resolveProxyTransport(route);
+
+          const controller = new AbortController();
+          controllers.set(route, controller);
+          const routeStreamOpts: CompletionOptions = {
+            ...streamOpts,
+            signal: controller.signal,
+          };
 
           const gen =
             useProxy && transport
@@ -242,6 +252,7 @@ async function handleRacingStream(
                       ...streamOpts,
                     },
                     sessionId: params.sessionKey || undefined,
+                    signal: controller.signal,
                   }),
                 )
               : wrapAsyncGen(
@@ -249,17 +260,19 @@ async function handleRacingStream(
                     route.apiKey,
                     params.messages,
                     route.modelId,
-                    streamOpts,
+                    routeStreamOpts,
                   ),
                 );
 
           for await (const raw of gen) {
             if (settled) {
-              route.release();
+              controller.abort();
+              safeRelease(route);
               return;
             }
             if (req.aborted) {
-              route.release();
+              controller.abort();
+              safeRelease(route);
               return;
             }
 
@@ -293,8 +306,9 @@ async function handleRacingStream(
             settled = true;
             resolve();
           }
-          route.release();
+          safeRelease(route);
         } catch (_err: unknown) {
+          safeRelease(route);
           if (!settled) {
             failed++;
             if (failed >= totalCandidates && !settled) {
@@ -313,6 +327,8 @@ async function handleRacingStream(
 
   if (!won || !winningGen || firstRaw == null) {
     for (const route of candidates) {
+      controllers.get(route)?.abort();
+      safeRelease(route);
       logRacingFailure(route);
     }
     publish({ type: "racing.all_failed", id: requestId, at: Date.now() });
@@ -325,9 +341,12 @@ async function handleRacingStream(
     return;
   }
 
-  // Release loser slots
+  // Abort loser requests and release their reserved slots.
   for (const c of candidates) {
-    if (c !== won) c.release();
+    if (c !== won) {
+      controllers.get(c)?.abort();
+      safeRelease(c);
+    }
   }
 
   // Winner found — stream its response
@@ -373,7 +392,10 @@ async function handleRacingStream(
   let usageChunk: unknown = null;
   try {
     for await (const raw of winningGen) {
-      if (req.aborted) break;
+      if (req.aborted) {
+        controllers.get(won)?.abort();
+        break;
+      }
 
       const chunk = asChunk(raw);
       if (chunk.id) lastMeta.id = chunk.id;
@@ -414,7 +436,8 @@ async function handleRacingStream(
   res.end();
 
   const latencyMs = Date.now() - start;
-  won.release();
+  controllers.delete(won);
+  safeRelease(won);
   recordRequest(won.platform, won.modelId, won.keyId);
   recordTokens(
     won.platform,
@@ -454,7 +477,7 @@ async function handleRacingNonStream(
   params: RacingModeParams,
   candidates: RouteResult[],
 ): Promise<void> {
-  const { res, requestId, start, estimatedInputTokens, pinnedModelId } = params;
+  const { res, requestId, start, pinnedModelId } = params;
   const totalCandidates = candidates.length;
   const chatOpts = buildCompletionOptions(params);
 
@@ -466,6 +489,8 @@ async function handleRacingNonStream(
     response: null,
   };
   let failed = 0;
+  const safeRelease = createRouteReleaser();
+  const controllers = new Map<RouteResult, AbortController>();
 
   await new Promise<void>((resolve) => {
     let settled = false;
@@ -474,6 +499,12 @@ async function handleRacingNonStream(
       (async () => {
         try {
           const { useProxy, transport } = resolveProxyTransport(route);
+          const controller = new AbortController();
+          controllers.set(route, controller);
+          const routeChatOpts: CompletionOptions = {
+            ...chatOpts,
+            signal: controller.signal,
+          };
 
           const resp: ChatCompletionResponse =
             useProxy && transport
@@ -486,16 +517,18 @@ async function handleRacingNonStream(
                     ...chatOpts,
                   },
                   sessionId: params.sessionKey || undefined,
+                  signal: controller.signal,
                 })
               : await route.provider.chatCompletion(
                   route.apiKey,
                   params.messages,
                   route.modelId,
-                  chatOpts,
+                  routeChatOpts,
                 );
 
           if (settled) {
-            route.release();
+            controller.abort();
+            safeRelease(route);
             return;
           }
           if (!resp.choices || resp.choices.length === 0) {
@@ -507,6 +540,7 @@ async function handleRacingNonStream(
           state.response = resp;
           resolve();
         } catch (_err: unknown) {
+          safeRelease(route);
           if (!settled) {
             failed++;
             if (failed >= totalCandidates && !settled) {
@@ -519,7 +553,10 @@ async function handleRacingNonStream(
     }
   });
 
-  for (const c of candidates) c.release();
+  for (const [route, controller] of controllers) {
+    if (route !== state.winner) controller.abort();
+  }
+  for (const c of candidates) safeRelease(c);
 
   const won = state.winner;
   const response = state.response;

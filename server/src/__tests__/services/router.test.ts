@@ -13,6 +13,7 @@ import { recordFailure } from "../../services/degradation.js";
 import {
   getAllPenalties,
   getProviderInFlightTotal,
+  routeRacingRequest,
   routeRequest,
   setRoutingStrategy,
 } from "../../services/router.js";
@@ -284,6 +285,55 @@ describe("Router", () => {
     // Decrypt failure is permanent — key disabled with status='invalid'
     expect(corruptKey.status).toBe("invalid");
     expect(corruptKey.enabled).toBe(0);
+  });
+
+  it("releases reserved racing slots when a key cannot be decrypted", () => {
+    const db = getDb();
+
+    db.prepare(
+      "UPDATE models SET enabled = 0 WHERE platform NOT IN ('google', 'groq')",
+    ).run();
+    db.prepare(
+      "UPDATE custom_providers SET max_parallel_requests = 1 WHERE slug = 'google'",
+    ).run();
+
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "google",
+      "racing-corrupt",
+      "not-hex",
+      "not-hex",
+      "not-hex",
+      "healthy",
+      1,
+    );
+
+    const groqKey = encrypt("test-groq-key");
+    db.prepare(`
+      INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "groq",
+      "racing-valid",
+      groqKey.encrypted,
+      groqKey.iv,
+      groqKey.authTag,
+      "healthy",
+      1,
+    );
+
+    const before = getProviderInFlightTotal();
+    const routes = routeRacingRequest();
+
+    expect(routes.some((route) => route.platform === "groq")).toBe(true);
+    expect(routes.some((route) => route.platform === "google")).toBe(false);
+    expect(getProviderInFlightTotal()).toBe(before + routes.length);
+
+    for (const route of routes) route.release();
+
+    expect(getProviderInFlightTotal()).toBe(before);
   });
 
   it("applies elapsed decay before adding a new 429 penalty", () => {

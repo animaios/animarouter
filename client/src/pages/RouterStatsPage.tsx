@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -266,6 +266,21 @@ export default function RouterStatsPage() {
     () => Array.from(new Set(providerOptions)),
     [providerOptions],
   );
+
+  useEffect(() => {
+    const first = uniqueProviders[0] ?? "";
+    const second = uniqueProviders[1] ?? first;
+
+    setExplorerProvider((current) =>
+      current && uniqueProviders.includes(current) ? current : first,
+    );
+    setCompareA((current) =>
+      current && uniqueProviders.includes(current) ? current : first,
+    );
+    setCompareB((current) =>
+      current && uniqueProviders.includes(current) ? current : second,
+    );
+  }, [uniqueProviders]);
 
   const pinned = summary?.pinnedRequests ?? 0;
   const pinHonored = summary?.pinHonoredRequests ?? 0;
@@ -917,8 +932,14 @@ export default function RouterStatsPage() {
         {tab === "explorer" && (
           <div className="space-y-6">
             <div className="flex flex-wrap items-center gap-3">
-              <label className="text-sm text-muted-foreground">Provider</label>
+              <label
+                className="text-sm text-muted-foreground"
+                htmlFor="router-stats-explorer-provider"
+              >
+                Provider
+              </label>
               <select
+                id="router-stats-explorer-provider"
                 value={explorerProvider}
                 onChange={(event) => setExplorerProvider(event.target.value)}
                 className="rounded-lg border bg-card px-3 py-2 text-sm"
@@ -1259,10 +1280,14 @@ export default function RouterStatsPage() {
           <div className="space-y-6">
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-sm text-muted-foreground">
+                <label
+                  className="text-sm text-muted-foreground"
+                  htmlFor="router-stats-compare-a"
+                >
                   Provider A
                 </label>
                 <select
+                  id="router-stats-compare-a"
                   value={compareA}
                   onChange={(event) => setCompareA(event.target.value)}
                   className="w-full rounded-lg border bg-card px-3 py-2 text-sm"
@@ -1276,10 +1301,14 @@ export default function RouterStatsPage() {
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm text-muted-foreground">
+                <label
+                  className="text-sm text-muted-foreground"
+                  htmlFor="router-stats-compare-b"
+                >
                   Provider B
                 </label>
                 <select
+                  id="router-stats-compare-b"
                   value={compareB}
                   onChange={(event) => setCompareB(event.target.value)}
                   className="w-full rounded-lg border bg-card px-3 py-2 text-sm"

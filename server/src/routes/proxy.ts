@@ -1,4 +1,3 @@
-import { handleRacingMode } from "../services/racing-mode.js";
 import type { ChatMessage, ModelListRow } from "@animarouter/shared/types.js";
 import crypto from "crypto";
 import type { Request, Response } from "express";
@@ -56,6 +55,7 @@ import {
   getRelayTransport,
   isRelayTransportConfigured,
 } from "../services/proxy-transport.js";
+import { handleRacingMode } from "../services/racing-mode.js";
 import {
   computeRetryCooldownMs,
   isDailyLimitExhausted,
@@ -69,8 +69,8 @@ import {
   hasEnabledToolsModel,
   hasEnabledVisionModel,
   type RouteResult,
-  routeRequest,
   routeRacingRequest,
+  routeRequest,
 } from "../services/router.js";
 
 /** Resolve the upstream base URL for proxy transport. Falls back to the provider's
@@ -180,8 +180,6 @@ function getSessionKeyWithApiKey(
   if (!apiKey) return sessionKey;
   return `${apiKey}:${sessionKey}`;
 }
-
-
 
 function oscillatorFailedStepNumber(
   step: ExecuteOscillatorResult["failedStep"],
@@ -1210,9 +1208,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
     currentConcurrent: iterativeRefinementConcurrentRequests,
   });
   const shouldTryIterativeRefinementOscillator =
-    iterativeRefinementDecision.mode === "oscillator" &&
-    !stream &&
-    !hasImage;
+    iterativeRefinementDecision.mode === "oscillator" && !stream && !hasImage;
   const shouldTryIterativeRefinementStreaming =
     iterativeRefinementDecision.mode === "oscillator" &&
     stream &&
@@ -1360,7 +1356,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
             );
 
         let accumulated = "";
-        let foundationToolCallsAccum: any[] = [];
+        const foundationToolCallsAccum: any[] = [];
 
         for await (const chunk of gen) {
           const anyChunk = chunk as Record<string, any>;
@@ -1467,7 +1463,9 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
           clearExhausted(stepRoute.keyId, stepRoute.modelId);
           return {
             text: accumulated.trim() || null,
-            toolCalls: foundationToolCallsAccum as import("@animarouter/shared/types.js").ChatToolCall[],
+            toolCalls: foundationToolCallsAccum.filter(
+              Boolean,
+            ) as import("@animarouter/shared/types.js").ChatToolCall[],
           };
         }
 
@@ -1718,9 +1716,10 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
     }
 
     // Terminal finish chunk
-    const finishReason = oscillator.toolCalls && oscillator.toolCalls.length > 0
-      ? "tool_calls"
-      : "stop";
+    const finishReason =
+      oscillator.toolCalls && oscillator.toolCalls.length > 0
+        ? "tool_calls"
+        : "stop";
     writeSSE({
       id: anchorChunkId,
       object: "chat.completion.chunk",
@@ -1871,9 +1870,7 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
         const respMsg = result.choices?.[0]?.message;
         const text = contentToString(respMsg?.content ?? "").trim();
         const foundationToolCalls =
-          step === "foundation" && wantsTools
-            ? respMsg?.tool_calls
-            : undefined;
+          step === "foundation" && wantsTools ? respMsg?.tool_calls : undefined;
 
         // Foundation returned tool_calls — short-circuit: the client's agent
         // loop needs to execute the tool before the next turn, so injection
@@ -1905,8 +1902,8 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
             null,
             null,
             pinnedModelId,
-            (result.usage as any)?.completion_tokens_details?.reasoning_tokens ??
-              0,
+            (result.usage as any)?.completion_tokens_details
+              ?.reasoning_tokens ?? 0,
           );
           clearExhausted(stepRoute.keyId, stepRoute.modelId);
           // Return a structured result so the oscillator can propagate tool_calls
@@ -2002,7 +1999,10 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
       stepLatencies: iterativeRefinementStepLatencies,
     });
 
-    if (oscillator.status !== "single_model_fallback" && (oscillator.text || oscillator.toolCalls)) {
+    if (
+      oscillator.status !== "single_model_fallback" &&
+      (oscillator.text || oscillator.toolCalls)
+    ) {
       const completionTokens = Math.ceil((oscillator.text?.length ?? 0) / 4);
       const response = {
         id: `chatcmpl-${Date.now()}`,
@@ -2015,7 +2015,9 @@ proxyRouter.post("/chat/completions", async (req: Request, res: Response) => {
             message: {
               role: "assistant",
               content: oscillator.text ?? null,
-              ...(oscillator.toolCalls ? { tool_calls: oscillator.toolCalls } : {}),
+              ...(oscillator.toolCalls
+                ? { tool_calls: oscillator.toolCalls }
+                : {}),
             },
             finish_reason: oscillator.toolCalls ? "tool_calls" : "stop",
           },
