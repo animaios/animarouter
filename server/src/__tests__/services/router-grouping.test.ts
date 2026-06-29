@@ -3,6 +3,11 @@ import { getDb, initDb, setSetting } from "../../db/index.js";
 import * as crypto from "../../lib/crypto.js";
 import { initDegradation, recordFailure } from "../../services/degradation.js";
 import {
+  healthKey,
+  keyHealthMap,
+  resetHeartbeatConfig,
+} from "../../services/heartbeat.js";
+import {
   getRoutingScores,
   getRoutingStrategy,
   refreshStatsCache,
@@ -95,6 +100,27 @@ function addHistory(
       opts.ttfbMs ?? null,
     );
   }
+}
+
+function keyIdFor(platform: string): number {
+  return (
+    getDb()
+      .prepare("SELECT id FROM api_keys WHERE platform = ? ORDER BY id LIMIT 1")
+      .get(platform) as { id: number }
+  ).id;
+}
+
+function setHeartbeatState(
+  platform: string,
+  modelId: string,
+  healthy: boolean,
+) {
+  keyHealthMap.set(healthKey(keyIdFor(platform), modelId), {
+    penalty: healthy ? 0 : 1,
+    lastPingAt: Date.now(),
+    healthy,
+    lastError: healthy ? undefined : "test failure",
+  });
 }
 
 // Create a model_groups row + bind models and fallback_config to it.
@@ -237,6 +263,8 @@ describe("group-aware routing", () => {
     initDegradation();
     // Feature flag OFF by default — grouping tests explicitly enable it
     setSetting("model_grouping_enabled", "false");
+    setSetting("heartbeat_enabled", "false");
+    resetHeartbeatConfig();
   });
 
   afterEach(() => {
@@ -762,6 +790,50 @@ describe("group-aware routing", () => {
         g.providers[1].subScore,
       );
     }
+  });
+
+  it("sorts grouped providers by heartbeat reliability when heartbeat is enabled", () => {
+    addGroup({
+      groupKey: "heartbeat-group",
+      displayName: "Heartbeat Group",
+      intelligenceRank: 3,
+      sizeLabel: "Large",
+      priority: 1,
+      providers: [
+        {
+          platform: "sick-provider",
+          modelId: "same/model-sick",
+          name: "Same Model Sick",
+          speedRank: 5,
+        },
+        {
+          platform: "healthy-provider",
+          modelId: "same/model-healthy",
+          name: "Same Model Healthy",
+          speedRank: 5,
+        },
+      ],
+    });
+
+    setSetting("model_grouping_enabled", "true");
+    setSetting("heartbeat_enabled", "true");
+    resetHeartbeatConfig();
+    setHeartbeatState("sick-provider", "same/model-sick", false);
+    setHeartbeatState("healthy-provider", "same/model-healthy", true);
+    setRoutingStrategy("balanced");
+    refreshStatsCache(getDb(), true);
+
+    const group = getRoutingScores().groupedScores?.find(
+      (score) => score.groupKey === "heartbeat-group",
+    );
+    expect(group).toBeDefined();
+    expect(group!.providers.map((provider) => provider.modelId)).toEqual([
+      "same/model-healthy",
+      "same/model-sick",
+    ]);
+    expect(group!.providers[0].subScore).toBeGreaterThan(
+      group!.providers[1].subScore,
+    );
   });
 
   it("getRoutingScores omits groupedScores when grouping is off", () => {

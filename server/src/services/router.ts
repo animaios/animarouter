@@ -19,6 +19,7 @@ import { getFeatureSetting } from "./feature-settings.js";
 import {
   getKeyHealth,
   getKeyStats,
+  heartbeatReliability,
   isHeartbeatEnabled,
   isKeyHealthy,
   type KeyStats,
@@ -632,7 +633,9 @@ function scoreChainEntry(
   const failures = stats?.failures ?? 0;
 
   let reliability: number;
-  if (sampled) {
+  if (isHeartbeatEnabled()) {
+    reliability = heartbeatReliability(entry.platform, entry.model_id) / 100;
+  } else if (sampled) {
     const { alpha, beta } = reliabilityPosterior(successes, failures);
     reliability = sampleBeta(alpha, beta);
   } else {
@@ -899,7 +902,10 @@ function providerSubScore(
   const failures = stats?.failures ?? 0;
 
   let reliability: number;
-  if (sampled) {
+  if (isHeartbeatEnabled()) {
+    reliability =
+      heartbeatReliability(provider.platform, provider.model_id) / 100;
+  } else if (sampled) {
     const { alpha, beta } = reliabilityPosterior(successes, failures);
     reliability = sampleBeta(alpha, beta);
   } else {
