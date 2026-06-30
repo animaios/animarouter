@@ -1,4 +1,5 @@
 import tseslint from "typescript-eslint";
+import js from "@eslint/js";
 
 // Threshold 60: catches genuinely over-complex functions (>60 branch points)
 // without noise from legitimate switch/if chains (provider translation code,
@@ -28,9 +29,9 @@ export default tseslint.config(
     },
   },
   {
-    // scripts/ lacks a tsconfig; use JS-aware rules only
-    files: ["scripts/**/*.mjs", "scripts/**/*.cjs"],
-    ...tseslint.configs.base,
+    // scripts/ lacks a tsconfig; use plain ESLint-compatible config for JS
+    files: ["scripts/**/*.mjs"],
+    ...js.configs.recommended,
     rules: { complexity: ["error", { max: MAX_COMPLEXITY }] },
   },
 );
