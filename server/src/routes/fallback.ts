@@ -164,6 +164,7 @@ const routingSchema = z.object({
     "fastest",
     "reliable",
     "custom",
+    "racing",
   ]),
   // Only meaningful with strategy 'custom'. Any non-negative vector with a
   // positive sum is accepted; the server normalizes it to sum to 1.

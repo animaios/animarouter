@@ -34,6 +34,9 @@ describe("Provider Health Heartbeat", () => {
   let initDegradation: () => void;
   let getKeyHealth: (keyId: number, modelId?: string) => any;
   let isKeyHealthy: (keyId: number, modelId?: string) => boolean;
+  let proportionHealthyKeys: (platform: string, modelId: string) => number;
+  let heartbeatReliability: (platform: string, modelId: string) => number;
+  let keyHealthMap: Map<string, any>;
   let setRoutingStrategy: (strategy: string) => void;
   let getRoutingStrategy: () => string;
   let resetHeartbeatConfig: () => void;
@@ -90,6 +93,9 @@ describe("Provider Health Heartbeat", () => {
     stopHeartbeat = heartbeatModule.stopHeartbeat;
     getKeyHealth = heartbeatModule.getKeyHealth;
     isKeyHealthy = heartbeatModule.isKeyHealthy;
+    proportionHealthyKeys = heartbeatModule.proportionHealthyKeys;
+    heartbeatReliability = heartbeatModule.heartbeatReliability;
+    keyHealthMap = heartbeatModule.keyHealthMap;
     resetHeartbeatConfig = heartbeatModule.resetHeartbeatConfig;
     markKeyUnhealthy = heartbeatModule.markKeyUnhealthy;
     pokeKey = heartbeatModule.pokeKey;
@@ -147,6 +153,15 @@ describe("Provider Health Heartbeat", () => {
       .prepare("SELECT id FROM api_keys WHERE platform = ? AND enabled = 1")
       .get(platform) as any;
     return { modelDbId: id, keyId: keyRow.id, modelId };
+  }
+
+  function setHeartbeatState(keyId: number, modelId: string, healthy: boolean) {
+    keyHealthMap.set(healthKey(keyId, modelId), {
+      penalty: healthy ? 0 : 1,
+      lastPingAt: Date.now(),
+      healthy,
+      lastError: healthy ? undefined : "test failure",
+    });
   }
 
   // ── Activity Gating ────────────────────────────────────────────────────
@@ -349,6 +364,65 @@ describe("Provider Health Heartbeat", () => {
       const health = getKeyHealth(keyId, "test-model");
       expect(health).toBeDefined();
       expect(health.healthy).toBe(true);
+    });
+  });
+
+  // ── Heartbeat Reliability ─────────────────────────────────────────────
+
+  describe("Heartbeat reliability", () => {
+    it("returns zero proportion and reliability when a platform has no keys", () => {
+      expect(proportionHealthyKeys("missing-provider", "missing-model")).toBe(
+        0,
+      );
+      expect(heartbeatReliability("missing-provider", "missing-model")).toBe(0);
+    });
+
+    it("computes healthy-key proportion from enabled routable key statuses", () => {
+      const { keyId, modelId } = setupProvider("ratio-provider", "ratio-model");
+      const db = getDb();
+      db.prepare(`
+        INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled)
+        VALUES
+          ('ratio-provider', 'unknown-key', 'enc', 'iv', 'tag', 'unknown', 1),
+          ('ratio-provider', 'error-key', 'enc', 'iv', 'tag', 'error', 1),
+          ('ratio-provider', 'sick-key', 'enc', 'iv', 'tag', 'sick', 1),
+          ('ratio-provider', 'disabled-key', 'enc', 'iv', 'tag', 'healthy', 0)
+      `).run();
+
+      const keys = db
+        .prepare("SELECT id, label FROM api_keys WHERE platform = ?")
+        .all("ratio-provider") as Array<{ id: number; label: string }>;
+      const byLabel = new Map(keys.map((key) => [key.label, key.id]));
+
+      setHeartbeatState(keyId, modelId, true);
+      setHeartbeatState(byLabel.get("unknown-key")!, modelId, false);
+      setHeartbeatState(byLabel.get("error-key")!, modelId, true);
+      setHeartbeatState(byLabel.get("sick-key")!, modelId, false);
+      setHeartbeatState(byLabel.get("disabled-key")!, modelId, false);
+
+      expect(proportionHealthyKeys("ratio-provider", modelId)).toBeCloseTo(
+        2 / 3,
+        5,
+      );
+      expect(heartbeatReliability("ratio-provider", modelId)).toBeCloseTo(
+        (2 / 3) * 100,
+        5,
+      );
+    });
+
+    it("scales all-healthy and all-sick key sets to 100 and 0", () => {
+      const { keyId, modelId } = setupProvider(
+        "boundary-provider",
+        "boundary-model",
+      );
+
+      setHeartbeatState(keyId, modelId, true);
+      expect(proportionHealthyKeys("boundary-provider", modelId)).toBe(1);
+      expect(heartbeatReliability("boundary-provider", modelId)).toBe(100);
+
+      setHeartbeatState(keyId, modelId, false);
+      expect(proportionHealthyKeys("boundary-provider", modelId)).toBe(0);
+      expect(heartbeatReliability("boundary-provider", modelId)).toBe(0);
     });
   });
 

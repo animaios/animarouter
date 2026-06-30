@@ -1,11 +1,11 @@
 import type {
-  ChatMessage,
-  ChatCompletionResponse,
   ChatCompletionChunk,
-  ChatToolDefinition,
+  ChatCompletionResponse,
+  ChatMessage,
   ChatToolChoice,
+  ChatToolDefinition,
   Platform,
-} from '@animarouter/shared/types.js';
+} from "@animarouter/shared/types.js";
 
 /** A provider HTTP error carrying the upstream status and, when the response
  *  included a Retry-After header, the parsed delay so the router can bench the
@@ -17,7 +17,9 @@ export interface ProviderHttpError extends Error {
 
 /** Parse an HTTP `Retry-After` header (delta-seconds or an HTTP-date) into a
  *  millisecond delay. Returns undefined when absent or unparseable. */
-export function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+export function parseRetryAfterMs(
+  value: string | null | undefined,
+): number | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
@@ -29,10 +31,13 @@ export function parseRetryAfterMs(value: string | null | undefined): number | un
 /** Build an error for a non-OK upstream response, capturing the status and any
  *  Retry-After hint. Used by every provider adapter so the proxy can honor a
  *  provider's explicit back-off when it sets the cooldown. */
-export function providerHttpError(res: Response, message: string): ProviderHttpError {
+export function providerHttpError(
+  res: Response,
+  message: string,
+): ProviderHttpError {
   const err = new Error(message) as ProviderHttpError;
   err.status = res.status;
-  const retryAfterMs = parseRetryAfterMs(res.headers?.get('retry-after'));
+  const retryAfterMs = parseRetryAfterMs(res.headers?.get("retry-after"));
   if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
   return err;
 }
@@ -48,14 +53,17 @@ export interface CompletionOptions {
   // OpenAI-compat reasoning effort level (mapped per-provider to the wire
   // shape that controls thinking depth). Optional — providers that don't
   // support thinking ignore it. (#290)
-  reasoning_effort?: 'max' | 'xhigh' | 'high' | 'medium' | 'low' | 'minimal';
+  reasoning_effort?: "max" | "xhigh" | "high" | "medium" | "low" | "minimal";
   // Richer thinking-control object. Providers translate into their native
   // vocab (`thinking`, `thinkingConfig`, `reasoning_effort`). See #290.
-  thinking?: import('@animarouter/shared/types.js').ThinkingConfig;
+  thinking?: import("@animarouter/shared/types.js").ThinkingConfig;
   /** Per-call HTTP timeout override. Not part of the OpenAI wire format (it is
    * stripped before the request body is built); used by the probe script so
    * NVIDIA's 15-60s serverless cold starts don't read as failures. */
   timeoutMs?: number;
+  /** Internal cancellation signal for router-owned races/failover. Providers
+   * must pass this to fetch, never serialize it into upstream request bodies. */
+  signal?: AbortSignal;
 }
 
 export abstract class BaseProvider {
@@ -95,9 +103,20 @@ export abstract class BaseProvider {
   ): Promise<Response> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const externalSignal = init.signal;
+    const abortFromExternal = () => controller.abort();
+    if (externalSignal?.aborted) {
+      controller.abort();
+    } else {
+      externalSignal?.addEventListener("abort", abortFromExternal, {
+        once: true,
+      });
+    }
     try {
       return await fetch(url, { ...init, signal: controller.signal });
     } finally {
+      // Keep the external listener attached: aborting after headers should still
+      // cancel a streaming response body owned by the fetch signal.
       clearTimeout(timeout);
     }
   }
@@ -127,19 +146,22 @@ export abstract class BaseProvider {
     inactivityTimeoutMs = 300000,
   ): AsyncGenerator<ChatCompletionChunk> {
     const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response body');
+    if (!reader) throw new Error("No response body");
 
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buffer = "";
     let sawFinishReason = false;
-    const parseSseLine = (line: string): ChatCompletionChunk | 'done' | undefined => {
+    const parseSseLine = (
+      line: string,
+    ): ChatCompletionChunk | "done" | undefined => {
       const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) return undefined;
+      if (!trimmed || !trimmed.startsWith("data: ")) return undefined;
       const data = trimmed.slice(6);
-      if (data === '[DONE]') return 'done';
+      if (data === "[DONE]") return "done";
       try {
         const chunk = JSON.parse(data) as ChatCompletionChunk;
-        if (chunk.choices?.some(c => c.finish_reason != null)) sawFinishReason = true;
+        if (chunk.choices?.some((c) => c.finish_reason != null))
+          sawFinishReason = true;
         return chunk;
       } catch {
         // Skip malformed chunks
@@ -154,7 +176,12 @@ export abstract class BaseProvider {
           reader.read(),
           new Promise<never>((_, reject) => {
             timer = setTimeout(
-              () => reject(new Error(`${this.name} stream stalled: no data for ${inactivityTimeoutMs}ms (timeout)`)),
+              () =>
+                reject(
+                  new Error(
+                    `${this.name} stream stalled: no data for ${inactivityTimeoutMs}ms (timeout)`,
+                  ),
+                ),
               inactivityTimeoutMs,
             );
           }),
@@ -164,27 +191,31 @@ export abstract class BaseProvider {
         if (done) {
           buffer += decoder.decode(); // flush remaining buffered bytes
           const parsed = parseSseLine(buffer);
-          if (parsed === 'done') return;
+          if (parsed === "done") return;
           if (parsed) yield parsed;
           break;
         }
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
 
         for (const line of lines) {
           const parsed = parseSseLine(line);
-          if (parsed === 'done') return;
+          if (parsed === "done") return;
           if (parsed) yield parsed;
         }
       }
     } finally {
-      reader.cancel().catch(() => { /* upstream already gone */ });
+      reader.cancel().catch(() => {
+        /* upstream already gone */
+      });
     }
 
     if (!sawFinishReason) {
-      throw new Error(`${this.name} stream ended unexpectedly (no [DONE], no finish_reason) — connection reset or truncated upstream`);
+      throw new Error(
+        `${this.name} stream ended unexpectedly (no [DONE], no finish_reason) — connection reset or truncated upstream`,
+      );
     }
   }
 }

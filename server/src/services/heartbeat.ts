@@ -214,6 +214,41 @@ export function getAllKeyHealth(): Map<string, KeyHealth> {
   return new Map(keyHealthMap);
 }
 
+/** Compute the proportion of healthy keys for a specific platform+model.
+ *  Returns a value in [0, 1] where 1 = all keys healthy, 0 = all keys sick.
+ *  Uses the in-memory heartbeat map (`isKeyHealthy`) so cold keys (never pinged)
+ *  are treated as unhealthy when heartbeat is enabled. */
+export function proportionHealthyKeys(
+  platform: string,
+  modelId: string,
+): number {
+  const db = getDb();
+  const keys = db
+    .prepare(
+      "SELECT id FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
+    )
+    .all(platform) as { id: number }[];
+
+  if (keys.length === 0) return 0;
+
+  let healthyCount = 0;
+  for (const k of keys) {
+    if (isKeyHealthy(k.id, modelId)) healthyCount++;
+  }
+  return healthyCount / keys.length;
+}
+
+/** Heartbeat-based reliability score [0, 100].
+ *  - 100 = all keys healthy for this model
+ *  - 0   = all keys sick (or no keys)
+ *  - Linear interpolation for mixed health */
+export function heartbeatReliability(
+  platform: string,
+  modelId: string,
+): number {
+  return proportionHealthyKeys(platform, modelId) * 100;
+}
+
 /** Schedule a re-ping of a key+model after a configured delay.
  *  No-op if a recheck timer is already pending or in-flight for this key+model.
  *  By default recovered healthy keys are skipped; advisor-triggered checks can

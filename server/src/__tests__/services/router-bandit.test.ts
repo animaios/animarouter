@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getDb, initDb } from "../../db/index.js";
+import { getDb, initDb, setSetting } from "../../db/index.js";
 import * as crypto from "../../lib/crypto.js";
+import {
+  healthKey,
+  keyHealthMap,
+  resetHeartbeatConfig,
+} from "../../services/heartbeat.js";
 import {
   getCustomWeights,
   getRoutingScores,
@@ -100,6 +105,27 @@ function addHistory(
   }
 }
 
+function keyIdFor(platform: string): number {
+  return (
+    getDb()
+      .prepare("SELECT id FROM api_keys WHERE platform = ? ORDER BY id LIMIT 1")
+      .get(platform) as { id: number }
+  ).id;
+}
+
+function setHeartbeatState(
+  platform: string,
+  modelId: string,
+  healthy: boolean,
+) {
+  keyHealthMap.set(healthKey(keyIdFor(platform), modelId), {
+    penalty: healthy ? 0 : 1,
+    lastPingAt: Date.now(),
+    healthy,
+    lastError: healthy ? undefined : "test failure",
+  });
+}
+
 function pickCounts(runs: number): Record<string, number> {
   const counts: Record<string, number> = {};
   for (let i = 0; i < runs; i++) {
@@ -119,6 +145,8 @@ describe("bandit router", () => {
     getDb().exec(
       "DELETE FROM fallback_config; DELETE FROM api_keys; DELETE FROM models; DELETE FROM requests;",
     );
+    setSetting("heartbeat_enabled", "false");
+    resetHeartbeatConfig();
     vi.clearAllMocks();
     (crypto.decrypt as any).mockReturnValue("mocked-api-key");
   });
@@ -200,6 +228,91 @@ describe("bandit router", () => {
     refreshStatsCache(getDb(), true);
     const counts = pickCounts(300);
     expect(counts["good"] ?? 0).toBeGreaterThan((counts["flaky"] ?? 0) * 3);
+  });
+
+  it("uses heartbeat health proportion for flat-chain reliability when heartbeat is enabled", () => {
+    addModel({
+      platform: "healthy-provider",
+      modelId: "historically-bad",
+      name: "Historically Bad",
+      intelligenceRank: 3,
+      sizeLabel: "Large",
+      budget: "~50M",
+      priority: 1,
+    });
+    addModel({
+      platform: "sick-provider",
+      modelId: "historically-good",
+      name: "Historically Good",
+      intelligenceRank: 3,
+      sizeLabel: "Large",
+      budget: "~50M",
+      priority: 2,
+    });
+    addHistory("healthy-provider", "historically-bad", {
+      successes: 1,
+      failures: 40,
+    });
+    addHistory("sick-provider", "historically-good", {
+      successes: 60,
+      failures: 0,
+    });
+
+    setSetting("heartbeat_enabled", "true");
+    resetHeartbeatConfig();
+    setHeartbeatState("healthy-provider", "historically-bad", true);
+    setHeartbeatState("sick-provider", "historically-good", false);
+    setRoutingStrategy("balanced");
+    refreshStatsCache(getDb(), true);
+
+    const byModel = new Map(
+      getRoutingScores().scores.map((score) => [score.modelId, score]),
+    );
+    expect(byModel.get("historically-bad")!.reliability).toBe(1);
+    expect(byModel.get("historically-good")!.reliability).toBe(0);
+  });
+
+  it("falls back to historical reliability when heartbeat is disabled", () => {
+    addModel({
+      platform: "healthy-provider",
+      modelId: "historically-bad",
+      name: "Historically Bad",
+      intelligenceRank: 3,
+      sizeLabel: "Large",
+      budget: "~50M",
+      priority: 1,
+    });
+    addModel({
+      platform: "sick-provider",
+      modelId: "historically-good",
+      name: "Historically Good",
+      intelligenceRank: 3,
+      sizeLabel: "Large",
+      budget: "~50M",
+      priority: 2,
+    });
+    addHistory("healthy-provider", "historically-bad", {
+      successes: 1,
+      failures: 40,
+    });
+    addHistory("sick-provider", "historically-good", {
+      successes: 60,
+      failures: 0,
+    });
+
+    setSetting("heartbeat_enabled", "false");
+    resetHeartbeatConfig();
+    setHeartbeatState("healthy-provider", "historically-bad", true);
+    setHeartbeatState("sick-provider", "historically-good", false);
+    setRoutingStrategy("balanced");
+    refreshStatsCache(getDb(), true);
+
+    const byModel = new Map(
+      getRoutingScores().scores.map((score) => [score.modelId, score]),
+    );
+    expect(byModel.get("historically-good")!.reliability).toBeGreaterThan(
+      byModel.get("historically-bad")!.reliability,
+    );
   });
 
   it("explores unseen models — both get picked at least once", () => {
