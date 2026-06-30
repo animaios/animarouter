@@ -467,7 +467,12 @@ describe("adaptiveSmoothing", () => {
 });
 
 describe("rankModelsByProductivity", () => {
-  const mk = (hour: number, requests: number, avgLatencyMs: number, successRate: number) => ({
+  const mk = (
+    hour: number,
+    requests: number,
+    avgLatencyMs: number,
+    successRate: number,
+  ) => ({
     hour,
     requests,
     avgLatencyMs,

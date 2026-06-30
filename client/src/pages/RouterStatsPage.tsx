@@ -48,12 +48,12 @@ import {
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
-  rankModelsByProductivity,
   type ModelHourlyResponse,
   type ModelMixData,
   type ModelProductivity,
   type PingHourlyStat,
   type RebucketedHourlyStat,
+  rankModelsByProductivity,
   rankProductiveWindows,
   rebucketHourlyByLocal,
 } from "./router-stats-data";
