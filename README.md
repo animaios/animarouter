@@ -17,13 +17,20 @@
 [![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=active+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
 [![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=resolved+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
 
-<sub> Fork of [`MLuqmanBR/api-gateway`](https://github.com/MLuqmanBR/api-gateway) re-attached to [`tashfeenahmed/freellmapi`](https://github.com/tashfeenahmed/freellmapi)) for better visibility. <br> What follows is only what AnimaRouter adds on top of `api-gateway`. Upstream already ships OpenAI-compatible routing, Thompson-sampling bandits, per-key rate tracking, recovery, custom provider CRUD, context handoff, encrypted storage, dark-mode dashboard, and more. If it's not listed here, `api-gateway` already has it. </sub>
+<sub> Fork of [`MLuqmanBR/api-gateway`](https://github.com/MLuqmanBR/api-gateway) re-attached to [`tashfeenahmed/freellmapi`](https://github.com/tashfeenahmed/freellmapi)) for better visibility. </sub> <br> <br>
 
 </div>
 
+<details>
+<summary><h2>📸 Screenshots</h2> (click to expand)</summary>
+<img width="1513" height="979" alt="screenshot1" src="https://github.com/user-attachments/assets/b6754378-8ec0-4fa0-a6ab-e2ae9af0a204" />
+<img width="1494" height="928" alt="screenshot2" src="https://github.com/user-attachments/assets/93015b52-9cf6-4906-b2a3-b39b2c2bd272" />
+<img width="1508" height="816" alt="screenshot3" src="https://github.com/user-attachments/assets/56d0cfdc-4535-4500-b222-2acffbb1f111" />
+</details>
+
 ---
 
-## Contents
+## 📑 Contents
 
 - [What AnimaRouter adds](#what-animarouter-adds)
 - [In Development](#in-development)
@@ -41,8 +48,10 @@
 - [Disclaimer](#disclaimer)
 - [License](#license)
 
-## What AnimaRouter adds
-### Routing & Resilience
+## ✨ What AnimaRouter adds
+What follows is only what AnimaRouter adds on top of `api-gateway`. Upstream already ships OpenAI-compatible routing, Thompson-sampling bandits, per-key rate tracking, recovery, custom provider CRUD, context handoff, encrypted storage, dark-mode dashboard, and more. If it's not listed here, `api-gateway` already has it.
+
+### 👾 Routing & Resilience
 
 | Feature | What | Why it matters |
 |---------|------|---------------|
@@ -52,7 +61,7 @@
 | **Keyless custom providers** | Local servers that don't need auth can be added without a key. | Upstream requires a key for every provider — a blocker for self-hosted/Ollama-style endpoints that have no auth layer. |
 | **Archive instead of hard-delete** | Custom providers and models get archived (restorable), not cascade-deleted. | Upstream cascade-deletes on removal. One misclick and your whole custom provider config is gone. Archive is reversible. |
 
-### Benchmarks & Intelligence
+### 🧠 Benchmarks & Intelligence
 
 | Feature | What | Why it matters |
 |---------|------|---------------|
@@ -60,7 +69,7 @@
 | **SWE-rebench for intelligence** | Replaced SWE-bench with SWE-rebench for model intelligence scoring. | SWE-rebench is a more reliable, less-contaminated benchmark for real-world coding ability. |
 | **Reasoning token fairness** | `tokPerSec` speed score includes reasoning/thinking tokens so reasoning models aren't unfairly penalised. | Upstream doesn't count reasoning tokens in speed calc — a thinking model that outputs 100 tok/s of reasoning + 30 tok/s of visible text looks "slower" than a 40 tok/s non-reasoning model. Unfair. *(spec: `docs/specs/reasoning-speed-fairness.md`)* |
 
-### Provider Support
+### 🩹 Provider Support
 
 | Feature | What | Why it matters |
 |---------|------|---------------|
@@ -69,7 +78,7 @@
 | **End-to-end thinking/reasoning passthrough** | `reasoning_content` deltas, Gemini thought signatures, thinking block handling across all providers. | Reasoning models (DeepSeek, Gemini, etc.) emit thinking tokens that must be preserved end-to-end, not silently dropped. |
 | **`max_output_tokens` fallback** | Uses catalog `max_output_tokens` as `max_tokens` fallback when the request doesn't specify. | Prevents truncation when a client omits `max_tokens` but the provider enforces a default cap. |
 
-### Dashboard & UX
+### 📊 Dashboard & UX
 
 | Feature | What | Why it matters |
 |---------|------|---------------|
@@ -77,7 +86,7 @@
 | **Enabled rows float to top** | In the fallback chain, disabled models sink to the bottom. | Long chains are hard to scan when disabled entries clutter the top; float makes the active set visible at a glance. |
 | **Toast notifications** | e.g. when auto-discovery adds new models. | Silent model additions are confusing — "where did that come from?" Toasts make changes visible. |
 
-### Infrastructure
+### 🏗️ Infrastructure
 
 | Feature | What | Why it matters |
 |---------|------|---------------|
@@ -85,7 +94,7 @@
 | **Server log rotation** | Prevents disk fill from unbounded logs. | Long-running instances silently eat disk until something breaks. |
 | **DeepSource coverage** | Integrated test-coverage reporting pipeline. | Continuous coverage visibility catches regressions before merge. |
 
-## In Development
+## 🚧 In Development
 
 | Spec | Status |
 |------|--------|
@@ -97,7 +106,7 @@
 | `docs/specs/provider-health-heartbeat/` | Spec complete — proactive cross-request periodic health pings feeding degradation engine |
 | `docs/specs/global-settings-panel/` | Spec complete — dashboard Settings tab to toggle experimental features with DB persistence |
 
-## Quick Start
+## 💯 Quick Start
 
 **Prerequisites:** Node.js 20+, npm. (Docker also works — see [Docker](#docker).)
 
@@ -129,32 +138,7 @@ node server/dist/index.js     # server + dashboard both served on :3001
 
 Request analytics are retained for 90 days or 100000 request rows by default, whichever limit prunes first. Set `REQUEST_ANALYTICS_RETENTION_DAYS=0` or `REQUEST_ANALYTICS_MAX_ROWS=0` in `.env` to disable either retention limit.
 
-## Docker
-
-```bash
-git clone https://github.com/animaios/animarouter.git
-cd animarouter
-
-# Generate an encryption key
-ENCRYPTION_KEY="$(openssl rand -hex 32)"
-printf "ENCRYPTION_KEY=%s\nPORT=3001\n" "$ENCRYPTION_KEY" > .env
-
-docker compose up -d --build
-```
-
-Open http://localhost:3001. SQLite data is stored in the `api-gateway-data` volume at `/app/server/data`. Keep the same `.env` `ENCRYPTION_KEY` and volume when upgrading.
-
-> **Reaching it from another machine?** By default the container is published only on `127.0.0.1`. To expose it on your LAN — e.g. a Raspberry Pi at `http://192.168.1.x:3001` — start it with `HOST_BIND=0.0.0.0`:
->
-> ```bash
-> HOST_BIND=0.0.0.0 docker compose up -d --build
-> ```
->
-> Only do this on a trusted network: the proxy is single-user and guarded only by the unified API key.
-
-More Docker operations and examples live in [docker/README.md](./docker/README.md).
-
-## Cloud Proxy
+## 🌩️ Cloud Proxy (under construction)
 
 AnimaRouter ships a Cloudflare Workers proxy layer for IP rotation and header stripping. Deploy it to route requests through geographically-distributed exit IPs so upstream providers see consistent, non-identifying IP addresses instead of your real one.
 
@@ -190,7 +174,7 @@ After deployment, register the proxy as a custom provider in the dashboard:
 
 Adjust `PROXY_COUNT` in `freellmproxy/.env`. See [the proxy's README](freellmproxy/README.md) for the full architecture.
 
-## Using the API
+## 🏭 Using the API
 
 Any OpenAI-compatible client works. Examples:
 
@@ -425,27 +409,7 @@ Adding an API key for a custom platform works the same as for a built-in: pick t
 
 Removing a custom platform archives it — models, keys, and fallback entries are preserved and restorable. Hard-delete is available but off by default.
 
-## Screenshots
-
-### Keys
-
-Manage provider credentials and grab the unified API key your apps connect with. Each key shows a status dot and when it was last health-checked. Custom platforms appear alongside built-in ones in the unified grid.
-
-![Keys page](repo-assets/keys.png)
-
-### Playground
-
-Send a chat completion through the router and see which provider served it, with the model ID and latency printed right on the message.
-
-![Playground page](repo-assets/playground.png)
-
-### Analytics
-
-Request volume, success rate, tokens in and out, average latency, and per-provider breakdowns over 24h / 7d / 30d windows.
-
-![Analytics page](repo-assets/analytics.png)
-
-## Limitations
+## ❕ Limitations
 
 Stacking free tiers — even with custom providers in the mix — has real trade-offs:
 
@@ -456,15 +420,12 @@ Stacking free tiers — even with custom providers in the mix — has real trade
 - **No SLA, by definition.** If you need reliability, use a paid provider with a contract — either directly or plugged into AnimaRouter as a custom platform.
 - **Local-first.** No multi-tenant auth. Run this for yourself; don't expose it to the internet.
 
-## Contributing
+## 🩹 Contributing
 
 Contributors welcome! Good first PRs:
 
 - **Add a provider** — copy `server/src/providers/openai-compat.ts` as a template, wire it into `server/src/providers/index.ts`, seed its models in `server/src/db/migrations.ts`, add a test in `server/src/__tests__/providers/`.
 - **Add an endpoint** — images, moderations, audio. The provider base class can grow new methods; adapters declare which they support.
-- **Improve the router** — cost-aware routing, better latency-weighted priority, regional pinning.
-- **Dashboard polish** — charts on the Analytics page, key rotation UX, batch import of keys from `.env`.
-- **Docs** — more examples, client library snippets, deployment recipes.
 
 **Development loop:**
 
@@ -479,7 +440,7 @@ Or use the `api` CLI: `api start`, `api stop`, `api status`.
 
 PRs should include a test, keep the existing test suite green, and match the `.editorconfig` / tsconfig defaults. Issues and discussions are open.
 
-### Contributors
+### 🥇 Contributors
 
 <a href="https://github.com/moaaz12-web"><img src="https://images.weserv.nl/?url=github.com/moaaz12-web.png&w=60&h=60&fit=cover&mask=circle" width="60" alt="@moaaz12-web" /></a>
 <a href="https://github.com/lukasulc"><img src="https://images.weserv.nl/?url=github.com/lukasulc.png&w=60&h=60&fit=cover&mask=circle" width="60" alt="@lukasulc" /></a>
@@ -519,7 +480,7 @@ PRs should include a test, keep the existing test suite green, and match the `.e
 <a href="https://github.com/hjhhoni"><img src="https://images.weserv.nl/?url=github.com/hjhhoni.png&w=60&h=60&fit=cover&mask=circle" width="60" alt="@hjhhoni" /></a>
 <a href="https://github.com/immanuelsavio"><img src="https://images.weserv.nl/?url=github.com/immanuelsavio.png&w=60&h=60&fit=cover&mask=circle" width="60" alt="@immanuelsavio" /></a>
 
-## Terms of Service Review
+## ⚖️ Terms of Service Review
 
 A self-hosted, single-user, personal-use setup was re-reviewed against each provider's ToS (May 2026). Summary:
 
@@ -541,7 +502,7 @@ A self-hosted, single-user, personal-use setup was re-reviewed against each prov
 
 Rules of thumb: **one account per provider**, **no reselling**, **no sharing your endpoint with other humans**, **don't hammer a free tier as a paid production backend**. This is informational, not legal advice — read each provider's ToS and make your own call.
 
-## Disclaimer
+## 🧑‍⚖️ Disclaimer
 
 **This project is for personal experimentation and learning, not production.** Free tiers exist so developers can prototype against them; they aren't a stable, supported inference substrate and shouldn't be treated as one. If you build something real on top of AnimaRouter, swap in a paid API before you ship. Your relationship with each upstream provider is governed by the terms you accepted when you created your account — those terms still apply when the traffic is proxied through this project, and you're responsible for complying with them.
 
@@ -551,4 +512,4 @@ Built on [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) (itse
 
 ## License
 
-[MIT](./LICENSE) — © upstream contributors + animaios contributors.
+[MIT](./LICENSE) — © upstream contributors + AnimAIOS project.
