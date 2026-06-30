@@ -184,6 +184,28 @@ function createTables(db: Database.Database) {
       PRIMARY KEY (platform, model_id, key_id)
     );
 
+    -- Audit trail of heartbeat "hi" probes (~5 tokens each). Powers the
+    -- Router Stats productivity chart's off-hours baseline. Pruned on the
+    -- same cycle as the requests table (analytics_retention_days setting).
+    CREATE TABLE IF NOT EXISTS ping_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      platform TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      key_id INTEGER NOT NULL,
+      success INTEGER NOT NULL,
+      latency_ms INTEGER NOT NULL,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_ping_history_created_at ON ping_history(created_at)",
+  ).run();
+  db.prepare(
+    "CREATE INDEX IF NOT EXISTS idx_ping_history_platform ON ping_history(platform)",
+  ).run();
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       platform TEXT NOT NULL,

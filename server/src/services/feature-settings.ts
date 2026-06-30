@@ -88,20 +88,6 @@ export const REGISTRY: FeatureSettingDef[] = [
     parentToggle: "heartbeat_enabled",
   },
   {
-    key: "heartbeat_activity_window_min",
-    label: "Activity Window",
-    description:
-      "Maximum minutes since the last user request for heartbeat pings to fire. Prevents pinging when nobody is using the system.",
-    type: "number",
-    default: 15,
-    min: 5,
-    max: 60,
-    envVar: "HEARTBEAT_ACTIVITY_WINDOW_MIN",
-    effect: "restart",
-    group: "Resilience",
-    parentToggle: "heartbeat_enabled",
-  },
-  {
     key: "heartbeat_timeout_ms",
     label: "Heartbeat Timeout (ms)",
     description:
@@ -144,6 +130,18 @@ export const REGISTRY: FeatureSettingDef[] = [
     parentToggle: "heartbeat_enabled",
   },
   {
+    key: "heartbeat_persist_pings",
+    label: "Store ping results",
+    description:
+      "Write each ping (success, latency, error) to a history table so the productivity chart can draw on off-hours data. A 'hi' ping is cheap (~5 tokens); disabling preserves privacy at the cost of empty off-hours in the productivity chart.",
+    type: "boolean",
+    default: true,
+    envVar: "HEARTBEAT_PERSIST_PINGS",
+    effect: "live",
+    group: "Resilience",
+    parentToggle: "heartbeat_enabled",
+  },
+  {
     key: "heartbeat_advisor_enabled",
     label: "Heartbeat AI Routing Advisor",
     description:
@@ -154,6 +152,20 @@ export const REGISTRY: FeatureSettingDef[] = [
     effect: "live",
     group: "Resilience",
     parentToggle: "heartbeat_enabled",
+  },
+  {
+    key: "heartbeat_advisor_activity_window_min",
+    label: "Advisor Activity Window",
+    description:
+      "When AI routing advisor is enabled, send a full advisor ping while there has been a user request within this many minutes. Outside the window, switch to a cheap 'hi' ping (~5 tokens) so the productivity chart still gets off-hours data without burning the advisor prompt budget when nobody is using the router.",
+    type: "number",
+    default: 15,
+    min: 5,
+    max: 120,
+    envVar: "HEARTBEAT_ADVISOR_ACTIVITY_WINDOW_MIN",
+    effect: "live",
+    group: "Resilience",
+    parentToggle: "heartbeat_advisor_enabled",
   },
   {
     key: "heartbeat_advisor_max_input_tokens",

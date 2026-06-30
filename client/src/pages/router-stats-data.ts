@@ -2,7 +2,10 @@ import type {
   HourlyStat,
   ModelStats,
   ModelTimelineResponse,
+  PingHourlyStat,
 } from "../../../shared/types";
+
+export type { PingHourlyStat };
 
 export interface ProviderMixSlice {
   id: string;
@@ -130,12 +133,10 @@ export interface RebucketedHourlyStat {
 }
 
 export function rebucketHourlyByLocal(
-  rows: HourlyStat[] | null | undefined,
+  rows: (HourlyStat | PingHourlyStat)[] | null | undefined,
   utcOffsetMinutes: number,
 ): RebucketedHourlyStat[] {
-  const source = coerceRows<HourlyStat>(
-    rows as HourlyStat[] | null | undefined,
-  );
+  const source = rows ?? [];
   const buckets = new Map<
     number,
     { requests: number; latencySum: number; tokSum: number; errorSum: number }
@@ -144,8 +145,7 @@ export function rebucketHourlyByLocal(
   const shiftMinutes = -utcOffsetMinutes;
 
   for (const row of source) {
-    // row.hour is a UTC hour 0-23. Shift by the viewer's UTC offset (in minutes)
-    // to derive the local hour. Mod handles negative/overflow rollover.
+    if (row.hour == null) continue;
     const localHour = ((row.hour * 60 + shiftMinutes) / 60 + 24) % 24;
     const localHourInt = Math.trunc(localHour);
     const existing = buckets.get(localHourInt) ?? {
@@ -156,8 +156,10 @@ export function rebucketHourlyByLocal(
     };
     existing.requests += row.requests;
     existing.latencySum += row.avgLatencyMs * row.requests;
-    existing.tokSum += row.avgTokPerSec * row.requests;
     existing.errorSum += row.errorRate * row.requests;
+    // Hour rows carry avgTokPerSec; ping rows don't — narrowing is automatic
+    if ("avgTokPerSec" in row)
+      existing.tokSum += row.avgTokPerSec * row.requests;
     buckets.set(localHourInt, existing);
   }
 
@@ -235,8 +237,12 @@ export function rankProductiveWindows(
   };
 
   const zeroRow: RebucketedHourlyStat = {
-    hour: 0, requests: 0, avgLatencyMs: 0, avgTokPerSec: 0,
-    errorRate: 0, successRate: 0,
+    hour: 0,
+    requests: 0,
+    avgLatencyMs: 0,
+    avgTokPerSec: 0,
+    errorRate: 0,
+    successRate: 0,
   };
   const hourScores = new Map<number, number>();
   for (let hour = 0; hour < 24; hour++) {
@@ -333,4 +339,132 @@ export function rankProductiveWindows(
   }
 
   return windows.slice(0, 5);
+}
+
+// ── Production Influence ─────────────────────────────────────────────────
+// Blends real-request score + ping score for a single hour. Real wins when
+// there are real requests; pings fill the floor when there aren't, weighted
+// by the influence factor so it never dominates the chart.
+export interface BlendedHourScore {
+  hour: number;
+  blendedScore: number;
+  realScore: number;
+  pingInfluenceApplied: boolean; // true means we fell back to ping-only for this hour
+  realCount: number;
+  pingCount: number;
+}
+
+// Per-ping-blended score: latency (lower better) scaled against the
+// range-wide ping max + success bonus. Pure signal → 0..100.
+interface PingHourlyLike {
+  hour: number;
+  avgLatencyMs: number;
+  successRate: number;
+}
+
+function scoreOfPingRange(
+  rows: ReadonlyArray<PingHourlyLike> | null | undefined,
+  hour: number,
+): number {
+  if (!rows || rows.length === 0) return 0;
+  const maxLatency = Math.max(1, ...rows.map((r) => r.avgLatencyMs));
+  const datum = rows.find((r) => r.hour === hour);
+  if (!datum || datum.avgLatencyMs === 0) return 0;
+  const latencyScore = (1 - datum.avgLatencyMs / maxLatency) * 60;
+  const successScore = (datum.successRate / 100) * 40;
+  return Math.max(0, Math.round(latencyScore + successScore));
+}
+
+export function blendHourlyWithPings(
+  realRows: ReadonlyArray<{
+    hour: number;
+    requests: number;
+    avgLatencyMs: number;
+    successRate: number;
+  }>,
+  pingRows:
+    | ReadonlyArray<{
+        hour: number;
+        requests: number;
+        avgLatencyMs: number;
+        successRate: number;
+      }>
+    | null
+    | undefined,
+  influence: number,
+): BlendedHourScore[] {
+  if (realRows.length === 0) return [];
+  const safePingRows = pingRows ?? [];
+  const maxRealLatency = Math.max(
+    1,
+    ...realRows.flatMap((r) => (r.requests > 0 ? [r.avgLatencyMs] : [])),
+  );
+  const clampInfluence = Math.max(0, Math.min(1, influence));
+
+  return realRows.map((real) => {
+    // Real-only score uses the same 60/40 weighting as ping score
+    const realLatencyScore =
+      real.requests > 0 ? (1 - real.avgLatencyMs / maxRealLatency) * 60 : 0;
+    const realSuccessScore = (real.successRate / 100) * 40;
+    const realScore =
+      real.requests > 0
+        ? Math.max(0, Math.round(realLatencyScore + realSuccessScore))
+        : 0;
+
+    // If no real requests this hour, blend in ping baseline scaled by influence.
+    if (real.requests === 0) {
+      const pingScore = scoreOfPingRange(safePingRows, real.hour);
+      return {
+        hour: real.hour,
+        blendedScore: Math.round(pingScore * clampInfluence),
+        realScore: 0,
+        pingInfluenceApplied: true,
+        realCount: 0,
+        pingCount:
+          safePingRows.find((p) => p.hour === real.hour)?.requests ?? 0,
+      };
+    }
+
+    return {
+      hour: real.hour,
+      blendedScore: realScore,
+      realScore,
+      pingInfluenceApplied: false,
+      realCount: real.requests,
+      pingCount: safePingRows.find((p) => p.hour === real.hour)?.requests ?? 0,
+    };
+  });
+}
+
+// ── Adaptive Smoothing ────────────────────────────────────────────────────
+// Default 5-hour weighted kernel (1,2,3,2,1)/9. Sparse-hour fallback (count<3)
+// uses a wider 7-hour kernel (1,1,2,3,2,1,1)/11.
+
+const KERNEL_5 = [1, 2, 3, 2, 1];
+const KERNEL_5_SUM = KERNEL_5.reduce((a, b) => a + b, 0);
+const KERNEL_7 = [1, 1, 2, 3, 2, 1, 1];
+const KERNEL_7_SUM = KERNEL_7.reduce((a, b) => a + b, 0);
+const SPARSE_THRESHOLD = 3;
+
+export function adaptiveSmoothing(
+  rows: ReadonlyArray<{ hour: number; score: number; realCount: number }>,
+  range: "15m" | "1h" | "24h" | "7d" | "30d",
+): number[] {
+  if (range === "24h" || range === "15m" || range === "1h") {
+    // Short ranges: no smoothing — hour-of-day is the signal.
+    return rows.map((r) => r.score);
+  }
+  const n = rows.length;
+  return rows.map((_, i) => {
+    const kernel = rows[i].realCount < SPARSE_THRESHOLD ? KERNEL_7 : KERNEL_5;
+    const sum = kernel === KERNEL_7 ? KERNEL_7_SUM : KERNEL_5_SUM;
+    const half = Math.floor(kernel.length / 2);
+
+    let total = 0;
+    for (let k = -half; k <= half; k++) {
+      const j = (((i + k) % n) + n) % n;
+      total += rows[j].score * kernel[k + half];
+    }
+    return total / sum;
+  });
 }

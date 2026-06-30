@@ -533,7 +533,93 @@ describe('Analytics API', () => {
       expect(body).toHaveLength(24);
       expect(body[1].requests).toBe(1);
     });
+  });
 
+  describe('pings-hourly collapsed baseline', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    it('returns 24 zero-filled buckets when no pings', async () => {
+      insertKey('pempty', 1);
+      insertModel('pempty', 'm1');
+      insertFallbackConfig('pempty', 'm1', 1);
+
+      const { status, body } = await request(app, '/api/analytics/pings-hourly?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(24);
+      expect(body[0]).toEqual({ hour: 0, requests: 0, avgLatencyMs: 0, errorRate: 0, successRate: 0 });
+    });
+
+    it('groups pings by UTC hour', async () => {
+      insertKey('pghour', 1);
+      insertModel('pghour', 'm1');
+      insertFallbackConfig('pghour', 'm1', 1);
+      const db = getDb();
+      db.prepare(
+        "INSERT OR IGNORE INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (100, 'pghour', 'k', ?, ?, ?, 'healthy', 1)",
+      ).run('0'.repeat(64), '0'.repeat(32), '0'.repeat(32));
+      db.prepare(
+        "INSERT INTO ping_history (platform, model_id, key_id, success, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run('pghour', 'm1', 100, 1, 50, '2026-05-29 03:30:00');
+      db.prepare(
+        "INSERT INTO ping_history (platform, model_id, key_id, success, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run('pghour', 'm1', 100, 1, 70, '2026-05-29 22:15:00');
+
+      const { status, body } = await request(app, '/api/analytics/pings-hourly?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(24);
+      expect(body[3].requests).toBe(1);
+      expect(body[3].avgLatencyMs).toBe(50);
+      expect(body[22].requests).toBe(1);
+      expect(body[22].avgLatencyMs).toBe(70);
+      expect(body[0].requests).toBe(0);
+    });
+
+    it('computes error rate from failed pings', async () => {
+      insertKey('pgerr', 1);
+      insertModel('pgerr', 'm1');
+      insertFallbackConfig('pgerr', 'm1', 1);
+      const db = getDb();
+      db.prepare(
+        "INSERT OR IGNORE INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (200, 'pgerr', 'k', ?, ?, ?, 'healthy', 1)",
+      ).run('0'.repeat(64), '0'.repeat(32), '0'.repeat(32));
+      db.prepare(
+        "INSERT INTO ping_history (platform, model_id, key_id, success, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run('pgerr', 'm1', 200, 1, 50, '2026-05-29 11:00:00');
+      db.prepare(
+        "INSERT INTO ping_history (platform, model_id, key_id, success, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run('pgerr', 'm1', 200, 0, 200, '2026-05-29 11:30:00');
+
+      const { status, body } = await request(app, '/api/analytics/pings-hourly?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(24);
+      // 1 success + 1 failure → 50% error rate
+      expect(body[11].requests).toBe(2);
+      expect(body[11].errorRate).toBe(50);
+      expect(body[11].avgLatencyMs).toBe(125);
+    });
+
+    it('respects the active-platform filter', async () => {
+      // pghost: has a ping, but no enabled key → should be filtered
+      const db = getDb();
+      db.prepare(
+        "INSERT OR IGNORE INTO api_keys (id, platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (300, 'pghost', 'k', ?, ?, ?, 'healthy', 0)",
+      ).run('0'.repeat(64), '0'.repeat(32), '0'.repeat(32));
+      db.prepare(
+        "INSERT INTO ping_history (platform, model_id, key_id, success, latency_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run('pghost', 'm1', 300, 1, 50, '2026-05-29 04:00:00');
+
+      const { status, body } = await request(app, '/api/analytics/pings-hourly?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(24);
+      expect(body[4].requests).toBe(0);
+    });
   });
 
   describe('model-timeline stacked series', () => {

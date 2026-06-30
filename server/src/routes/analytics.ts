@@ -678,3 +678,62 @@ analyticsRouter.get('/hourly', (req: Request, res: Response) => {
 
   res.json(result);
 });
+
+// Collapsed 24-bucket ping stats, for the Router Stats productivity chart's
+// overlay. Cheap "hi" pings fire all day — even when you're asleep — so use
+// this to fill the off-hours baseline rather than treating missing hours as
+// "perfect".
+analyticsRouter.get('/pings-hourly', (req: Request, res: Response) => {
+  const range = normalizeAnalyticsRange((req.query.range as string) ?? '24h');
+  const since = getSinceTimestamp(range);
+  const db = getDb();
+
+  const active = getActivePlatforms(db);
+  if (active.length === 0) {
+    const zeros = Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      requests: 0,
+      avgLatencyMs: 0,
+      errorRate: 0,
+      successRate: 0,
+    }));
+    return res.json(zeros);
+  }
+  const pf = buildPlatformFilter(active, '');
+
+  const rows = db.prepare(`
+    SELECT
+      CAST(strftime('%H', ph.created_at) AS INTEGER) as hour,
+      COUNT(*) as requests,
+      AVG(ph.latency_ms) as avg_latency_ms,
+      AVG(CASE WHEN ph.success = 0 THEN 100.0 ELSE 0.0 END) as error_rate
+    FROM ping_history ph
+    WHERE ph.created_at >= ?
+      ${pf.sql}
+    GROUP BY strftime('%H', ph.created_at)
+    ORDER BY hour ASC
+  `).all(since, ...pf.params) as Array<{
+    hour: number;
+    requests: number;
+    avg_latency_ms: number;
+    error_rate: number;
+  }>;
+
+  const byHour = new Map<number, (typeof rows)[number]>();
+  for (const row of rows) byHour.set(row.hour, row);
+
+  const result = Array.from({ length: 24 }, (_, hour) => {
+    const r = byHour.get(hour);
+    const requests = r?.requests ?? 0;
+    const errorRate = r?.error_rate ?? 0;
+    return {
+      hour,
+      requests,
+      avgLatencyMs: Math.round(r?.avg_latency_ms ?? 0),
+      errorRate: Math.round(errorRate * 10) / 10,
+      successRate: requests > 0 ? Math.round((100 - errorRate) * 10) / 10 : 0,
+    };
+  });
+
+  res.json(result);
+});

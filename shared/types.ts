@@ -550,6 +550,17 @@ export interface HourlyStat {
   successRate: number;
 }
 
+// Collapsed 24-bucket stats derived from the ping_history table. Mirrors
+// HourlyStat's shape but reports only the baseline "hi" probes that fire
+// whether or not the router is serving traffic.
+export interface PingHourlyStat {
+  hour: number;
+  requests: number;
+  avgLatencyMs: number;
+  errorRate: number;
+  successRate: number;
+}
+
 export interface ErrorDistribution {
   byCategory: { category: string; count: number }[];
   byPlatform: { platform: string; count: number }[];
