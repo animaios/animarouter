@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { FloatingBar } from "@/components/floating-bar";
+import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import {
   ModelSearchBox,
   matchesModelQuery,
@@ -37,7 +38,6 @@ import {
 import { ModelsTabs } from "@/components/models-tabs";
 import { PageHeader } from "@/components/page-header";
 import { Tooltip } from "@/components/tooltip";
-import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -928,19 +928,17 @@ function RowContent({
             </>
           )}
           {!row.isGroup && (
-            <>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEdit(row);
-                }}
-                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                title="Edit model"
-              >
-                <Pencil className="size-3.5" />
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit(row);
+              }}
+              className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+              title="Edit model"
+            >
+              <Pencil className="size-3.5" />
+            </button>
           )}
           <button
             type="button"

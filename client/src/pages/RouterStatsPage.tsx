@@ -16,6 +16,7 @@ import {
   YAxis,
 } from "recharts";
 import { LiveEvents } from "@/components/live-events";
+import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import { Tooltip as HoverTooltip } from "@/components/tooltip";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,7 +43,6 @@ import type {
 } from "../../../shared/types";
 import { HourlyProductivityChart } from "./HourlyProductivityChart";
 import { PerModelProductivityChart } from "./PerModelProductivityChart";
-import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import {
   adaptiveSmoothing,
   blendHourlyWithPings,
