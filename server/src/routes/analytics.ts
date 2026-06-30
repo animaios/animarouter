@@ -601,3 +601,80 @@ analyticsRouter.get('/errors', (req: Request, res: Response) => {
     createdAt: r.created_at,
   })));
 });
+
+// Hourly productivity buckets (local time-of-day, 0-23). Zero-filled so the
+// chart always renders a full 24-bar axis per range. "Productivity" here is
+// latency-focused: lower avg response time + higher tok/s + lower error rate
+// = a more productive hour for the router.
+analyticsRouter.get('/hourly', (req: Request, res: Response) => {
+  const range = normalizeAnalyticsRange((req.query.range as string) ?? '24h');
+  const since = getSinceTimestamp(range);
+  const db = getDb();
+
+  const active = getActivePlatforms(db);
+  if (active.length === 0) {
+    const zeros = Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      requests: 0,
+      avgLatencyMs: 0,
+      avgTokPerSec: 0,
+      errorRate: 0,
+      successRate: 0,
+    }));
+    return res.json(zeros);
+  }
+
+  const pf = buildPlatformFilter(active, 'r');
+  const mf = buildModelEnabledFilter();
+
+  // `created_at` is stored as UTC in SQLite. Convert to a datetime, then to
+  // seconds-since-epoch + the viewer's offset isn't available server-side, so
+  // we group by the UTC hour-of-day. The client re-buckets into the user's
+  // local timezone by applying their current UTC offset — this keeps the
+  // server stateless and avoids shipping tz data.
+  const rows = db.prepare(`
+    SELECT
+      CAST(strftime('%H', r.created_at) AS INTEGER) as hour,
+      COUNT(*) as requests,
+      AVG(r.latency_ms) as avg_latency_ms,
+      AVG(
+        CASE WHEN r.latency_ms > 0
+          THEN (COALESCE(r.output_tokens, 0) + COALESCE(r.reasoning_tokens, 0)) * 1000.0 / r.latency_ms
+          ELSE 0
+        END
+      ) as avg_tok_per_sec,
+      AVG(CASE WHEN r.status = 'error' THEN 100.0 ELSE 0.0 END) as error_rate
+    FROM requests r
+    ${mf.joinSql}
+    WHERE r.created_at >= ?
+      ${pf.sql}
+      ${mf.whereSql}
+    GROUP BY strftime('%H', r.created_at)
+    ORDER BY hour ASC
+  `).all(since, ...pf.params) as Array<{
+    hour: number;
+    requests: number;
+    avg_latency_ms: number;
+    avg_tok_per_sec: number;
+    error_rate: number;
+  }>;
+
+  const byHour = new Map<number, (typeof rows)[number]>();
+  for (const row of rows) byHour.set(row.hour, row);
+
+  const result = Array.from({ length: 24 }, (_, hour) => {
+    const r = byHour.get(hour);
+    const requests = r?.requests ?? 0;
+    const errorRate = r?.error_rate ?? 0;
+    return {
+      hour,
+      requests,
+      avgLatencyMs: Math.round(r?.avg_latency_ms ?? 0),
+      avgTokPerSec: Number((r?.avg_tok_per_sec ?? 0).toFixed(1)),
+      errorRate: Math.round(errorRate * 10) / 10,
+      successRate: requests > 0 ? Math.round((100 - errorRate) * 10) / 10 : 0,
+    };
+  });
+
+  res.json(result);
+});

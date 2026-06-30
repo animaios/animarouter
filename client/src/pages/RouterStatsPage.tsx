@@ -40,8 +40,12 @@ import {
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
+  rankProductiveWindows,
+  rebucketHourlyByLocal,
   type ModelMixData,
+  type RebucketedHourlyStat,
 } from "./router-stats-data";
+import { HourlyProductivityChart } from "./HourlyProductivityChart";
 
 type TimeRange = "15m" | "1h" | "24h" | "7d" | "30d";
 type ChartInterval = "minute" | "5min" | "hour" | "day";
@@ -59,17 +63,8 @@ const ROUTER_STATS_COLORS = {
   requests: "var(--router-stat-green)",
   latency: "var(--router-stat-cyan)",
   errors: "var(--router-stat-red)",
-  series: [
-    "var(--router-stat-green)",
-    "var(--router-stat-cyan)",
-    "var(--router-stat-magenta)",
-    "var(--router-stat-yellow)",
-    "var(--router-stat-red)",
-  ],
 } as const;
 
-const axisStyle = { fontSize: 11, fill: "var(--muted-foreground)" } as const;
-const gridStyle = "var(--router-stat-grid)";
 const chartTooltipStyle = {
   backgroundColor: "var(--popover)",
   border: "1px solid var(--router-stat-border)",
@@ -216,7 +211,7 @@ function MetricCard({
   );
 }
 
-function ChartPanel({
+export function ChartPanel({
   title,
   children,
   className,
@@ -245,7 +240,14 @@ function EmptyState({ children }: { children: ReactNode }) {
 }
 
 function colorForIndex(index: number) {
-  return ROUTER_STATS_COLORS.series[index % ROUTER_STATS_COLORS.series.length];
+  const palette = [
+    "var(--router-stat-green)",
+    "var(--router-stat-cyan)",
+    "var(--router-stat-magenta)",
+    "var(--router-stat-yellow)",
+    "var(--router-stat-red)",
+  ];
+  return palette[index % palette.length];
 }
 
 function TrafficMixStack({
@@ -265,16 +267,16 @@ function TrafficMixStack({
         <>
           <ResponsiveContainer width="100%" height={340}>
             <AreaChart data={data} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
+              <CartesianGrid strokeDasharray="2 4" stroke="var(--router-stat-grid)" />
               <XAxis
                 dataKey="timestamp"
-                tick={axisStyle}
+                tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
                 tickLine={false}
-                axisLine={{ stroke: gridStyle }}
+                axisLine={{ stroke: "var(--router-stat-grid)" }}
               />
               <YAxis
                 allowDecimals={false}
-                tick={axisStyle}
+                tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
                 tickLine={false}
                 axisLine={false}
               />
@@ -485,16 +487,16 @@ function ProviderBars({
       ) : (
         <ResponsiveContainer width="100%" height={240}>
           <BarChart data={data} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="2 4" stroke={gridStyle} />
+            <CartesianGrid strokeDasharray="2 4" stroke="var(--router-stat-grid)" />
             <XAxis
               dataKey="platform"
-              tick={axisStyle}
+              tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
               tickLine={false}
-              axisLine={{ stroke: gridStyle }}
+              axisLine={{ stroke: "var(--router-stat-grid)" }}
             />
             <YAxis
               unit={unit}
-              tick={axisStyle}
+              tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
               tickLine={false}
               axisLine={false}
             />
@@ -672,6 +674,40 @@ export default function RouterStatsPage() {
       ),
   });
 
+  const { data: hourlyResponse } = useQuery({
+    queryKey: ["analytics", "hourly", range],
+    queryFn: () =>
+      apiFetch<RebucketedHourlyStat[]>(`/api/analytics/hourly?range=${range}`),
+  });
+
+  const utcOffsetMinutes = useMemo(
+    () => new Date().getTimezoneOffset(),
+    [],
+  );
+
+  const hourlyLocal = useMemo(
+    () => rebucketHourlyByLocal(hourlyResponse, utcOffsetMinutes),
+    [hourlyResponse, utcOffsetMinutes],
+  );
+
+  const hourlyWindows = useMemo(
+    () => rankProductiveWindows(hourlyLocal),
+    [hourlyLocal],
+  );
+
+  // Per-hour productivity score used for grade-coloring the bar chart.
+  const hourlyScoreByHour = useMemo(() => {
+    const maxLatency = Math.max(1, ...hourlyLocal.map((r) => r.avgLatencyMs));
+    const map = new Map<number, number>();
+    for (const r of hourlyLocal) {
+      const latencyScore = (1 - r.avgLatencyMs / maxLatency) * 60;
+      const successScore = (r.successRate / 100) * 30;
+      const tokScore = Math.min(r.avgTokPerSec / 80, 1) * 10;
+      map.set(r.hour, Math.round(latencyScore + successScore + tokScore));
+    }
+    return map;
+  }, [hourlyLocal]);
+
   const modelTimeline = useMemo(
     () => coerceModelTimeline(modelTimelineResponse),
     [modelTimelineResponse],
@@ -763,13 +799,21 @@ export default function RouterStatsPage() {
         <MetricCard label="Avg latency" value={`${summary?.avgLatencyMs ?? 0} ms`} />
       </section>
 
-      <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <HourlyProductivityChart
+          rows={hourlyLocal}
+          windows={hourlyWindows}
+          scoreByHour={hourlyScoreByHour}
+        />
+        <ModelMixDonut data={modelMixData} />
+      </section>
+
+      <section>
         <TrafficMixStack
           modelTimeline={modelTimeline}
           data={formattedModelTimeline}
           hasData={hasModelTimelineData}
         />
-        <ModelMixDonut data={modelMixData} />
       </section>
 
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -802,15 +846,16 @@ export default function RouterStatsPage() {
 
       <section className="space-y-4">
         <div>
-          <h2 className="text-base font-semibold tracking-tight">Operations</h2>
+          <h2 className="text-base font-semibold tracking-tight">Live Feed</h2>
         </div>
         <div className="router-stats-live-feed">
           <LiveEvents />
         </div>
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
-          <ModelLeaderboard rows={modelLeaderboard} showPinnedCol={showPinnedCol} />
-          <RecentErrors errors={errors} />
-        </div>
+      </section>
+
+      <section className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
+        <ModelLeaderboard rows={modelLeaderboard} showPinnedCol={showPinnedCol} />
+        <RecentErrors errors={errors} />
       </section>
     </div>
   );

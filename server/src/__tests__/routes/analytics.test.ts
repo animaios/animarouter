@@ -468,6 +468,74 @@ describe('Analytics API', () => {
       expect(body.at(-1).timestamp).toBe('2026-05-29T12:00:00Z');
     });
   });
+  describe('hourly productivity buckets', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+    });
+
+    it('returns 24 zero-filled buckets when no traffic exists', async () => {
+      insertKey('h0empty', 1);
+      insertModel('h0empty', 'm1');
+      insertFallbackConfig('h0empty', 'm1', 1);
+
+      const { status, body } = await request(app, '/api/analytics/hourly?range=24h');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(24);
+      expect(body[0]).toEqual({
+        hour: 0, requests: 0, avgLatencyMs: 0, avgTokPerSec: 0, errorRate: 0, successRate: 0,
+      });
+    });
+
+    it('groups requests by UTC hour', async () => {
+      insertKey('h0utc', 1);
+      insertModel('h0utc', 'm1');
+      insertFallbackConfig('h0utc', 'm1', 1);
+      // 2026-05-29 03:30:00 UTC => hour 3
+      insertTokensRequest('h0utc', 'm1', 'success', 100, 100, '2026-05-29 03:30:00');
+      // 2026-05-29 22:15:00 UTC => hour 22
+      insertTokensRequest('h0utc', 'm1', 'success', 100, 100, '2026-05-29 22:15:00');
+
+      const { body } = await request(app, '/api/analytics/hourly?range=24h');
+
+      expect(body[3].requests).toBe(1);
+      expect(body[22].requests).toBe(1);
+      expect(body[0].requests).toBe(0);
+      expect(body).toHaveLength(24);
+    });
+
+    it('counts error rate and computes avg tok_per_sec', async () => {
+      insertKey('h0err', 1);
+      insertModel('h0err', 'm1');
+      insertFallbackConfig('h0err', 'm1', 1);
+      // 1 success + 1 error within the same hour => 50% error rate
+      insertTokensRequest('h0err', 'm1', 'success', 0, 100, '2026-05-29 11:10:00');
+      insertErrorRequest('h0err', 'm1', '500 internal server', '2026-05-29 11:20:00');
+
+      const { body } = await request(app, '/api/analytics/hourly?range=24h');
+
+      const h11 = body[11];
+      expect(h11.requests).toBe(2);
+      expect(h11.errorRate).toBe(50);
+      expect(h11.successRate).toBe(50);
+    });
+
+    it('zero-fills all 24 hours for the 30d range when the window is too coarse', async () => {
+      insertKey('h30', 1);
+      insertModel('h30', 'm1');
+      insertFallbackConfig('h30', 'm1', 1);
+      insertTokensRequest('h30', 'm1', 'success', 10, 10, '2026-05-29 01:00:00');
+
+      const { status, body } = await request(app, '/api/analytics/hourly?range=30d');
+
+      expect(status).toBe(200);
+      expect(body).toHaveLength(24);
+      expect(body[1].requests).toBe(1);
+    });
+
+  });
+
   describe('model-timeline stacked series', () => {
     beforeEach(() => {
       vi.useFakeTimers();

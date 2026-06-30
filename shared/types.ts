@@ -537,6 +537,19 @@ export interface ErrorEntry {
   createdAt: string;
 }
 
+export interface HourlyStat {
+  // Local hour of day, 0-23.
+  hour: number;
+  requests: number;
+  // Average response time in ms across all requests in this hour (lower = more productive).
+  avgLatencyMs: number;
+  // Average output tokens per second (incl reasoning) across requests in this hour (higher = more productive).
+  avgTokPerSec: number;
+  // Error rate as a percentage 0-100 (lower = more productive).
+  errorRate: number;
+  successRate: number;
+}
+
 export interface ErrorDistribution {
   byCategory: { category: string; count: number }[];
   byPlatform: { platform: string; count: number }[];

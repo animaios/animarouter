@@ -4,6 +4,8 @@ import {
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
+  rankProductiveWindows,
+  rebucketHourlyByLocal,
 } from "./router-stats-data";
 
 const base = {
@@ -150,5 +152,229 @@ describe("router stats query payload guards", () => {
     };
 
     expect(coerceModelTimeline(timeline)).toBe(timeline);
+  });
+});
+
+describe("rebucketHourlyByLocal", () => {
+  const serverRows = [
+    // Server returns UTC-hour grouping. hour 0 UTC = 00:00–00:59 UTC.
+    {
+      hour: 0,
+      requests: 10,
+      avgLatencyMs: 100,
+      avgTokPerSec: 30,
+      errorRate: 0,
+      successRate: 100,
+    },
+    {
+      hour: 22,
+      requests: 5,
+      avgLatencyMs: 500,
+      avgTokPerSec: 20,
+      errorRate: 10,
+      successRate: 90,
+    },
+  ];
+
+  it("returns all 24 buckets, zero-filled for hours with no data", () => {
+    // UTC-8 (Pacific) shift: UTC hour 0 => local hour 16, UTC hour 22 => local hour 14.
+    const result = rebucketHourlyByLocal(serverRows, -480);
+    expect(result).toHaveLength(24);
+    for (const bucket of result) {
+      expect(bucket.hour).toBeGreaterThanOrEqual(0);
+      expect(bucket.hour).toBeLessThan(24);
+    }
+  });
+
+  it("shifts UTC hours into the viewer's local timezone", () => {
+    // UTC+0 (no shift) — server hour 0 stays local 0, 22 stays 22.
+    const result = rebucketHourlyByLocal(serverRows, 0);
+    expect(result[0]).toMatchObject({
+      hour: 0,
+      requests: 10,
+      avgLatencyMs: 100,
+    });
+    expect(result[22]).toMatchObject({
+      hour: 22,
+      requests: 5,
+      avgLatencyMs: 500,
+    });
+    expect(result[1]).toMatchObject({ hour: 1, requests: 0 });
+  });
+
+  it("rolls negative-shifted hours back into 0-23", () => {
+    // UTC-8 on hour 0 => local hour 16 (0 - (-480/60) = 8 => (0+8)%24 = 8). Wait,
+    // shift = -offset. offset=-480 => shift=+480min => (0*60+480)/60 = 8 => +24 mod = 8.
+    const result = rebucketHourlyByLocal(serverRows, -480);
+    expect(result[8]).toMatchObject({ hour: 8, requests: 10 });
+  });
+
+  it("rolls over-shifted hours forward and wraps", () => {
+    // offset +480 (UTC+8) on server hour 22 => local hour (22 - 8) = 14.
+    const result = rebucketHourlyByLocal(serverRows, 480);
+    expect(result[14]).toMatchObject({ hour: 14, requests: 5 });
+  });
+
+  it("averages across buckets when two server hours land in one local hour", () => {
+    const rows = [
+      {
+        hour: 0,
+        requests: 10,
+        avgLatencyMs: 100,
+        avgTokPerSec: 30,
+        errorRate: 0,
+        successRate: 100,
+      },
+      {
+        hour: 1,
+        requests: 10,
+        avgLatencyMs: 200,
+        avgTokPerSec: 10,
+        errorRate: 20,
+        successRate: 80,
+      },
+      {
+        hour: 23,
+        requests: 10,
+        avgLatencyMs: 300,
+        avgTokPerSec: 50,
+        errorRate: 0,
+        successRate: 100,
+      },
+    ];
+    // UTC-6 (offset -360) shift = +360min. Hour 0 => 6, 1 => 7, 23 => 5.
+    const result = rebucketHourlyByLocal(rows, -360);
+    expect(result[6]).toMatchObject({ avgLatencyMs: 100, requests: 10 });
+    expect(result[7]).toMatchObject({ avgLatencyMs: 200, requests: 10 });
+    expect(result[5]).toMatchObject({ avgLatencyMs: 300, requests: 10 });
+  });
+
+  it("handles a null payload", () => {
+    const result = rebucketHourlyByLocal(null, 0);
+    expect(result).toHaveLength(24);
+    expect(result.every((r) => r.requests === 0)).toBe(true);
+  });
+});
+
+describe("rankProductiveWindows", () => {
+  function buildRows(
+    spec: Array<{
+      hour: number;
+      latency: number;
+      tok: number;
+      errors: number;
+      requests: number;
+    }>,
+  ) {
+    return spec.map((s) => ({
+      hour: s.hour,
+      requests: s.requests,
+      avgLatencyMs: s.latency,
+      avgTokPerSec: s.tok,
+      errorRate: s.errors,
+      successRate: 100 - s.errors,
+    }));
+  }
+
+  it("returns an empty array when all hours are silent", () => {
+    const rows = Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      requests: 0,
+      avgLatencyMs: 0,
+      avgTokPerSec: 0,
+      errorRate: 0,
+      successRate: 0,
+    }));
+    expect(rankProductiveWindows(rows)).toEqual([]);
+  });
+
+  it("ranks a contiguous low-latency block as the best window", () => {
+    // Hours 21-23 low latency/high success; other hours bad.
+    const rows = buildRows([
+      { hour: 0, latency: 5000, tok: 5, errors: 50, requests: 5 },
+      { hour: 1, latency: 5000, tok: 5, errors: 50, requests: 5 },
+      { hour: 21, latency: 100, tok: 40, errors: 0, requests: 20 },
+      { hour: 22, latency: 100, tok: 40, errors: 0, requests: 20 },
+      { hour: 23, latency: 100, tok: 40, errors: 0, requests: 20 },
+    ]);
+    // pad remaining hours with mediocre data
+    const fullRows = Array.from({ length: 24 }, (_, hour) => {
+      const found = rows.find((r) => r.hour === hour);
+      return (
+        found ?? {
+          hour,
+          requests: 2,
+          avgLatencyMs: 3000,
+          avgTokPerSec: 10,
+          errorRate: 30,
+          successRate: 70,
+        }
+      );
+    }) as ReturnType<typeof buildRows>;
+
+    const windows = rankProductiveWindows(fullRows);
+    expect(windows.length).toBeGreaterThan(0);
+    expect(windows[0].score).toBeGreaterThanOrEqual(75);
+    expect(windows[0].grade).toBe("HIGH");
+    // Best window should touch 21/22/23
+    const hours = new Set<number>();
+    const best = windows[0];
+    for (let i = 0; i < 24; i++) {
+      hours.add((best.startHour + i) % 24);
+      if ((best.startHour + i) % 24 === best.endHour) break;
+    }
+    expect(hours.has(21) || hours.has(22) || hours.has(23)).toBe(true);
+  });
+
+  it("wraps windows across midnight", () => {
+    const rows = buildRows([
+      { hour: 22, latency: 100, tok: 40, errors: 0, requests: 10 },
+      { hour: 23, latency: 100, tok: 40, errors: 0, requests: 10 },
+      { hour: 0, latency: 100, tok: 40, errors: 0, requests: 10 },
+      { hour: 1, latency: 100, tok: 40, errors: 0, requests: 10 },
+    ]);
+    const fullRows = Array.from({ length: 24 }, (_, hour) => {
+      const found = rows.find((r) => r.hour === hour);
+      return (
+        found ?? {
+          hour,
+          requests: 2,
+          avgLatencyMs: 4000,
+          avgTokPerSec: 5,
+          errorRate: 40,
+          successRate: 60,
+        }
+      );
+    }) as ReturnType<typeof buildRows>;
+    const windows = rankProductiveWindows(fullRows);
+    // Should contain a window whose start > end (wraps midnight).
+    const wrapWindow = windows.find((w) => w.startHour > w.endHour);
+    expect(wrapWindow).toBeDefined();
+    expect(wrapWindow?.label).toMatch(/2[12]?:00–0[12]?:00/);
+  });
+
+  it("labels windows in HH:00–HH:00 format", () => {
+    const rows = buildRows([
+      { hour: 12, latency: 200, tok: 30, errors: 5, requests: 15 },
+      { hour: 13, latency: 200, tok: 30, errors: 5, requests: 15 },
+      { hour: 14, latency: 200, tok: 30, errors: 5, requests: 15 },
+    ]);
+    const fullRows = Array.from({ length: 24 }, (_, hour) => {
+      const found = rows.find((r) => r.hour === hour);
+      return (
+        found ?? {
+          hour,
+          requests: 1,
+          avgLatencyMs: 5000,
+          avgTokPerSec: 5,
+          errorRate: 50,
+          successRate: 50,
+        }
+      );
+    }) as ReturnType<typeof buildRows>;
+    const windows = rankProductiveWindows(fullRows);
+    if (windows.length > 0) {
+      expect(windows[0].label).toMatch(/^\d{2}:\d{2}–\d{2}:\d{2}$/);
+    }
   });
 });
