@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Sparkles } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -27,7 +27,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiFetch } from "@/lib/api";
-import { cn, formatIsoUtcToLocalChart, formatSqliteUtcToLocalTime } from "@/lib/utils";
+import {
+  cn,
+  formatIsoUtcToLocalChart,
+  formatSqliteUtcToLocalTime,
+} from "@/lib/utils";
 import type {
   AnalyticsSummary,
   ErrorDistribution,
@@ -36,16 +40,19 @@ import type {
   ModelTimelineResponse,
   PlatformStats,
 } from "../../../shared/types";
+import { HourlyProductivityChart } from "./HourlyProductivityChart";
 import {
+  adaptiveSmoothing,
+  blendHourlyWithPings,
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
+  type ModelMixData,
+  type PingHourlyStat,
+  type RebucketedHourlyStat,
   rankProductiveWindows,
   rebucketHourlyByLocal,
-  type ModelMixData,
-  type RebucketedHourlyStat,
 } from "./router-stats-data";
-import { HourlyProductivityChart } from "./HourlyProductivityChart";
 
 type TimeRange = "15m" | "1h" | "24h" | "7d" | "30d";
 type ChartInterval = "minute" | "5min" | "hour" | "day";
@@ -58,6 +65,8 @@ type ProviderBarDatum = {
 };
 
 const TIME_RANGES: TimeRange[] = ["15m", "1h", "24h", "7d", "30d"];
+const PING_INFLUENCE_STORAGE_KEY = "routerStatsPingInfluence";
+const PING_INFLUENCE_DEFAULT = 0.1;
 const RGB_MODE_STORAGE_KEY = "routerStatsRgbMode";
 const ROUTER_STATS_COLORS = {
   requests: "var(--router-stat-green)",
@@ -152,6 +161,31 @@ function TimeRangeControl({
   );
 }
 
+function PingInfluenceSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <label className="router-stats-control router-stats-ping-influence flex items-center gap-2 rounded-lg border px-3 py-1 text-xs">
+      <span className="text-muted-foreground">Ping infl.</span>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={1}
+        value={Math.round(value * 100)}
+        onChange={(e) => onChange(Number(e.currentTarget.value) / 100)}
+        aria-label="Ping influence factor for off-hours productivity baseline"
+        className="accent-[var(--router-stat-cyan)] w-20"
+      />
+      <span className="tabular-nums w-8 text-right">{value.toFixed(2)}x</span>
+    </label>
+  );
+}
+
 function RgbModeToggle({
   enabled,
   onToggle,
@@ -166,7 +200,11 @@ function RgbModeToggle({
       size="sm"
       type="button"
       aria-pressed={enabled}
-      aria-label={enabled ? "Disable Router Stats RGB mode" : "Enable Router Stats RGB mode"}
+      aria-label={
+        enabled
+          ? "Disable Router Stats RGB mode"
+          : "Enable Router Stats RGB mode"
+      }
       onClick={onToggle}
     >
       <Sparkles data-icon="inline-start" />
@@ -235,7 +273,9 @@ export function ChartPanel({
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
-    <p className="py-10 text-center text-sm text-muted-foreground">{children}</p>
+    <p className="py-10 text-center text-sm text-muted-foreground">
+      {children}
+    </p>
   );
 }
 
@@ -266,8 +306,14 @@ function TrafficMixStack({
       ) : (
         <>
           <ResponsiveContainer width="100%" height={340}>
-            <AreaChart data={data} margin={{ top: 6, right: 8, left: -12, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="2 4" stroke="var(--router-stat-grid)" />
+            <AreaChart
+              data={data}
+              margin={{ top: 6, right: 8, left: -12, bottom: 0 }}
+            >
+              <CartesianGrid
+                strokeDasharray="2 4"
+                stroke="var(--router-stat-grid)"
+              />
               <XAxis
                 dataKey="timestamp"
                 tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
@@ -305,7 +351,10 @@ function TrafficMixStack({
               const color = colorForIndex(index);
               const name = getModelSeriesName(series);
               return (
-                <span key={series.key} className="inline-flex max-w-full items-center gap-1.5">
+                <span
+                  key={series.key}
+                  className="inline-flex max-w-full items-center gap-1.5"
+                >
                   <span
                     className="size-2 rounded-sm"
                     style={{ backgroundColor: color }}
@@ -354,7 +403,9 @@ function DonutTooltip({
       {datum.provider && datum.provider !== datum.label && (
         <p className="mt-1 text-muted-foreground">{datum.provider}</p>
       )}
-      <p className="mt-1 tabular-nums">{datum.requests.toLocaleString()} requests</p>
+      <p className="mt-1 tabular-nums">
+        {datum.requests.toLocaleString()} requests
+      </p>
       {datum.successRate !== undefined && (
         <p className="text-muted-foreground tabular-nums">
           {datum.successRate}% success
@@ -399,7 +450,11 @@ function ModelMixDonut({ data }: { data: ModelMixData }) {
                   content={({ active, payload }) => (
                     <DonutTooltip
                       active={active}
-                      payload={payload as ReadonlyArray<{ payload?: DonutDatum }> | undefined}
+                      payload={
+                        payload as
+                          | ReadonlyArray<{ payload?: DonutDatum }>
+                          | undefined
+                      }
                     />
                   )}
                 />
@@ -446,9 +501,15 @@ function ModelMixDonut({ data }: { data: ModelMixData }) {
           </div>
           <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-1">
             {modelData.slice(0, 6).map((slice) => (
-              <div key={slice.id} className="flex min-w-0 items-center justify-between gap-3">
+              <div
+                key={slice.id}
+                className="flex min-w-0 items-center justify-between gap-3"
+              >
                 <span className="flex min-w-0 items-center gap-2">
-                  <span className="size-2 rounded-sm" style={{ backgroundColor: slice.fill }} />
+                  <span
+                    className="size-2 rounded-sm"
+                    style={{ backgroundColor: slice.fill }}
+                  />
                   <span className="truncate" title={slice.label}>
                     {slice.label}
                   </span>
@@ -486,8 +547,14 @@ function ProviderBars({
         <EmptyState>{emptyText}</EmptyState>
       ) : (
         <ResponsiveContainer width="100%" height={240}>
-          <BarChart data={data} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="2 4" stroke="var(--router-stat-grid)" />
+          <BarChart
+            data={data}
+            margin={{ top: 6, right: 6, left: -12, bottom: 0 }}
+          >
+            <CartesianGrid
+              strokeDasharray="2 4"
+              stroke="var(--router-stat-grid)"
+            />
             <XAxis
               dataKey="platform"
               tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
@@ -501,7 +568,12 @@ function ProviderBars({
               axisLine={false}
             />
             <Tooltip contentStyle={chartTooltipStyle} />
-            <Bar dataKey={dataKey} name={name} fill={fill} radius={[4, 4, 0, 0]} />
+            <Bar
+              dataKey={dataKey}
+              name={name}
+              fill={fill}
+              radius={[4, 4, 0, 0]}
+            />
           </BarChart>
         </ResponsiveContainer>
       )}
@@ -528,7 +600,9 @@ function ModelLeaderboard({
                 <TableHead className="min-w-[220px] pl-4">Model</TableHead>
                 <TableHead>Provider</TableHead>
                 <TableHead className="text-right">Requests</TableHead>
-                {showPinnedCol && <TableHead className="text-right">Pinned</TableHead>}
+                {showPinnedCol && (
+                  <TableHead className="text-right">Pinned</TableHead>
+                )}
                 <TableHead className="text-right">Success</TableHead>
                 <TableHead className="text-right">Latency</TableHead>
                 <TableHead className="text-right">
@@ -538,7 +612,9 @@ function ModelLeaderboard({
                     </span>
                   </HoverTooltip>
                 </TableHead>
-                <TableHead className="text-right text-muted-foreground">In tokens</TableHead>
+                <TableHead className="text-right text-muted-foreground">
+                  In tokens
+                </TableHead>
                 <TableHead className="pr-4 text-right text-muted-foreground">
                   Out tokens
                 </TableHead>
@@ -608,7 +684,10 @@ function RecentErrors({ errors }: { errors: ErrorEntry[] }) {
                 <TableRow key={e.id}>
                   <TableCell className="pl-4 text-xs">{e.platform}</TableCell>
                   <TableCell className="max-w-[320px] text-xs">
-                    <span className="block truncate" title={e.error ?? "Unknown error"}>
+                    <span
+                      className="block truncate"
+                      title={e.error ?? "Unknown error"}
+                    >
                       {e.error ?? "Unknown error"}
                     </span>
                   </TableCell>
@@ -628,9 +707,35 @@ function RecentErrors({ errors }: { errors: ErrorEntry[] }) {
   );
 }
 
+function getInitialPingInfluence(): number {
+  if (typeof window === "undefined") return PING_INFLUENCE_DEFAULT;
+  try {
+    const raw = localStorage.getItem(PING_INFLUENCE_STORAGE_KEY);
+    if (raw === null) return PING_INFLUENCE_DEFAULT;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return PING_INFLUENCE_DEFAULT;
+    return Math.max(0, Math.min(1, parsed));
+  } catch {
+    // localStorage access may throw a SecurityError if cookies/storage are
+    // disabled; fail safe to the default instead of crashing the page load.
+    return PING_INFLUENCE_DEFAULT;
+  }
+}
+
 export default function RouterStatsPage() {
   const [range, setRange] = useState<TimeRange>("24h");
+  const [pingInfluence, setPingInfluence] = useState(getInitialPingInfluence);
   const rgbMode = useRouterStatsRgbMode();
+
+  function updatePingInfluence(next: number) {
+    const clamped = Math.max(0, Math.min(1, next));
+    setPingInfluence(clamped);
+    try {
+      localStorage.setItem(PING_INFLUENCE_STORAGE_KEY, String(clamped));
+    } catch {
+      // Ignore storage failures; the in-memory value is what's shown.
+    }
+  }
 
   const { data: summary } = useQuery({
     queryKey: ["analytics", "summary", range],
@@ -680,33 +785,80 @@ export default function RouterStatsPage() {
       apiFetch<RebucketedHourlyStat[]>(`/api/analytics/hourly?range=${range}`),
   });
 
-  const utcOffsetMinutes = useMemo(
-    () => new Date().getTimezoneOffset(),
-    [],
-  );
+  const { data: pingHourlyResponse } = useQuery({
+    queryKey: ["analytics", "pings-hourly", range],
+    queryFn: () =>
+      apiFetch<PingHourlyStat[]>(`/api/analytics/pings-hourly?range=${range}`),
+  });
+
+  const utcOffsetMinutes = useMemo(() => new Date().getTimezoneOffset(), []);
 
   const hourlyLocal = useMemo(
     () => rebucketHourlyByLocal(hourlyResponse, utcOffsetMinutes),
     [hourlyResponse, utcOffsetMinutes],
   );
 
-  const hourlyWindows = useMemo(
-    () => rankProductiveWindows(hourlyLocal),
-    [hourlyLocal],
+  const pingHourlyLocal = useMemo(
+    () => rebucketHourlyByLocal(pingHourlyResponse, utcOffsetMinutes),
+    [pingHourlyResponse, utcOffsetMinutes],
   );
 
-  // Per-hour productivity score used for grade-coloring the bar chart.
+  // Blended score: real latency wins; pings fill zero-traffic hours at the
+  // configured influence factor.
+  const blendedHourly = useMemo(
+    () => blendHourlyWithPings(hourlyLocal, pingHourlyLocal, pingInfluence),
+    [hourlyLocal, pingHourlyLocal, pingInfluence],
+  );
+
+  const smoothedHourly = useMemo(
+    () =>
+      adaptiveSmoothing(
+        blendedHourly.map((b) => ({
+          hour: b.hour,
+          score: b.blendedScore,
+          realCount: b.realCount,
+        })),
+        range,
+      ),
+    [blendedHourly, range],
+  );
+
+  // Convert smoothed scores back to a per-hour map + rebuild rows with blended scores.
+  const finalHourly = useMemo(
+    () =>
+      blendedHourly.map((b, i) => ({
+        ...b,
+        blendedScore: smoothedHourly[i] ?? b.blendedScore,
+      })),
+    [blendedHourly, smoothedHourly],
+  );
+
   const hourlyScoreByHour = useMemo(() => {
-    const maxLatency = Math.max(1, ...hourlyLocal.map((r) => r.avgLatencyMs));
     const map = new Map<number, number>();
-    for (const r of hourlyLocal) {
-      const latencyScore = (1 - r.avgLatencyMs / maxLatency) * 60;
-      const successScore = (r.successRate / 100) * 30;
-      const tokScore = Math.min(r.avgTokPerSec / 80, 1) * 10;
-      map.set(r.hour, Math.round(latencyScore + successScore + tokScore));
-    }
+    for (const r of finalHourly) map.set(r.hour, r.blendedScore);
     return map;
-  }, [hourlyLocal]);
+  }, [finalHourly]);
+
+  // Build pseudo RebucketedHourlyStat rows so the existing ranker works on the blended data.
+  const rankableHourly: RebucketedHourlyStat[] = useMemo(
+    () =>
+      finalHourly.map((b) => ({
+        hour: b.hour,
+        requests: b.realCount,
+        // Invert the blended score back to a synthetic latency for the ranker.
+        // score = 100 → ~0ms, score = 0 → uses range max. Keeps ranker consistent.
+        avgLatencyMs: Math.round(Math.max(0, 1 - b.blendedScore / 100) * 5000),
+        avgTokPerSec: 0,
+        errorRate: 0,
+        successRate: 100,
+      })),
+    [finalHourly],
+  );
+
+  const hourlyWindows = useMemo(
+    () => rankProductiveWindows(rankableHourly),
+    [rankableHourly],
+  );
 
   const modelTimeline = useMemo(
     () => coerceModelTimeline(modelTimelineResponse),
@@ -767,16 +919,24 @@ export default function RouterStatsPage() {
       : "All requests in this period were auto-routed; no client pinned a specific model by name.";
 
   return (
-    <div className={cn("router-stats space-y-6", rgbMode.enabled && "rgb-mode")}>
+    <div
+      className={cn("router-stats space-y-6", rgbMode.enabled && "rgb-mode")}
+    >
       <header className="flex flex-wrap items-end justify-between gap-4 border-b pb-6">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight">Router Stats</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Router Stats
+          </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Provider traffic, model mix, latency, and routing failures.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <TimeRangeControl range={range} onRangeChange={setRange} />
+          <PingInfluenceSlider
+            value={pingInfluence}
+            onChange={updatePingInfluence}
+          />
           <RgbModeToggle enabled={rgbMode.enabled} onToggle={rgbMode.toggle} />
         </div>
       </header>
@@ -787,7 +947,10 @@ export default function RouterStatsPage() {
           value={summary?.totalRequests ?? 0}
           hint={requestsHint}
         />
-        <MetricCard label="Success rate" value={`${summary?.successRate ?? 0}%`} />
+        <MetricCard
+          label="Success rate"
+          value={`${summary?.successRate ?? 0}%`}
+        />
         <MetricCard
           label="Input tokens"
           value={formatTokens(summary?.totalInputTokens)}
@@ -796,7 +959,10 @@ export default function RouterStatsPage() {
           label="Output tokens"
           value={formatTokens(summary?.totalOutputTokens)}
         />
-        <MetricCard label="Avg latency" value={`${summary?.avgLatencyMs ?? 0} ms`} />
+        <MetricCard
+          label="Avg latency"
+          value={`${summary?.avgLatencyMs ?? 0} ms`}
+        />
       </section>
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
@@ -804,6 +970,7 @@ export default function RouterStatsPage() {
           rows={hourlyLocal}
           windows={hourlyWindows}
           scoreByHour={hourlyScoreByHour}
+          pingRows={pingHourlyLocal}
         />
         <ModelMixDonut data={modelMixData} />
       </section>
@@ -854,7 +1021,10 @@ export default function RouterStatsPage() {
       </section>
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(360px,1fr)]">
-        <ModelLeaderboard rows={modelLeaderboard} showPinnedCol={showPinnedCol} />
+        <ModelLeaderboard
+          rows={modelLeaderboard}
+          showPinnedCol={showPinnedCol}
+        />
         <RecentErrors errors={errors} />
       </section>
     </div>

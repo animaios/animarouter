@@ -1,5 +1,6 @@
-import { getDb } from '../db/index.js';
-import { getFeatureSetting } from './feature-settings.js';
+import { getDb } from "../db/index.js";
+import { getFeatureSetting } from "./feature-settings.js";
+import { prunePingHistory } from "./ping-history.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETENTION_DAYS = 90;
@@ -10,7 +11,7 @@ let pruneTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startRequestRetentionPruner(): void {
   if (pruneTimer) return;
-  console.log('[Retention] Starting request analytics pruner (every 10m)');
+  console.log("[Retention] Starting request analytics pruner (every 10m)");
   pruneRequestAnalytics({ force: true });
   pruneTimer = setInterval(() => {
     pruneRequestAnalytics({ force: true });
@@ -36,21 +37,19 @@ export interface RequestAnalyticsRetentionConfig {
 let nextPruneAtMs = 0;
 
 function toSqliteTimestamp(date: Date): string {
-  return date.toISOString().slice(0, 19).replace('T', ' ');
+  return date.toISOString().slice(0, 19).replace("T", " ");
 }
 
 export function getRequestAnalyticsRetentionConfig(): RequestAnalyticsRetentionConfig {
   return {
-    retentionDays: getFeatureSetting('analytics_retention_days') as number,
-    maxRows: getFeatureSetting('analytics_max_rows') as number,
+    retentionDays: getFeatureSetting("analytics_retention_days") as number,
+    maxRows: getFeatureSetting("analytics_max_rows") as number,
   };
 }
 
-export function pruneRequestAnalytics(options: {
-  db?: RetentionDb;
-  force?: boolean;
-  now?: Date;
-} = {}): { deleted: number; skipped: boolean } {
+export function pruneRequestAnalytics(
+  options: { db?: RetentionDb; force?: boolean; now?: Date } = {},
+): { deleted: number; skipped: boolean } {
   const now = options.now ?? new Date();
   const nowMs = now.getTime();
 
@@ -65,11 +64,14 @@ export function pruneRequestAnalytics(options: {
 
   if (retentionDays > 0) {
     const cutoff = toSqliteTimestamp(new Date(nowMs - retentionDays * DAY_MS));
-    deleted += db.prepare('DELETE FROM requests WHERE created_at < ?').run(cutoff).changes;
+    deleted += db
+      .prepare("DELETE FROM requests WHERE created_at < ?")
+      .run(cutoff).changes;
   }
 
   if (maxRows > 0) {
-    deleted += db.prepare(`
+    deleted += db
+      .prepare(`
       DELETE FROM requests
       WHERE id IN (
         SELECT id
@@ -77,8 +79,11 @@ export function pruneRequestAnalytics(options: {
         ORDER BY created_at DESC, id DESC
         LIMIT -1 OFFSET ?
       )
-    `).run(maxRows).changes;
+    `)
+      .run(maxRows).changes;
   }
+
+  prunePingHistory({ db, now });
 
   return { deleted, skipped: false };
 }

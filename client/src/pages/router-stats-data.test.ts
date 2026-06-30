@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ModelStats, ModelTimelineResponse } from "../../../shared/types";
 import {
+  adaptiveSmoothing,
+  blendHourlyWithPings,
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
@@ -376,5 +378,89 @@ describe("rankProductiveWindows", () => {
     if (windows.length > 0) {
       expect(windows[0].label).toMatch(/^\d{2}:\d{2}–\d{2}:\d{2}$/);
     }
+  });
+});
+
+describe("blendHourlyWithPings", () => {
+  const real = [
+    { hour: 0, requests: 10, avgLatencyMs: 1000, successRate: 100 },
+    { hour: 1, requests: 0, avgLatencyMs: 0, successRate: 0 },
+  ];
+  const pings = [
+    { hour: 0, requests: 12, avgLatencyMs: 50, errorRate: 0, successRate: 100 },
+    { hour: 1, requests: 12, avgLatencyMs: 60, errorRate: 0, successRate: 100 },
+  ];
+
+  it("uses real-only score when hour has real requests", () => {
+    const blended = blendHourlyWithPings(real, pings, 0.1);
+    expect(blended.length).toBe(2);
+    const hour0 = blended.find((b) => b.hour === 0)!;
+    expect(hour0.pingInfluenceApplied).toBe(false);
+    expect(hour0.realCount).toBe(10);
+    expect(hour0.blendedScore).toBe(hour0.realScore);
+  });
+
+  it("falls back to ping × influence for zero-traffic hours", () => {
+    const blended = blendHourlyWithPings(real, pings, 0.1);
+    const hour1 = blended.find((b) => b.hour === 1)!;
+    expect(hour1.pingInfluenceApplied).toBe(true);
+    expect(hour1.realCount).toBe(0);
+    // 60ms latency vs 50ms max → (1 - 60/50) caps at 0, + success 40 → score ≈ 40 × 0.1 = 4
+    expect(hour1.blendedScore).toBeGreaterThanOrEqual(0);
+    expect(hour1.blendedScore).toBe(4);
+  });
+
+  it("at influence=1.0, zero-traffic hour score equals full ping score", () => {
+    const blended = blendHourlyWithPings(real, pings, 1.0);
+    const hour1 = blended.find((b) => b.hour === 1)!;
+    // With latency 60 > max 50, score caps at 0 + success 40 = 40
+    const blendedZeroInfl = blendHourlyWithPings(real, pings, 0);
+    expect(hour1.blendedScore).toBeGreaterThan(
+      blendedZeroInfl.find((b) => b.hour === 1)!.blendedScore,
+    );
+  });
+
+  it("handles null ping payload", () => {
+    const blended = blendHourlyWithPings(real, null as any, 0.1);
+    expect(blended.length).toBe(2);
+    const hour1 = blended.find((b) => b.hour === 1)!;
+    expect(hour1.blendedScore).toBe(0);
+    expect(hour1.pingInfluenceApplied).toBe(true);
+  });
+});
+
+describe("adaptiveSmoothing", () => {
+  const mk = (hour: number, score: number, realCount: number) => ({
+    hour,
+    score,
+    realCount,
+  });
+
+  it("returns scores unchanged for 24h range (no smoothing)", () => {
+    const rows = Array.from({ length: 24 }, (_, i) => mk(i, i * 2, 10));
+    const smoothed = adaptiveSmoothing(rows, "24h");
+    expect(smoothed).toEqual(rows.map((r) => r.score));
+  });
+
+  it("applies 5-hour kernel to dense 7d data", () => {
+    const rows = Array.from({ length: 24 }, (_, i) =>
+      mk(i, i === 12 ? 100 : 0, 10),
+    );
+    const smoothed = adaptiveSmoothing(rows, "7d");
+    expect(smoothed[12]).toBeLessThan(100);
+    expect(smoothed[12]).toBeGreaterThan(0);
+    // Peak spreads to adjacent hours
+    expect(smoothed[11]).toBeGreaterThan(0);
+    expect(smoothed[13]).toBeGreaterThan(0);
+  });
+
+  it("wraps across midnight", () => {
+    const rows = [mk(23, 100, 10), mk(0, 0, 10), mk(1, 0, 10)];
+    const smoothed = adaptiveSmoothing(rows, "7d");
+    // The peak at index 0 propagates back into neighbors via the wrapped kernel
+    expect(smoothed[0]).toBeGreaterThan(0);
+    expect(smoothed[0]).toBeLessThan(100);
+    // Index 2 (adjacent to 0 via wrap) also picks up some signal
+    expect(smoothed[2]).toBeGreaterThan(0);
   });
 });

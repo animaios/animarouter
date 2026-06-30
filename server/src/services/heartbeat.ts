@@ -6,7 +6,11 @@
  * AND maintain a per-key-per-model health map so the router can prefer
  * healthy keys on a per-model basis.
  *
- * Activity-gated: only pings when a user request was made recently.
+ * Activity-gated for advisor: a full AI-advisor ping only runs when there
+ * has been a user request within the advisor activity window. Outside the
+ * window, pings fall back to cheap "hi" probes (~5 tokens) so the
+ * productivity chart still gets off-hours latency data without burning the
+ * advisor prompt budget when nobody is using the router.
  * Pings every key for every enabled model in the fallback chain.
  *
  * Opt-in: disabled by default (heartbeat_enabled=false).
@@ -25,6 +29,7 @@ import {
   isAdvisorEnabled,
   parseAdviceResponse,
 } from "./heartbeat-advisor.js";
+import { insertPing } from "./ping-history.js";
 
 // ──────────────────────────────────────────────────────────────────────
 // Per-key-per-model health state
@@ -419,12 +424,15 @@ async function fireRecheck(
   }
 
   const start = Date.now();
+  // Rechecks always use a cheap "hi" ping — they verify recovery, they don't
+  // need the advisor prompt budget.
   await pingKey(
     keyRow.platform,
     model.model_db_id,
     model.model_id,
     keyRow,
     pingTimeoutMs,
+    false,
   );
   const latencyMs = Date.now() - start;
 
@@ -523,7 +531,8 @@ export function getPendingRechecks(): ReadonlyMap<
 
 let _enabled: boolean | null = null;
 let _intervalMs: number | null = null;
-let _activityWindowMs: number | null = null;
+let _advisorActivityWindowMs: number | null = null;
+let _persistPings: boolean | null = null;
 let _pingTimeoutMs: number | null = null;
 let _staggerMs: number | null = null;
 let _concurrency: number | null = null;
@@ -535,10 +544,11 @@ function readConfig() {
     _enabled = getFeatureSetting("heartbeat_enabled") as boolean;
     _intervalMs =
       (getFeatureSetting("heartbeat_interval_min") as number) * 60 * 1000;
-    _activityWindowMs =
-      (getFeatureSetting("heartbeat_activity_window_min") as number) *
+    _advisorActivityWindowMs =
+      (getFeatureSetting("heartbeat_advisor_activity_window_min") as number) *
       60 *
       1000;
+    _persistPings = getFeatureSetting("heartbeat_persist_pings") as boolean;
     _pingTimeoutMs = getFeatureSetting("heartbeat_timeout_ms") as number;
     _staggerMs = getFeatureSetting("heartbeat_stagger_ms") as number;
     _concurrency = getFeatureSetting("heartbeat_concurrency") as number;
@@ -552,7 +562,8 @@ function readConfig() {
   return {
     enabled: _enabled,
     intervalMs: _intervalMs!,
-    activityWindowMs: _activityWindowMs!,
+    advisorActivityWindowMs: _advisorActivityWindowMs!,
+    persistPings: _persistPings!,
     pingTimeoutMs: _pingTimeoutMs!,
     staggerMs: _staggerMs!,
     concurrency: _concurrency!,
@@ -565,7 +576,8 @@ function readConfig() {
 export function resetHeartbeatConfig(): void {
   _enabled = null;
   _intervalMs = null;
-  _activityWindowMs = null;
+  _advisorActivityWindowMs = null;
+  _persistPings = null;
   _pingTimeoutMs = null;
   _staggerMs = null;
   _concurrency = null;
@@ -738,13 +750,18 @@ export async function pokeKey(
   }
   if (!model) return false;
 
-  const { pingTimeoutMs } = readConfig();
+  const { pingTimeoutMs, advisorActivityWindowMs } = readConfig();
+  // Manual prewarm runs outside the normal activity gate but we still honor
+  // the window for whether the advisor prompt is used.
+  const withinAdvisorWindow =
+    Date.now() - lastActivityAt <= advisorActivityWindowMs;
   await pingKey(
     keyRow.platform,
     model.model_db_id,
     model.model_id,
     keyRow,
     pingTimeoutMs,
+    withinAdvisorWindow,
   );
   return isKeyHealthy(keyId, model.model_id);
 }
@@ -759,22 +776,15 @@ async function runCycle(skipGate = false): Promise<number> {
 
   try {
     const now = Date.now();
-    const { activityWindowMs, pingTimeoutMs, concurrency, staggerMs } =
+    const { advisorActivityWindowMs, pingTimeoutMs, concurrency, staggerMs } =
       readConfig();
 
-    // Activity gate — bypassed for startup prewarm (skipGate=true)
-    if (
-      !skipGate &&
-      (lastActivityAt === 0 || now - lastActivityAt > activityWindowMs)
-    ) {
-      publish({
-        type: "heartbeat.cycle_skipped",
-        reason: "activity_gate",
-        lastActivityAgeMs: lastActivityAt === 0 ? -1 : now - lastActivityAt,
-        at: now,
-      });
-      return 0;
-    }
+    // Cheap "hi" pings fire all day so the productivity chart always has
+    // off-hours data. We only gate within the advisor window — whether the
+    // expensive AI-advisor prompt runs instead of a cheap "hi".
+    const lastActivityAgeMs = lastActivityAt === 0 ? -1 : now - lastActivityAt;
+    const withinAdvisorWindow =
+      lastActivityAgeMs !== -1 && lastActivityAgeMs <= advisorActivityWindowMs;
 
     // ─── Prune stale keyHealthMap entries for models that no longer exist ───
     // Get all currently enabled models from the fallback chain
@@ -897,6 +907,7 @@ async function runCycle(skipGate = false): Promise<number> {
           task.modelId,
           task.key,
           pingTimeoutMs,
+          withinAdvisorWindow,
         ).catch((err) => {
           console.error(
             `[Heartbeat] Ping error for key#${task.key.id} on ${task.platform}/${task.modelId}:`,
@@ -939,6 +950,7 @@ async function pingKey(
   modelId: string,
   keyRow: any,
   pingTimeoutMs: number,
+  withinAdvisorWindow: boolean,
 ): Promise<void> {
   const provider = buildProviderFor(platform);
   if (!provider) return;
@@ -966,7 +978,10 @@ async function pingKey(
 
   const start = Date.now();
   try {
-    const advisorEnabled = isAdvisorEnabled();
+    // AI advisor only runs when a recent user request justifies its prompt
+    // budget. Outside the advisor window we always send a cheap "hi" ping
+    // (~5 tokens) so the productivity chart still gets off-hours data.
+    const advisorEnabled = isAdvisorEnabled() && withinAdvisorWindow;
     let advisoryMessages: ReturnType<typeof buildAdvisoryMessages> | null =
       null;
     if (advisorEnabled) {
@@ -1088,6 +1103,17 @@ async function pingKey(
       latencyMs: Date.now() - start,
       at: Date.now(),
     });
+    try {
+      insertPing({
+        platform,
+        modelId,
+        keyId: keyRow.id,
+        success: true,
+        latencyMs: Date.now() - start,
+      });
+    } catch {
+      // Swallow — persistence failure should never break the ping cycle.
+    }
   } catch (err: any) {
     const latencyMs = Date.now() - start;
     const tier = classifyError(err);
@@ -1143,6 +1169,18 @@ async function pingKey(
       error: (err?.message ?? "unknown").slice(0, 120),
       at: Date.now(),
     });
+    try {
+      insertPing({
+        platform,
+        modelId,
+        keyId: keyRow.id,
+        success: false,
+        latencyMs,
+        error: (err?.message ?? "unknown").slice(0, 120),
+      });
+    } catch {
+      // Swallow — persistence failure should never break the ping cycle.
+    }
   }
 }
 

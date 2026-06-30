@@ -1,24 +1,30 @@
 import { useMemo } from "react";
 import {
   Bar,
-  BarChart,
   CartesianGrid,
   Cell,
+  ComposedChart,
+  Line,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import type { RebucketedHourlyStat, HourWindow } from "./router-stats-data";
-import { ChartPanel } from "./RouterStatsPage";
 import { cn } from "@/lib/utils";
+import { ChartPanel } from "./RouterStatsPage";
+import type {
+  HourWindow,
+  PingHourlyStat,
+  RebucketedHourlyStat,
+} from "./router-stats-data";
 
 interface HourlyDatum {
   hour: number;
   hourLabel: string;
   requests: number;
   latencyS: number;
-  avgTokPerSec: number;
+  pingLatencyS: number | null;
+  pingOverlay: number | null;
   errorRate: number;
   score: number;
   grade: "HIGH" | "OK" | "LOW" | "NONE";
@@ -41,6 +47,11 @@ function ProductivityTooltip({ active, payload }: ProductivityTooltipProps) {
   const datum = payload[0]?.payload;
   if (!datum) return null;
 
+  const pingNote =
+    datum.pingOverlay !== null
+      ? `${datum.pingOverlay.toFixed(1)}s baseline (${datum.requests > 0 ? "" : " ping-only"})`
+      : undefined;
+
   return (
     <div className="rounded-lg border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md">
       <p className="font-medium">{datum.hourLabel}</p>
@@ -49,12 +60,14 @@ function ProductivityTooltip({ active, payload }: ProductivityTooltipProps) {
         <dd className="text-right">{datum.latencyS.toFixed(1)}s avg</dd>
         <dt className="text-muted-foreground">Requests</dt>
         <dd className="text-right">{datum.requests}</dd>
-        <dt className="text-muted-foreground">Speed</dt>
-        <dd className="text-right">
-          {datum.avgTokPerSec > 0 ? `${datum.avgTokPerSec} tok/s` : "—"}
-        </dd>
         <dt className="text-muted-foreground">Errors</dt>
         <dd className="text-right">{datum.errorRate}%</dd>
+        {pingNote && (
+          <>
+            <dt className="text-muted-foreground">Ping baseline</dt>
+            <dd className="text-right">{pingNote}</dd>
+          </>
+        )}
       </dl>
     </div>
   );
@@ -84,34 +97,67 @@ interface HourlyProductivityChartProps {
   rows: RebucketedHourlyStat[];
   windows: HourWindow[];
   scoreByHour: Map<number, number>;
+  pingRows: PingHourlyStat[];
 }
 
 export function HourlyProductivityChart({
   rows,
   windows,
   scoreByHour,
+  pingRows,
 }: HourlyProductivityChartProps) {
+  const pingByHour = useMemo(() => {
+    const map = new Map<number, PingHourlyStat>();
+    for (const p of pingRows) map.set(p.hour, p);
+    return map;
+  }, [pingRows]);
+
+  const maxPingLatencyS = useMemo(() => {
+    const values = pingRows.map((p) => p.avgLatencyMs).filter((v) => v > 0);
+    return values.length > 0 ? Math.max(...values) / 1000 : 0;
+  }, [pingRows]);
+
   const data = useMemo<HourlyDatum[]>(
     () =>
       rows.map((r) => {
         const score = scoreByHour.get(r.hour) ?? 0;
+        const ping = pingByHour.get(r.hour);
+        const pingOverlay =
+          ping && ping.avgLatencyMs > 0
+            ? Number((ping.avgLatencyMs / 1000).toFixed(2))
+            : null;
         return {
           hour: r.hour,
           hourLabel: `${String(r.hour).padStart(2, "0")}:00`,
           requests: r.requests,
           latencyS: Number((r.avgLatencyMs / 1000).toFixed(2)),
-          avgTokPerSec: r.avgTokPerSec,
+          // When no ping data for this hour, leave the overlay null so
+          // Recharts omits the segment rather than drawing a misleading 0s.
+          pingLatencyS:
+            ping && ping.avgLatencyMs > 0 ? ping.avgLatencyMs / 1000 : null,
+          pingOverlay,
           errorRate: r.errorRate,
           score,
           grade:
-            score >= 75 ? "HIGH" : score >= 55 ? "OK" : score > 0 ? "LOW" : "NONE",
+            score >= 75
+              ? "HIGH"
+              : score >= 55
+                ? "OK"
+                : score > 0
+                  ? "LOW"
+                  : "NONE",
         } satisfies HourlyDatum;
       }),
-    [rows, scoreByHour],
+    [rows, scoreByHour, pingByHour],
   );
 
-  const hasData = rows.some((r) => r.requests > 0);
-  const maxLatency = Math.max(1, ...data.map((d) => d.latencyS));
+  const hasData =
+    rows.some((r) => r.requests > 0) || pingRows.some((p) => p.requests > 0);
+  const maxLatency = Math.max(
+    1,
+    ...data.map((d) => d.latencyS),
+    maxPingLatencyS,
+  );
 
   return (
     <ChartPanel
@@ -125,16 +171,20 @@ export function HourlyProductivityChart({
     >
       {!hasData ? (
         <p className="py-10 text-center text-sm text-muted-foreground">
-          No routed requests in this window — productivity scoring needs traffic.
+          No routed requests or pings in this window — productivity scoring
+          needs data.
         </p>
       ) : (
         <>
           <ResponsiveContainer width="100%" height={260}>
-            <BarChart
+            <ComposedChart
               data={data}
               margin={{ top: 8, right: 8, left: -12, bottom: 0 }}
             >
-              <CartesianGrid strokeDasharray="2 4" stroke="var(--router-stat-grid)" />
+              <CartesianGrid
+                strokeDasharray="2 4"
+                stroke="var(--router-stat-grid)"
+              />
               <XAxis
                 dataKey="hourLabel"
                 tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
@@ -151,17 +201,32 @@ export function HourlyProductivityChart({
                 domain={[0, Math.ceil(maxLatency)]}
               />
               <Tooltip content={<ProductivityTooltip />} />
-              <Bar dataKey="latencyS" name="Latency (s)" radius={[3, 3, 0, 0]}>
+              <Bar
+                dataKey="latencyS"
+                name="Real latency (s)"
+                radius={[3, 3, 0, 0]}
+              >
                 {data.map((d) => (
                   <Cell key={d.hour} fill={gradeFill(d.grade)} />
                 ))}
               </Bar>
-            </BarChart>
+              <Line
+                type="monotone"
+                dataKey="pingLatencyS"
+                name="Ping baseline (s)"
+                stroke="var(--router-stat-cyan)"
+                strokeWidth={1.5}
+                strokeDasharray="4 3"
+                dot={false}
+                activeDot={false}
+                connectNulls={false}
+              />
+            </ComposedChart>
           </ResponsiveContainer>
           <div className="mt-4 flex flex-wrap gap-2">
             {windows.length === 0 ? (
               <span className="text-xs text-muted-foreground">
-                Need more traffic to identify productive windows.
+                Need more traffic or pings to identify productive windows.
               </span>
             ) : (
               windows.map((w) => <WindowPill key={w.label} window={w} />)
