@@ -1,6 +1,6 @@
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { subscribeSse } from '../services/events.js';
+import type { Request, Response } from "express";
+import { Router } from "express";
+import { subscribeSse } from "../services/events.js";
 
 export const eventsRouter = Router();
 
@@ -14,14 +14,14 @@ export const eventsRouter = Router();
  * Auth: requires the dashboard session cookie (same as other /api/* routes).
  * Up to 8 concurrent subscribers; oldest is evicted when the limit is hit.
  */
-eventsRouter.get('/', (_req: Request, res: Response) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // nginx: don't buffer
+eventsRouter.get("/", (_req: Request, res: Response) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // nginx: don't buffer
 
   // Send an initial comment so the client knows the stream is alive.
-  res.write(': connected\n\n');
+  res.write(": connected\n\n");
 
   subscribeSse(res);
 });

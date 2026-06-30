@@ -10,10 +10,10 @@
  * list endpoint so one call per sync cycle is sufficient.
  */
 
-import { canonicalizeModelId } from '../../db/benchmark-scores.js';
-import type Database from 'better-sqlite3';
+import type Database from "better-sqlite3";
+import { canonicalizeModelId } from "../../db/benchmark-scores.js";
 
-const API_URL = 'https://benchgecko.ai/api/v1/models';
+const API_URL = "https://benchgecko.ai/api/v1/models";
 const FETCH_TIMEOUT_MS = 10_000;
 
 export interface BenchGeckoModel {
@@ -45,8 +45,9 @@ async function fetchBenchGeckoData(): Promise<BenchGeckoResponse> {
     const res = await fetch(API_URL, {
       signal: controller.signal,
       headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'AnimaRouter/1.0 (BenchGecko sync; contact@animarouter.dev)',
+        Accept: "application/json",
+        "User-Agent":
+          "AnimaRouter/1.0 (BenchGecko sync; contact@animarouter.dev)",
       },
     });
 
@@ -54,17 +55,19 @@ async function fetchBenchGeckoData(): Promise<BenchGeckoResponse> {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
 
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.includes('application/json')) {
-      const body = await res.text().catch(() => '<unreadable>');
-      throw new Error(`Non-JSON response (${res.status}): ${body.slice(0, 80)}`);
+    const ct = res.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) {
+      const body = await res.text().catch(() => "<unreadable>");
+      throw new Error(
+        `Non-JSON response (${res.status}): ${body.slice(0, 80)}`,
+      );
     }
 
-    const data = await res.json() as BenchGeckoResponse;
+    const data = (await res.json()) as BenchGeckoResponse;
     return data;
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new Error('BenchGecko fetch timed out');
+    if (err.name === "AbortError") {
+      throw new Error("BenchGecko fetch timed out");
     }
     throw err;
   } finally {
@@ -92,7 +95,7 @@ export async function fetchBenchGeckoScores(
   }
 
   if (!data?.data || !Array.isArray(data.data) || data.data.length === 0) {
-    errors.push('BenchGecko: empty response');
+    errors.push("BenchGecko: empty response");
     return { updated: 0, affectedIds, errors };
   }
 
@@ -105,7 +108,9 @@ export async function fetchBenchGeckoScores(
       AND (bg_score IS NULL OR bg_score != ?)
   `);
 
-  const findIds = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+  const findIds = db.prepare(
+    "SELECT id FROM models WHERE canonical_model_key = ?",
+  );
 
   let updated = 0;
   const tx = db.transaction(() => {

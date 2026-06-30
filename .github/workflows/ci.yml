@@ -35,6 +35,9 @@ jobs:
       - name: Build workspaces
         run: npm run build
 
+      - name: Complexity check — cyclomatic threshold (max: 60)
+        run: npx eslint . --config eslint.config.js
+
       - name: Upload coverage to DeepSource
         if: github.event_name == 'push'
         uses: deepsourcelabs/action@master

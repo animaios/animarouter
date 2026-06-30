@@ -1,8 +1,20 @@
-import { useEffect, useState, Suspense, lazy } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, NavLink, Link, useLocation, useNavigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Menu, Moon, Sun, Loader2 } from 'lucide-react'
-import { Button, buttonVariants } from '@/components/ui/button'
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Loader2, Menu, Moon, Sun } from "lucide-react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
+import { AuthGate } from "@/components/auth-gate";
+import { ErrorBoundary } from "@/components/error-boundary";
+import { Toaster } from "@/components/toaster";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,38 +22,37 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { AuthGate } from '@/components/auth-gate'
-import { Toaster } from '@/components/toaster'
-import { isRouterStatsPathname } from '@/lib/router-shell'
-import { drainPersisted } from '@/lib/toast'
-import { ErrorBoundary } from '@/components/error-boundary'
+} from "@/components/ui/dropdown-menu";
+import { isRouterStatsPathname } from "@/lib/router-shell";
+import { drainPersisted } from "@/lib/toast";
 
+const KeysPage = lazy(() => import("@/pages/KeysPage"));
+const PlaygroundPage = lazy(() => import("@/pages/PlaygroundPage"));
+const FallbackPage = lazy(() => import("@/pages/FallbackPage"));
+const EmbeddingsPage = lazy(() => import("@/pages/EmbeddingsPage"));
+const RouterStatsPage = lazy(() => import("@/pages/RouterStatsPage"));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
 
-const KeysPage = lazy(() => import('@/pages/KeysPage'))
-const PlaygroundPage = lazy(() => import('@/pages/PlaygroundPage'))
-const FallbackPage = lazy(() => import('@/pages/FallbackPage'))
-const EmbeddingsPage = lazy(() => import('@/pages/EmbeddingsPage'))
-const RouterStatsPage = lazy(() => import('@/pages/RouterStatsPage'))
-const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
-
-const queryClient = new QueryClient()
+const queryClient = new QueryClient();
 
 const navItems = [
-  { to: '/models', label: 'Models' },
-  { to: '/playground', label: 'Playground' },
-  { to: '/keys', label: 'Keys' },
-  { to: '/router-stats', label: 'Router Stats' },
-  { to: '/settings', label: 'Settings' },
-]
+  { to: "/models", label: "Models" },
+  { to: "/playground", label: "Playground" },
+  { to: "/keys", label: "Keys" },
+  { to: "/router-stats", label: "Router Stats" },
+  { to: "/settings", label: "Settings" },
+];
 
 function getPreferredDarkMode() {
-  if (typeof window === 'undefined') {
-    return false
+  if (typeof window === "undefined") {
+    return false;
   }
 
-  const stored = localStorage.getItem('theme')
-  return stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches)
+  const stored = localStorage.getItem("theme");
+  return (
+    stored === "dark" ||
+    (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches)
+  );
 }
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
@@ -51,105 +62,124 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
       className={({ isActive }) =>
         `relative text-sm px-1 py-4 transition-colors ${
           isActive
-            ? 'text-foreground after:absolute after:inset-x-0 after:-bottom-px after:h-px after:bg-foreground'
-            : 'text-muted-foreground hover:text-foreground'
+            ? "text-foreground after:absolute after:inset-x-0 after:-bottom-px after:h-px after:bg-foreground"
+            : "text-muted-foreground hover:text-foreground"
         }`
       }
     >
       {children}
     </NavLink>
-  )
+  );
 }
 
 function useDarkMode() {
-  const [dark, setDark] = useState(getPreferredDarkMode)
+  const [dark, setDark] = useState(getPreferredDarkMode);
 
   useEffect(() => {
-    document.documentElement.classList.toggle('dark', dark)
-  }, [dark])
+    document.documentElement.classList.toggle("dark", dark);
+  }, [dark]);
 
   function toggle() {
     setDark((current) => {
-      const next = !current
-      localStorage.setItem('theme', next ? 'dark' : 'light')
-      return next
-    })
+      const next = !current;
+      localStorage.setItem("theme", next ? "dark" : "light");
+      return next;
+    });
   }
 
-  return { dark, toggle }
+  return { dark, toggle };
 }
 
-function DarkModeToggle({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
+function DarkModeToggle({
+  dark,
+  onToggle,
+}: {
+  dark: boolean;
+  onToggle: () => void;
+}) {
   return (
     <Button
       variant="ghost"
       size="sm"
       onClick={onToggle}
-      aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'}
+      aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
     >
       {dark ? <Sun /> : <Moon />}
     </Button>
-  )
+  );
 }
 
 function Brand() {
   return (
-    <Link to="/" className="flex items-center gap-2 transition-opacity hover:opacity-70">
+    <Link
+      to="/"
+      className="flex items-center gap-2 transition-opacity hover:opacity-70"
+    >
       <span className="inline-block size-2 rounded-full bg-foreground" />
       <span className="font-semibold tracking-tight text-sm">AnimaRouter</span>
     </Link>
-  )
+  );
 }
 
 // True when the dashboard runs inside the desktop shell (Electron preload
 // sets this). The navbar then doubles as the window title bar: draggable,
 // padded for the macOS traffic lights, and the page background is glass.
 // Set by the desktop app's preload script (desktop/src/preload.ts).
-interface AnimaRouterWindow { __ANIMAROUTER_DESKTOP__?: boolean }
-const isDesktopApp = typeof window !== 'undefined'
-  && (window as AnimaRouterWindow).__ANIMAROUTER_DESKTOP__ === true
+interface AnimaRouterWindow {
+  __ANIMAROUTER_DESKTOP__?: boolean;
+}
+const isDesktopApp =
+  typeof window !== "undefined" &&
+  (window as AnimaRouterWindow).__ANIMAROUTER_DESKTOP__ === true;
 
 // The preload's own early classList.add can be lost (it may run before this
 // document exists), so the client claims the class itself at module load —
 // before the first React paint — keeping html.desktop CSS (transparent body,
 // glass backdrop) reliable.
 if (isDesktopApp) {
-  document.documentElement.classList.add('desktop')
+  document.documentElement.classList.add("desktop");
 }
-
 
 function PageLoader() {
   return (
     <div className="flex items-center justify-center h-64">
       <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
     </div>
-  )
+  );
 }
 
 function Navbar() {
-  const { dark, toggle } = useDarkMode()
-  const location = useLocation()
-  const navigate = useNavigate()
+  const { dark, toggle } = useDarkMode();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   function isActiveRoute(to: string) {
-    return location.pathname === to
+    return location.pathname === to;
   }
 
   return (
     <header
       // In the desktop shell the body backdrop is already translucent glass;
       // a lighter wash keeps the title bar from looking more solid than the page.
-      className={`sticky top-0 z-40 border-b backdrop-blur ${isDesktopApp ? 'bg-background/45' : 'bg-background/80'}`}
-      style={isDesktopApp ? ({ WebkitAppRegion: 'drag' } as React.CSSProperties) : undefined}
+      className={`sticky top-0 z-40 border-b backdrop-blur ${isDesktopApp ? "bg-background/45" : "bg-background/80"}`}
+      style={
+        isDesktopApp
+          ? ({ WebkitAppRegion: "drag" } as React.CSSProperties)
+          : undefined
+      }
     >
       <div
-        className={`mx-auto flex max-w-6xl items-center px-4 sm:px-6 ${isDesktopApp ? 'pl-20 sm:pl-20' : ''}`}
+        className={`mx-auto flex max-w-6xl items-center px-4 sm:px-6 ${isDesktopApp ? "pl-20 sm:pl-20" : ""}`}
         style={isDesktopApp ? { minHeight: 52 } : undefined}
       >
         <Brand />
         <nav
           className="ml-10 hidden items-center gap-6 md:flex"
-          style={isDesktopApp ? ({ WebkitAppRegion: 'no-drag' } as React.CSSProperties) : undefined}
+          style={
+            isDesktopApp
+              ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties)
+              : undefined
+          }
         >
           {navItems.map((item) => (
             <NavItem key={item.to} to={item.to}>
@@ -159,14 +189,18 @@ function Navbar() {
         </nav>
         <div
           className="ml-auto hidden items-center gap-1 md:flex"
-          style={isDesktopApp ? ({ WebkitAppRegion: 'no-drag' } as React.CSSProperties) : undefined}
+          style={
+            isDesktopApp
+              ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties)
+              : undefined
+          }
         >
           <DarkModeToggle dark={dark} onToggle={toggle} />
         </div>
         <div className="ml-auto md:hidden">
           <DropdownMenu>
             <DropdownMenuTrigger
-              className={buttonVariants({ variant: 'ghost', size: 'icon' })}
+              className={buttonVariants({ variant: "ghost", size: "icon" })}
               aria-label="Open navigation menu"
             >
               <Menu />
@@ -177,7 +211,11 @@ function Navbar() {
                   <DropdownMenuItem
                     key={item.to}
                     onClick={() => navigate(item.to)}
-                    className={isActiveRoute(item.to) ? 'bg-accent text-accent-foreground font-medium' : undefined}
+                    className={
+                      isActiveRoute(item.to)
+                        ? "bg-accent text-accent-foreground font-medium"
+                        : undefined
+                    }
                   >
                     {item.label}
                   </DropdownMenuItem>
@@ -195,56 +233,74 @@ function Navbar() {
         </div>
       </div>
     </header>
-  )
+  );
 }
 
 function MainContent() {
-  const location = useLocation()
-  const isRouterStatsRoute = isRouterStatsPathname(location.pathname)
+  const location = useLocation();
+  const isRouterStatsRoute = isRouterStatsPathname(location.pathname);
 
   return (
-    <main className={`${isRouterStatsRoute ? 'max-w-7xl' : 'max-w-6xl'} mx-auto px-6 py-8`}>
+    <main
+      className={`${isRouterStatsRoute ? "max-w-7xl" : "max-w-6xl"} mx-auto px-6 py-8`}
+    >
       <Suspense fallback={<PageLoader />}>
         <ErrorBoundary>
           <Routes>
             <Route path="/" element={<Navigate to="/models/chat" replace />} />
-            <Route path="/models" element={<Navigate to="/models/chat" replace />} />
+            <Route
+              path="/models"
+              element={<Navigate to="/models/chat" replace />}
+            />
             <Route path="/models/chat" element={<FallbackPage />} />
             <Route path="/models/embeddings" element={<EmbeddingsPage />} />
             <Route path="/playground" element={<PlaygroundPage />} />
             <Route path="/keys" element={<KeysPage />} />
-            <Route path="/fallback" element={<Navigate to="/models/chat" replace />} />
-            <Route path="/analytics" element={<Navigate to="/router-stats" replace />} />
+            <Route
+              path="/fallback"
+              element={<Navigate to="/models/chat" replace />}
+            />
+            <Route
+              path="/analytics"
+              element={<Navigate to="/router-stats" replace />}
+            />
             <Route path="/router-stats" element={<RouterStatsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/test" element={<Navigate to="/playground" replace />} />
+            <Route
+              path="/test"
+              element={<Navigate to="/playground" replace />}
+            />
             <Route path="/health" element={<Navigate to="/keys" replace />} />
           </Routes>
         </ErrorBoundary>
       </Suspense>
     </main>
-  )
+  );
 }
 
 function App() {
   // Replay any toasts that were queued while the tab was hidden (auto-
   // discovered models, fallbacks exhausted, etc.) so the user sees them on
   // their next visit rather than missing them entirely.
-  useEffect(() => { drainPersisted() }, [])
+  useEffect(() => {
+    drainPersisted();
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter basename={import.meta.env.BASE_URL}>
         <AuthGate>
           <Toaster />
-          <div className={`min-h-screen ${isDesktopApp ? 'desktop-backdrop' : 'bg-background'}`}>
+          <div
+            className={`min-h-screen ${isDesktopApp ? "desktop-backdrop" : "bg-background"}`}
+          >
             <Navbar />
             <MainContent />
           </div>
         </AuthGate>
       </BrowserRouter>
     </QueryClientProvider>
-  )
+  );
 }
 
-export default App
+export default App;

@@ -1,13 +1,12 @@
-import type { Platform } from '@animarouter/shared/types.js';
-import { getDb } from '../db/index.js';
-import { OpenAICompatProvider } from './openai-compat.js';
-import { BaseProvider } from './base.js';
-import { CloudflareProvider } from './cloudflare.js';
-import { CohereProvider } from './cohere.js';
-import { GoogleProvider } from './google.js';
-import { AnthropicCompatProvider } from './anthropic.js';
-import { CommandCodeProvider } from './commandcode.js';
-
+import type { Platform } from "@animarouter/shared/types.js";
+import { getDb } from "../db/index.js";
+import { AnthropicCompatProvider } from "./anthropic.js";
+import type { BaseProvider } from "./base.js";
+import { CloudflareProvider } from "./cloudflare.js";
+import { CohereProvider } from "./cohere.js";
+import { CommandCodeProvider } from "./commandcode.js";
+import { GoogleProvider } from "./google.js";
+import { OpenAICompatProvider } from "./openai-compat.js";
 
 const providers = new Map<Platform, BaseProvider>();
 
@@ -19,18 +18,22 @@ function register(provider: BaseProvider) {
 register(new GoogleProvider());
 
 // Groq - OpenAI-compatible
-register(new OpenAICompatProvider({
-  platform: 'groq',
-  name: 'Groq',
-  baseUrl: 'https://api.groq.com/openai/v1',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "groq",
+    name: "Groq",
+    baseUrl: "https://api.groq.com/openai/v1",
+  }),
+);
 
 // Cerebras - OpenAI-compatible
-register(new OpenAICompatProvider({
-  platform: 'cerebras',
-  name: 'Cerebras',
-  baseUrl: 'https://api.cerebras.ai/v1',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "cerebras",
+    name: "Cerebras",
+    baseUrl: "https://api.cerebras.ai/v1",
+  }),
+);
 
 // SambaNova was dropped in V23 (June 2026): the free tier is permanently gone.
 // The always-free tier was retired in early 2025 for a one-time $5 trial
@@ -40,39 +43,47 @@ register(new OpenAICompatProvider({
 // NVIDIA NIM - OpenAI-compatible. Several NIM models reject parallel tool calls
 // ("This model only supports single tool-calls at once!"), so pin
 // parallel_tool_calls to false when tools are present. See issue #255.
-register(new OpenAICompatProvider({
-  platform: 'nvidia',
-  name: 'NVIDIA NIM',
-  baseUrl: 'https://integrate.api.nvidia.com/v1',
-  forceSingleToolCall: true,
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "nvidia",
+    name: "NVIDIA NIM",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    forceSingleToolCall: true,
+  }),
+);
 
 // Mistral - OpenAI-compatible
-register(new OpenAICompatProvider({
-  platform: 'mistral',
-  name: 'Mistral',
-  baseUrl: 'https://api.mistral.ai/v1',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "mistral",
+    name: "Mistral",
+    baseUrl: "https://api.mistral.ai/v1",
+  }),
+);
 
 // OpenRouter - OpenAI-compatible with extra headers
-register(new OpenAICompatProvider({
-  platform: 'openrouter',
-  name: 'OpenRouter',
-  baseUrl: 'https://openrouter.ai/api/v1',
-  extraHeaders: {
-    'HTTP-Referer': 'http://localhost:3001',
-    'X-Title': 'AnimaRouter',
-  },
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "openrouter",
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    extraHeaders: {
+      "HTTP-Referer": "http://localhost:3001",
+      "X-Title": "AnimaRouter",
+    },
+  }),
+);
 
 // GitHub Models — OpenAI-compatible. Catalog uses `<publisher>/<model>` ids
 // (e.g. `openai/gpt-4.1`); the old Azure endpoint rejects that prefix with
 // "Unknown model", so route to the current models.github.ai endpoint.
-register(new OpenAICompatProvider({
-  platform: 'github',
-  name: 'GitHub Models',
-  baseUrl: 'https://models.github.ai/inference',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "github",
+    name: "GitHub Models",
+    baseUrl: "https://models.github.ai/inference",
+  }),
+);
 
 // Cohere - OpenAI-compatible via Cohere compatibility endpoint
 register(new CohereProvider());
@@ -86,22 +97,26 @@ register(new CloudflareProvider());
 register(new CommandCodeProvider());
 
 // Zhipu (Z.ai / bigmodel.cn) - OpenAI-compatible
-register(new OpenAICompatProvider({
-  platform: 'zhipu',
-  name: 'Zhipu AI',
-  baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "zhipu",
+    name: "Zhipu AI",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+  }),
+);
 
 // Hugging Face Inference Providers router — re-added in V13. The V4 removal
 // reason ("tool-call format issues") was the legacy serverless route that
 // emitted tool calls as text; the new router.huggingface.co meta-router
 // uses each backend's native protocol then normalizes the response.
 // Recurring $0.10/mo router credit on the free tier, no card required.
-register(new OpenAICompatProvider({
-  platform: 'huggingface',
-  name: 'HuggingFace Router',
-  baseUrl: 'https://router.huggingface.co/v1',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "huggingface",
+    name: "HuggingFace Router",
+    baseUrl: "https://router.huggingface.co/v1",
+  }),
+);
 
 // Moonshot direct integration was dropped in V4 (paid-only); MiniMax direct
 // was dropped in V4 (superseded by the OpenRouter route).
@@ -116,12 +131,14 @@ register(new OpenAICompatProvider({
 // regularly take 30-90s on Ollama Cloud Free, so the timeout is bumped from
 // the default 15s. Ollama returns reasoning in `message.reasoning` (not
 // `reasoning_content`) — handled by normalizeChoices.
-register(new OpenAICompatProvider({
-  platform: 'ollama',
-  name: 'Ollama Cloud',
-  baseUrl: 'https://ollama.com/v1',
-  timeoutMs: 120000,
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "ollama",
+    name: "Ollama Cloud",
+    baseUrl: "https://ollama.com/v1",
+    timeoutMs: 120000,
+  }),
+);
 
 // Kilo AI Gateway — OpenAI-compatible aggregator. Kilo documents anonymous
 // (keyless) access for `:free` routes, rate-limited 200 req/hr per IP — so this
@@ -131,13 +148,15 @@ register(new OpenAICompatProvider({
 // real model list (`/api/gateway/models`, no `/v1`) which answers GET keyless;
 // the `/v1/models` path only accepts POST (405). Probe before adding catalog
 // rows — most named "free" routes eventually transition to paid.
-register(new OpenAICompatProvider({
-  platform: 'kilo',
-  name: 'Kilo Gateway',
-  baseUrl: 'https://api.kilo.ai/api/gateway/v1',
-  validateUrl: 'https://api.kilo.ai/api/gateway/models',
-  keyless: true,
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "kilo",
+    name: "Kilo Gateway",
+    baseUrl: "https://api.kilo.ai/api/gateway/v1",
+    validateUrl: "https://api.kilo.ai/api/gateway/models",
+    keyless: true,
+  }),
+);
 
 // Pollinations — OpenAI-compatible, anonymous tier. The chat completions
 // endpoint lives at `/openai/v1/chat/completions` (NOT `/v1/...` — the
@@ -149,22 +168,26 @@ register(new OpenAICompatProvider({
 // path is the only recurring-free one left. Anon is queue-limited to 1
 // concurrent request per IP (429 "Queue full" on overlap; live-probed
 // 2026-06-10).
-register(new OpenAICompatProvider({
-  platform: 'pollinations',
-  name: 'Pollinations',
-  baseUrl: 'https://text.pollinations.ai/openai/v1',
-  keyless: true,
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "pollinations",
+    name: "Pollinations",
+    baseUrl: "https://text.pollinations.ai/openai/v1",
+    keyless: true,
+  }),
+);
 
 // LLM7.io — OpenAI-compatible aggregator. 100 req/hr free; anonymous access
 // also works for basic models. Wraps a handful of upstream models behind one
 // token (GPT-OSS, Llama 3.1 Turbo via Meta, Codestral via Mistral, Ministral,
 // GLM-4.6V-Flash).
-register(new OpenAICompatProvider({
-  platform: 'llm7',
-  name: 'LLM7',
-  baseUrl: 'https://api.llm7.io/v1',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "llm7",
+    name: "LLM7",
+    baseUrl: "https://api.llm7.io/v1",
+  }),
+);
 
 // OpenCode Zen — OpenAI-compatible gateway (https://opencode.ai/zen/v1), same
 // adapter as Groq/OpenRouter. A handful of promotional models are free for a
@@ -172,11 +195,13 @@ register(new OpenAICompatProvider({
 // (no card required — billing only applies to paid models). The free roster is
 // trial-only and prompts/outputs may be used to improve the models, so we seed
 // just the docs-confirmed free IDs (migrateModelsV18) with conservative limits.
-register(new OpenAICompatProvider({
-  platform: 'opencode',
-  name: 'OpenCode Zen',
-  baseUrl: 'https://opencode.ai/zen/v1',
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "opencode",
+    name: "OpenCode Zen",
+    baseUrl: "https://opencode.ai/zen/v1",
+  }),
+);
 
 // OVHcloud AI Endpoints — OpenAI-compatible. Two free modes: anonymous
 // (documented 2 req/min per IP per model — observed even stricter across
@@ -186,12 +211,14 @@ register(new OpenAICompatProvider({
 // 2026-06-10: structured tool_calls on gpt-oss-120b and
 // Meta-Llama-3_3-70B-Instruct. OVH reserves the right to add token caps;
 // individual models get deprecated on notice. See migrateModelsV26.
-register(new OpenAICompatProvider({
-  platform: 'ovh',
-  name: 'OVH AI Endpoints',
-  baseUrl: 'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1',
-  keyless: true,
-}));
+register(
+  new OpenAICompatProvider({
+    platform: "ovh",
+    name: "OVH AI Endpoints",
+    baseUrl: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+    keyless: true,
+  }),
+);
 
 // Chutes was evaluated for V11 and dropped: probe with a free-tier key
 // returned 402 on every model — "Quota exceeded and account balance is
@@ -213,17 +240,25 @@ export function getProvider(platform: Platform): BaseProvider | undefined {
  * base URL configured (e.g. the row was deleted but a model still references
  * it).
  */
-export function buildProviderFor(platformSlug: string): BaseProvider | undefined {
+export function buildProviderFor(
+  platformSlug: string,
+): BaseProvider | undefined {
   const builtin = getProvider(platformSlug as Platform);
   if (builtin) return builtin;
   // Custom slug: look up its base URL and keyless flag. We don't memoize
   // across requests — OpenAICompatProvider holds no per-instance state worth
   // reusing, and the DB hit is one indexed lookup.
   const db = getDb();
-  const row = db.prepare('SELECT base_url, keyless, api_format FROM custom_providers WHERE slug = ?').get(platformSlug) as { base_url: string; keyless: number; api_format: string } | undefined;
+  const row = db
+    .prepare(
+      "SELECT base_url, keyless, api_format FROM custom_providers WHERE slug = ?",
+    )
+    .get(platformSlug) as
+    | { base_url: string; keyless: number; api_format: string }
+    | undefined;
   if (!row?.base_url) return undefined;
   const keyless = row.keyless === 1;
-  if (row.api_format === 'anthropic') {
+  if (row.api_format === "anthropic") {
     return new AnthropicCompatProvider({
       platform: platformSlug as Platform,
       name: platformSlug,
@@ -248,5 +283,7 @@ export function getAllProviders(): BaseProvider[] {
 export function hasProvider(platform: Platform): boolean {
   if (providers.has(platform)) return true;
   const db = getDb();
-  return !!db.prepare('SELECT 1 FROM custom_providers WHERE slug = ?').get(platform);
+  return !!db
+    .prepare("SELECT 1 FROM custom_providers WHERE slug = ?")
+    .get(platform);
 }

@@ -1,19 +1,39 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import type { Express } from 'express';
-import { createApp } from '../../app.js';
-import { initDb, getDb, getUnifiedApiKey } from '../../db/index.js';
-import { mintDashboardToken, isGatedApiPath } from '../helpers/auth.js';
+import type { Express } from "express";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { createApp } from "../../app.js";
+import { getDb, getUnifiedApiKey, initDb } from "../../db/index.js";
+import { isGatedApiPath, mintDashboardToken } from "../helpers/auth.js";
 
-let dashToken = '';
+let dashToken = "";
 
-async function request(app: Express, method: string, path: string, body?: any, headers: Record<string, string> = {}) {
+async function request(
+  app: Express,
+  method: string,
+  path: string,
+  body?: any,
+  headers: Record<string, string> = {},
+) {
   const server = app.listen(0);
   const addr = server.address() as any;
   const url = `http://127.0.0.1:${addr.port}${path}`;
 
   const res = await fetch(url, {
     method,
-    headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(isGatedApiPath(path) && !('Authorization' in headers) ? { Authorization: `Bearer ${dashToken}` } : {}), ...headers },
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(isGatedApiPath(path) && !("Authorization" in headers)
+        ? { Authorization: `Bearer ${dashToken}` }
+        : {}),
+      ...headers,
+    },
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -21,7 +41,9 @@ async function request(app: Express, method: string, path: string, body?: any, h
   server.close();
 
   let json: any = null;
-  try { json = JSON.parse(data); } catch {}
+  try {
+    json = JSON.parse(data);
+  } catch {}
 
   return { status: res.status, body: json, headers: res.headers, raw: data };
 }
@@ -30,25 +52,25 @@ function authHeaders() {
   return { Authorization: `Bearer ${getUnifiedApiKey()}` };
 }
 
-describe('Proxy tool-calling support', () => {
+describe("Proxy tool-calling support", () => {
   let app: Express;
 
   beforeAll(() => {
-    process.env.ENCRYPTION_KEY = '0'.repeat(64);
-    initDb(':memory:');
+    process.env.ENCRYPTION_KEY = "0".repeat(64);
+    initDb(":memory:");
     app = createApp();
     dashToken = mintDashboardToken();
   });
 
   beforeEach(async () => {
     const db = getDb();
-    db.prepare('DELETE FROM api_keys').run();
-    db.prepare('DELETE FROM requests').run();
+    db.prepare("DELETE FROM api_keys").run();
+    db.prepare("DELETE FROM requests").run();
 
-    const addKey = await request(app, 'POST', '/api/keys', {
-      platform: 'groq',
-      key: 'gsk_proxy_tool_test',
-      label: 'proxy-tools',
+    const addKey = await request(app, "POST", "/api/keys", {
+      platform: "groq",
+      key: "gsk_proxy_tool_test",
+      label: "proxy-tools",
     });
     expect(addKey.status).toBe(201);
   });
@@ -57,167 +79,225 @@ describe('Proxy tool-calling support', () => {
     vi.restoreAllMocks();
   });
 
-  it('passes tools/tool_choice to provider and returns tool_calls', async () => {
+  it("passes tools/tool_choice to provider and returns tool_calls", async () => {
     const origFetch = global.fetch;
     let providerBody: any = null;
 
-    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+    vi.spyOn(global, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("api.groq.com/openai/v1/chat/completions")) {
         providerBody = JSON.parse((init as any).body);
         return {
           ok: true,
-          json: () => Promise.resolve({
-            id: 'chatcmpl-tool',
-            object: 'chat.completion',
-            created: 123,
-            model: 'openai/gpt-oss-120b',
-            choices: [{
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [{
-                  id: 'call_weather',
-                  type: 'function',
-                  function: {
-                    name: 'get_weather',
-                    arguments: '{"city":"Karachi"}',
+          json: () =>
+            Promise.resolve({
+              id: "chatcmpl-tool",
+              object: "chat.completion",
+              created: 123,
+              model: "openai/gpt-oss-120b",
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call_weather",
+                        type: "function",
+                        function: {
+                          name: "get_weather",
+                          arguments: '{"city":"Karachi"}',
+                        },
+                      },
+                    ],
                   },
-                }],
+                  finish_reason: "tool_calls",
+                },
+              ],
+              usage: {
+                prompt_tokens: 12,
+                completion_tokens: 4,
+                total_tokens: 16,
               },
-              finish_reason: 'tool_calls',
-            }],
-            usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
-          }),
+            }),
         } as any;
       }
       return origFetch(url, init);
     });
 
-    const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
-      // No `model` → auto-route via fallback chain.
-      messages: [{ role: 'user', content: 'What is the weather in Karachi?' }],
-      tools: [{
-        type: 'function',
-        function: {
-          name: 'get_weather',
-          description: 'Get current weather',
-          parameters: {
-            type: 'object',
-            properties: { city: { type: 'string' } },
-            required: ['city'],
+    const { status, body } = await request(
+      app,
+      "POST",
+      "/v1/chat/completions",
+      {
+        // No `model` → auto-route via fallback chain.
+        messages: [
+          { role: "user", content: "What is the weather in Karachi?" },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "get_weather",
+              description: "Get current weather",
+              parameters: {
+                type: "object",
+                properties: { city: { type: "string" } },
+                required: ["city"],
+              },
+            },
           },
-        },
-      }],
-      tool_choice: 'required',
-    }, authHeaders());
+        ],
+        tool_choice: "required",
+      },
+      authHeaders(),
+    );
 
     expect(status).toBe(200);
     expect(providerBody.tools).toHaveLength(1);
-    expect(providerBody.tool_choice).toBe('required');
-    expect(body.choices[0].finish_reason).toBe('tool_calls');
-    expect(body.choices[0].message.tool_calls[0].function.name).toBe('get_weather');
+    expect(providerBody.tool_choice).toBe("required");
+    expect(body.choices[0].finish_reason).toBe("tool_calls");
+    expect(body.choices[0].message.tool_calls[0].function.name).toBe(
+      "get_weather",
+    );
   });
 
-  it('accepts assistant tool_calls + tool messages in follow-up turns', async () => {
+  it("accepts assistant tool_calls + tool messages in follow-up turns", async () => {
     const origFetch = global.fetch;
     let providerBody: any = null;
 
-    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+    vi.spyOn(global, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("api.groq.com/openai/v1/chat/completions")) {
         providerBody = JSON.parse((init as any).body);
         return {
           ok: true,
-          json: () => Promise.resolve({
-            id: 'chatcmpl-final',
-            object: 'chat.completion',
-            created: 123,
-            model: 'openai/gpt-oss-120b',
-            choices: [{
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: 'It is 30C in Karachi.',
+          json: () =>
+            Promise.resolve({
+              id: "chatcmpl-final",
+              object: "chat.completion",
+              created: 123,
+              model: "openai/gpt-oss-120b",
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: "assistant",
+                    content: "It is 30C in Karachi.",
+                  },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: {
+                prompt_tokens: 18,
+                completion_tokens: 6,
+                total_tokens: 24,
               },
-              finish_reason: 'stop',
-            }],
-            usage: { prompt_tokens: 18, completion_tokens: 6, total_tokens: 24 },
-          }),
+            }),
         } as any;
       }
       return origFetch(url, init);
     });
 
-    const { status, body } = await request(app, 'POST', '/v1/chat/completions', {
-      messages: [
-        { role: 'user', content: 'Weather in Karachi?' },
-        {
-          role: 'assistant',
-          content: null,
-          tool_calls: [{
-            id: 'call_weather_1',
-            type: 'function',
-            function: {
-              name: 'get_weather',
-              arguments: '{"city":"Karachi"}',
-            },
-          }],
-        },
-        {
-          role: 'tool',
-          tool_call_id: 'call_weather_1',
-          content: '{"temp_c":30}',
-        },
-      ],
-    }, authHeaders());
+    const { status, body } = await request(
+      app,
+      "POST",
+      "/v1/chat/completions",
+      {
+        messages: [
+          { role: "user", content: "Weather in Karachi?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_weather_1",
+                type: "function",
+                function: {
+                  name: "get_weather",
+                  arguments: '{"city":"Karachi"}',
+                },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            tool_call_id: "call_weather_1",
+            content: '{"temp_c":30}',
+          },
+        ],
+      },
+      authHeaders(),
+    );
 
     expect(status).toBe(200);
-    expect(providerBody.messages[1].role).toBe('assistant');
+    expect(providerBody.messages[1].role).toBe("assistant");
     expect(providerBody.messages[1].content).toBeNull();
     expect(providerBody.messages[1].tool_calls).toHaveLength(1);
-    expect(providerBody.messages[2].role).toBe('tool');
-    expect(providerBody.messages[2].tool_call_id).toBe('call_weather_1');
-    expect(body.choices[0].message.content).toContain('30C');
+    expect(providerBody.messages[2].role).toBe("tool");
+    expect(providerBody.messages[2].tool_call_id).toBe("call_weather_1");
+    expect(body.choices[0].message.content).toContain("30C");
   });
 
-  it('round-trips assistant reasoning_content on follow-up turns (DeepSeek thinking — #255)', async () => {
+  it("round-trips assistant reasoning_content on follow-up turns (DeepSeek thinking — #255)", async () => {
     const origFetch = global.fetch;
     let providerBody: any = null;
 
-    vi.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
-      const urlStr = typeof url === 'string' ? url : url.toString();
-      if (urlStr.includes('api.groq.com/openai/v1/chat/completions')) {
+    vi.spyOn(global, "fetch").mockImplementation(async (url, init) => {
+      const urlStr = typeof url === "string" ? url : url.toString();
+      if (urlStr.includes("api.groq.com/openai/v1/chat/completions")) {
         providerBody = JSON.parse((init as any).body);
         return {
           ok: true,
-          json: () => Promise.resolve({
-            id: 'chatcmpl-r', object: 'chat.completion', created: 1, model: 'm',
-            choices: [{ index: 0, message: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
-            usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
-          }),
+          json: () =>
+            Promise.resolve({
+              id: "chatcmpl-r",
+              object: "chat.completion",
+              created: 1,
+              model: "m",
+              choices: [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: "done" },
+                  finish_reason: "stop",
+                },
+              ],
+              usage: {
+                prompt_tokens: 5,
+                completion_tokens: 2,
+                total_tokens: 7,
+              },
+            }),
         } as any;
       }
       return origFetch(url, init);
     });
 
-    const { status } = await request(app, 'POST', '/v1/chat/completions', {
-      messages: [
-        { role: 'user', content: 'think then answer' },
-        {
-          role: 'assistant',
-          content: 'partial',
-          // What a DeepSeek thinking model returned last turn and the client
-          // replayed. Stripping it makes OpenCode Zen 400 on this request.
-          reasoning_content: 'Let me reason about this step by step...',
-        },
-        { role: 'user', content: 'continue' },
-      ],
-    }, authHeaders());
+    const { status } = await request(
+      app,
+      "POST",
+      "/v1/chat/completions",
+      {
+        messages: [
+          { role: "user", content: "think then answer" },
+          {
+            role: "assistant",
+            content: "partial",
+            // What a DeepSeek thinking model returned last turn and the client
+            // replayed. Stripping it makes OpenCode Zen 400 on this request.
+            reasoning_content: "Let me reason about this step by step...",
+          },
+          { role: "user", content: "continue" },
+        ],
+      },
+      authHeaders(),
+    );
 
     expect(status).toBe(200);
-    expect(providerBody.messages[1].role).toBe('assistant');
-    expect(providerBody.messages[1].reasoning_content).toBe('Let me reason about this step by step...');
+    expect(providerBody.messages[1].role).toBe("assistant");
+    expect(providerBody.messages[1].reasoning_content).toBe(
+      "Let me reason about this step by step...",
+    );
   });
 });

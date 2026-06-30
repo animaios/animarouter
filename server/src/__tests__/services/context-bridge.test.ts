@@ -2,9 +2,9 @@ import type { ChatMessage } from "@animarouter/shared/types.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildContextBridge,
-  sanitizeForCrossProvider,
-  sanitizeForBridge,
   createStreamingContextBridge,
+  sanitizeForBridge,
+  sanitizeForCrossProvider,
 } from "../../services/context-bridge.js";
 import {
   _clearStoreForTesting,
@@ -236,7 +236,7 @@ describe("createStreamingContextBridge", () => {
       });
 
       const foundationText =
-        'Base logic <|tool_call_begin|>functions.lookup:0<|tool_call_argument_begin|>{\"q\":\"x\"}<|tool_call_end|> final.';
+        'Base logic <|tool_call_begin|>functions.lookup:0<|tool_call_argument_begin|>{"q":"x"}<|tool_call_end|> final.';
       const injectionPrompt = bridge.onFoundationComplete(foundationText);
 
       expect(injectionPrompt).toContain("[Thought Context:");
@@ -253,7 +253,7 @@ describe("createStreamingContextBridge", () => {
 
       // Only tool calls, no actual content
       const foundationText =
-        '<|tool_calls_section_begin|><|tool_call_begin|>functions.lookup:0<|tool_call_argument_begin|>{\"q\":\"x\"}<|tool_call_end|><|tool_calls_section_end|>';
+        '<|tool_calls_section_begin|><|tool_call_begin|>functions.lookup:0<|tool_call_argument_begin|>{"q":"x"}<|tool_call_end|><|tool_calls_section_end|>';
       const injectionPrompt = bridge.onFoundationComplete(foundationText);
 
       expect(injectionPrompt).toBe("");
@@ -329,7 +329,7 @@ describe("createStreamingContextBridge", () => {
       });
 
       const result = bridge.buildContextBridge(
-        'Base <|tool_call_begin|>call<|tool_call_end|> end',
+        "Base <|tool_call_begin|>call<|tool_call_end|> end",
         "injection",
       );
 
@@ -362,8 +362,15 @@ describe("createStreamingContextBridge", () => {
         injectionProvider: "openai",
       });
 
-      expect(bridge.buildContextBridge("<|tool_call_begin|>x<|tool_call_end|>", "injection")).toBe("");
-      expect(bridge.buildContextBridge("<|assistant|><|im_end|>", "anchor")).toBe("");
+      expect(
+        bridge.buildContextBridge(
+          "<|tool_call_begin|>x<|tool_call_end|>",
+          "injection",
+        ),
+      ).toBe("");
+      expect(
+        bridge.buildContextBridge("<|assistant|><|im_end|>", "anchor"),
+      ).toBe("");
     });
   });
 
@@ -376,7 +383,7 @@ describe("createStreamingContextBridge", () => {
 
       // Step 1: Foundation completes, produces injection prompt
       const foundationFullText =
-        'Foundation analysis <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{\"q\":\"test\"}<|tool_call_end|> conclusion.';
+        'Foundation analysis <|tool_call_begin|>functions.search:0<|tool_call_argument_begin|>{"q":"test"}<|tool_call_end|> conclusion.';
       const injectionPrompt = bridge.onFoundationComplete(foundationFullText);
 
       expect(injectionPrompt).toContain("[Thought Context:");

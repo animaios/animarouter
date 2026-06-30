@@ -1,21 +1,36 @@
-const BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
-const TOKEN_KEY = 'api-gateway_dashboard_token';
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+const TOKEN_KEY = "api-gateway_dashboard_token";
 
 // Dashboard session token (#35). Stored in localStorage; sent as a Bearer on
 // every /api request and cleared on a 401.
 export function getToken(): string | null {
-  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
 }
 export function setToken(token: string): void {
-  try { localStorage.setItem(TOKEN_KEY, token); } catch { /* ignore */ }
+  try {
+    localStorage.setItem(TOKEN_KEY, token);
+  } catch {
+    /* ignore */
+  }
 }
 export function clearToken(): void {
-  try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
-export const UNAUTHORIZED_EVENT = 'api-gateway:unauthorized';
+export const UNAUTHORIZED_EVENT = "api-gateway:unauthorized";
 
-export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+export async function apiFetch<T>(
+  path: string,
+  options?: RequestInit,
+): Promise<T> {
   const token = getToken();
   const res = await fetch(`${BASE}${path}`, {
     // `...options` first so an explicit method/body/signal applies, but headers
@@ -23,7 +38,7 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
     // Content-Type and Authorization we set here.
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
@@ -34,7 +49,9 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
   }
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: { message: res.statusText } }));
+    const body = await res
+      .json()
+      .catch(() => ({ error: { message: res.statusText } }));
     throw new Error(body.error?.message ?? `HTTP ${res.status}`);
   }
   // A 200 whose body isn't JSON means this request never reached the API — the
@@ -49,7 +66,7 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   } catch {
     throw new Error(
       `Expected JSON from ${path} but got a non-JSON response. The API isn't reachable at this origin — ` +
-      `make sure the backend is running and that /api is forwarded to it, not served as the dashboard's static files.`,
+        `make sure the backend is running and that /api is forwarded to it, not served as the dashboard's static files.`,
     );
   }
 }
@@ -60,13 +77,13 @@ export interface FeatureSetting {
   key: string;
   label: string;
   description: string;
-  type: 'boolean' | 'number' | 'string';
+  type: "boolean" | "number" | "string";
   value: boolean | number | string;
   default: boolean | number | string;
   min?: number;
   max?: number;
   options?: string[];
-  effect: 'live' | 'restart';
+  effect: "live" | "restart";
   group: string;
   parentToggle?: string;
   /** When this referenced setting is ON (true), this setting is disabled. Inverse of parentToggle. */
@@ -79,14 +96,14 @@ export interface FeatureSettingsResponse {
 }
 
 export async function fetchFeatureSettings(): Promise<FeatureSettingsResponse> {
-  return apiFetch<FeatureSettingsResponse>('/api/settings/features');
+  return apiFetch<FeatureSettingsResponse>("/api/settings/features");
 }
 
 export async function saveFeatureSettings(
   updates: Record<string, boolean | number | string>,
 ): Promise<FeatureSettingsResponse> {
-  return apiFetch<FeatureSettingsResponse>('/api/settings/features', {
-    method: 'PUT',
+  return apiFetch<FeatureSettingsResponse>("/api/settings/features", {
+    method: "PUT",
     body: JSON.stringify(updates),
   });
 }

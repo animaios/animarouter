@@ -1,4 +1,4 @@
-import type { Request } from 'express';
+import type { Request } from "express";
 
 // Source-IP trust policy for the dashboard session gate.
 //
@@ -27,17 +27,23 @@ import type { Request } from 'express';
 // upstream reverse proxy — without it, `req.ip` always reflects the TCP
 // peer, which is the only safe posture when there's no proxy in front.
 
-interface Ipv4Cidr { bytes: [number, number, number, number]; prefix: number }
+interface Ipv4Cidr {
+  bytes: [number, number, number, number];
+  prefix: number;
+}
 
 const IPV4_CIDRS: ReadonlyArray<Ipv4Cidr> = [
-  { bytes: [127, 0, 0, 0], prefix: 8 },         // 127.0.0.0/8
-  { bytes: [10, 0, 0, 0], prefix: 8 },          // 10.0.0.0/8
-  { bytes: [172, 16, 0, 0], prefix: 12 },       // 172.16.0.0/12
-  { bytes: [192, 168, 0, 0], prefix: 16 },      // 192.168.0.0/16
-  { bytes: [169, 254, 0, 0], prefix: 16 },      // 169.254.0.0/16
+  { bytes: [127, 0, 0, 0], prefix: 8 }, // 127.0.0.0/8
+  { bytes: [10, 0, 0, 0], prefix: 8 }, // 10.0.0.0/8
+  { bytes: [172, 16, 0, 0], prefix: 12 }, // 172.16.0.0/12
+  { bytes: [192, 168, 0, 0], prefix: 16 }, // 192.168.0.0/16
+  { bytes: [169, 254, 0, 0], prefix: 16 }, // 169.254.0.0/16
 ];
 
-function matchIpv4Cidr(addr: [number, number, number, number], cidr: Ipv4Cidr): boolean {
+function matchIpv4Cidr(
+  addr: [number, number, number, number],
+  cidr: Ipv4Cidr,
+): boolean {
   let bitsLeft = cidr.prefix;
   for (let i = 0; i < 4; i++) {
     if (bitsLeft <= 0) break;
@@ -61,7 +67,7 @@ function ipv4Trusted(addr: [number, number, number, number]): boolean {
 }
 
 function parseIpv4(s: string): [number, number, number, number] | null {
-  const parts = s.split('.');
+  const parts = s.split(".");
   if (parts.length !== 4) return null;
   const out: number[] = [];
   for (const p of parts) {
@@ -74,7 +80,7 @@ function parseIpv4(s: string): [number, number, number, number] | null {
   // Reject leading zeros ("01.2.3.4") — Node's net.isIPv4 does the same and
   // it's the only way to disambiguate octal from decimal.
   for (const p of parts) {
-    if (p.length > 1 && p[0] === '0') return null;
+    if (p.length > 1 && p[0] === "0") return null;
   }
   return out as [number, number, number, number];
 }
@@ -94,17 +100,17 @@ function parseIpv6(s: string): Hextets | null {
   if (s.length === 0) return null;
   // Strip a "%zone" suffix; we don't inspect the zone, but the rest of the
   // string is the actual address.
-  const zoneIdx = s.indexOf('%');
+  const zoneIdx = s.indexOf("%");
   if (zoneIdx >= 0) s = s.slice(0, zoneIdx);
   if (s.length === 0) return null;
 
-  const doubleColonIdx = s.indexOf('::');
+  const doubleColonIdx = s.indexOf("::");
   if (doubleColonIdx >= 0) {
-    if (s.indexOf('::', doubleColonIdx + 1) >= 0) return null; // >1 "::"
+    if (s.indexOf("::", doubleColonIdx + 1) >= 0) return null; // >1 "::"
     const left = s.slice(0, doubleColonIdx);
     const right = s.slice(doubleColonIdx + 2);
-    const head = left.length === 0 ? [] : left.split(':');
-    const tail = right.length === 0 ? [] : right.split(':');
+    const head = left.length === 0 ? [] : left.split(":");
+    const tail = right.length === 0 ? [] : right.split(":");
     if (head.length + tail.length > 8) return null;
     const hextets: number[] = [];
     for (const h of head) {
@@ -122,7 +128,7 @@ function parseIpv6(s: string): Hextets | null {
     if (hextets.length !== 8) return null;
     return hextets as Hextets;
   }
-  const parts = s.split(':');
+  const parts = s.split(":");
   if (parts.length !== 8) return null;
   const out: number[] = [];
   for (const p of parts) {
@@ -139,7 +145,11 @@ function parseIpv6(s: string): Hextets | null {
  * bits placed in the corresponding hextets. The remaining bits of `addr` are
  * not constrained — RFC 4291's fe80::/10 and fc00::/7 allow arbitrary values
  * in the bottom bits. */
-function ipv6MatchesPrefix(addr: Hextets, prefix: number, expected: number): boolean {
+function ipv6MatchesPrefix(
+  addr: Hextets,
+  prefix: number,
+  expected: number,
+): boolean {
   if (prefix < 0 || prefix > 128) return false;
   if (prefix === 0) return true; // every address matches a /0.
   if (prefix <= 16) {
@@ -186,21 +196,30 @@ function ipv6Trusted(addr: Hextets): boolean {
  * IPv6) into a tuple of hextets. Returns null if unparseable.
  */
 function ipv6FromPossiblyMapped(s: string): Hextets | null {
-  if (!s.includes('.')) return parseIpv6(s);
-  const dot = s.indexOf('.');
-  const lastColon = s.lastIndexOf(':');
+  if (!s.includes(".")) return parseIpv6(s);
+  const dot = s.indexOf(".");
+  const lastColon = s.lastIndexOf(":");
   if (lastColon < 0 || dot < lastColon) return null;
   const ipv4Str = s.slice(lastColon + 1);
   const ipv4 = parseIpv4(ipv4Str);
   if (!ipv4) return null;
   // Drop the trailing ':' so parseIpv6 sees "::ffff" (no empty tail hextet).
   const hex = s.slice(0, lastColon);
-  const parsed = parseIpv6(hex || '::');
+  const parsed = parseIpv6(hex || "::");
   if (!parsed) return null;
   // Sanity: the parsed low hextets should be 0, otherwise the input wasn't
   // actually an IPv4-mapped address.
-  if (!(parsed[0] === 0 && parsed[1] === 0 && parsed[2] === 0 && parsed[3] === 0
-        && parsed[4] === 0 && parsed[5] === 0 && parsed[6] === 0)) {
+  if (
+    !(
+      parsed[0] === 0 &&
+      parsed[1] === 0 &&
+      parsed[2] === 0 &&
+      parsed[3] === 0 &&
+      parsed[4] === 0 &&
+      parsed[5] === 0 &&
+      parsed[6] === 0
+    )
+  ) {
     return null;
   }
   parsed[6] = (ipv4[0] << 8) | ipv4[1];
@@ -215,8 +234,8 @@ export function isTrustedSourceIp(addr: string | null | undefined): boolean {
   if (trimmed.length === 0) return false;
 
   // Strip a "[…]:port" suffix for IPv6 literals.
-  if (trimmed.startsWith('[')) {
-    const end = trimmed.indexOf(']');
+  if (trimmed.startsWith("[")) {
+    const end = trimmed.indexOf("]");
     if (end >= 0) {
       const inner = trimmed.slice(1, end);
       if (isTrustedSourceIp(inner)) return true;
@@ -226,14 +245,14 @@ export function isTrustedSourceIp(addr: string | null | undefined): boolean {
 
   // Distinguish "10.0.0.1:51234" (IPv4 with port — no embedded colon in the
   // host portion) from "::1" or "::ffff:1.2.3.4" (IPv6 with colons).
-  if (trimmed.includes(':') && !trimmed.includes('.')) {
+  if (trimmed.includes(":") && !trimmed.includes(".")) {
     const v6 = parseIpv6(trimmed);
     return v6 ? ipv6Trusted(v6) : false;
   }
-  if (trimmed.includes(':') && trimmed.includes('.')) {
+  if (trimmed.includes(":") && trimmed.includes(".")) {
     // Could be either "10.0.0.1:51234" (host:port) or "::ffff:1.2.3.4" (mapped).
     // If the substring before the last colon parses as IPv4, treat as host:port.
-    const lastColon = trimmed.lastIndexOf(':');
+    const lastColon = trimmed.lastIndexOf(":");
     const host = trimmed.slice(0, lastColon);
     const v4 = parseIpv4(host);
     if (v4) return ipv4Trusted(v4);
@@ -259,7 +278,9 @@ export function isTrustedSourceIp(addr: string | null | undefined): boolean {
  * Express has been configured with `trust proxy`. Falls back to
  * `req.socket.remoteAddress`.
  */
-export function getClientIp(req: Pick<Request, 'ip' | 'socket'>): string | null {
+export function getClientIp(
+  req: Pick<Request, "ip" | "socket">,
+): string | null {
   if (req.ip && req.ip.length > 0) return req.ip;
   const sock = req.socket as { remoteAddress?: string | null } | undefined;
   return sock?.remoteAddress ?? null;
@@ -272,6 +293,6 @@ export function getClientIp(req: Pick<Request, 'ip' | 'socket'>): string | null 
  * `authenticated: true` for the LAN case; the gate middleware uses the same
  * check to skip session validation for those callers.
  */
-export function isTrustedRequest(req: Pick<Request, 'ip' | 'socket'>): boolean {
+export function isTrustedRequest(req: Pick<Request, "ip" | "socket">): boolean {
   return isTrustedSourceIp(getClientIp(req));
 }

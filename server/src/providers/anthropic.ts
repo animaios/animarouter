@@ -575,6 +575,194 @@ export class AnthropicCompatProvider extends BaseProvider {
     yield* this.readAnthropicStream(res, modelId);
   }
 
+  /** Build a terminating carry-the-finish-reason chunk. Memoized so it fires once. */
+  private buildFinishChunk(params: {
+    emitted: { value: boolean };
+    sawFinishReason: { value: boolean };
+    upstreamId: string | undefined;
+    modelId: string;
+    finalStopReason: string | null;
+    finalUsage: TokenUsage | null;
+  }): ChatCompletionChunk | undefined {
+    const {
+      emitted,
+      sawFinishReason: saw,
+      upstreamId,
+      modelId,
+      finalStopReason,
+      finalUsage,
+    } = params;
+    if (emitted.value) return undefined;
+    emitted.value = true;
+    saw.value = true;
+    const chunk: ChatCompletionChunk = {
+      id: upstreamId ?? this.makeId(),
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: modelId,
+      choices: [
+        { index: 0, delta: {}, finish_reason: finalStopReason ?? "stop" },
+      ],
+    };
+    if (finalUsage) chunk.usage = finalUsage;
+    return chunk;
+  }
+
+  /** Handle a `message_start` event: capture upstream id. */
+  private handleAnthropicMessageStart(
+    payload: AnthropicStreamEvent,
+    state: { upstreamId: string | undefined },
+  ): void {
+    if (payload.message?.id) state.upstreamId = payload.message.id;
+  }
+
+  /** Handle a `content_block_start` event: register the block type per index. */
+  private handleAnthropicBlockStart(
+    payload: AnthropicStreamEvent,
+    state: {
+      blockTypes: Map<number, "text" | "tool_use" | "thinking">;
+      toolUseBuffers: Map<number, string>;
+      toolUseMeta: Map<number, { id: string; name: string }>;
+      lastSignature: { value: string };
+    },
+  ): void {
+    const idx = payload.index ?? 0;
+    const block = payload.content_block;
+    if (block?.type === "text") {
+      state.blockTypes.set(idx, "text");
+    } else if (block?.type === "tool_use") {
+      state.blockTypes.set(idx, "tool_use");
+      state.toolUseBuffers.set(idx, "");
+      if (block.id && block.name) {
+        state.toolUseMeta.set(idx, { id: block.id, name: block.name });
+      }
+    } else if (block?.type === "thinking") {
+      state.blockTypes.set(idx, "thinking");
+      if (typeof block.signature === "string" && block.signature.length > 0) {
+        state.lastSignature.value = block.signature;
+      }
+    }
+  }
+
+  /** Handle a `content_block_delta` event — emits text/thinking chunks, buffers JSON. */
+  private *handleAnthropicBlockDelta(
+    payload: AnthropicStreamEvent,
+    state: {
+      blockTypes: Map<number, "text" | "tool_use" | "thinking">;
+      toolUseBuffers: Map<number, string>;
+      lastSignature: { value: string };
+      upstreamId: string | undefined;
+      modelId: string;
+    },
+  ): Generator<ChatCompletionChunk> {
+    const idx = payload.index ?? 0;
+    const delta = payload.delta;
+    if (!delta) return;
+    if (delta.type === "text_delta" && typeof delta.text === "string") {
+      state.blockTypes.set(idx, "text");
+      yield {
+        id: state.upstreamId ?? this.makeId(),
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: state.modelId,
+        choices: [
+          { index: 0, delta: { content: delta.text }, finish_reason: null },
+        ],
+      };
+    } else if (
+      delta.type === "input_json_delta" &&
+      typeof delta.partial_json === "string"
+    ) {
+      state.toolUseBuffers.set(
+        idx,
+        (state.toolUseBuffers.get(idx) ?? "") + delta.partial_json,
+      );
+    } else if (
+      delta.type === "thinking_delta" &&
+      typeof delta.thinking === "string" &&
+      delta.thinking.length > 0
+    ) {
+      state.blockTypes.set(idx, "thinking");
+      yield {
+        id: state.upstreamId ?? this.makeId(),
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: state.modelId,
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: delta.thinking },
+            finish_reason: null,
+          },
+        ],
+      };
+    } else if (
+      delta.type === "signature_delta" &&
+      typeof delta.signature === "string" &&
+      delta.signature.length > 0
+    ) {
+      state.lastSignature.value = delta.signature;
+    }
+  }
+
+  /** Handle a `content_block_stop` event — flush buffered tool_use or thinking signature. */
+  private *handleAnthropicBlockStop(
+    payload: AnthropicStreamEvent,
+    state: {
+      blockTypes: Map<number, "text" | "tool_use" | "thinking">;
+      toolUseBuffers: Map<number, string>;
+      toolUseMeta: Map<number, { id: string; name: string }>;
+      lastSignature: { value: string };
+      upstreamId: string | undefined;
+      modelId: string;
+    },
+  ): Generator<ChatCompletionChunk> {
+    const idx = payload.index ?? 0;
+    if (state.blockTypes.get(idx) === "tool_use") {
+      const meta = state.toolUseMeta.get(idx) ?? {
+        id: `toolu_${idx}`,
+        name: "",
+      };
+      const args = state.toolUseBuffers.get(idx) ?? "";
+      yield {
+        id: state.upstreamId ?? this.makeId(),
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: state.modelId,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  id: meta.id,
+                  type: "function",
+                  function: { name: meta.name, arguments: args },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      };
+    } else if (
+      state.blockTypes.get(idx) === "thinking" &&
+      state.lastSignature.value
+    ) {
+      const sig = state.lastSignature.value;
+      state.lastSignature.value = "";
+      yield {
+        id: state.upstreamId ?? this.makeId(),
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: state.modelId,
+        choices: [
+          { index: 0, delta: { thinking_signature: sig }, finish_reason: null },
+        ],
+      };
+    }
+  }
+
   /**
    * Anthropic SSE is event-oriented: each event is a pair of lines starting
    * with `event: <type>` and `data: <json>`, separated by a blank line. The
@@ -601,38 +789,22 @@ export class AnthropicCompatProvider extends BaseProvider {
 
     const decoder = new TextDecoder();
     let buffer = "";
-    let upstreamId: string | undefined;
     let currentEvent: string | undefined;
-    // Block type per index. Anthropic lets a message carry text, tool_use,
-    // AND thinking blocks; we need to track each so the second- and third-
-    // branch delta handlers dispatch correctly. (#290)
     const blockTypes = new Map<number, "text" | "tool_use" | "thinking">();
     const toolUseBuffers = new Map<number, string>();
     const toolUseMeta = new Map<number, { id: string; name: string }>();
-    let lastSignature = ""; // Anthropic thought signature, replay (#290)
-    let finalStopReason: string | null = null;
-    let finalUsage: TokenUsage | null = null;
-    let emittedFinish = false;
-    let sawFinishReason = false;
-    const yieldFinishIfNeeded = () => {
-      if (emittedFinish) return;
-      emittedFinish = true;
-      sawFinishReason = true;
-      const chunk: ChatCompletionChunk = {
-        id: upstreamId ?? this.makeId(),
-        object: "chat.completion.chunk",
-        created: Math.floor(Date.now() / 1000),
-        model: modelId,
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: finalStopReason ?? "stop",
-          },
-        ],
-      };
-      if (finalUsage) chunk.usage = finalUsage;
-      return chunk;
+    const lastSignature = { value: "" };
+    const emittedFinish = { value: false };
+    const sawFinishReason = { value: false };
+    const s = {
+      blockTypes,
+      toolUseBuffers,
+      toolUseMeta,
+      lastSignature,
+      upstreamId: undefined as string | undefined,
+      modelId,
+      finalStopReason: null as string | null,
+      finalUsage: null as TokenUsage | null,
     };
 
     try {
@@ -692,173 +864,57 @@ export class AnthropicCompatProvider extends BaseProvider {
 
           switch (eventType) {
             case "message_start": {
-              if (payload.message?.id) upstreamId = payload.message.id;
+              this.handleAnthropicMessageStart(payload, s);
               break;
             }
             case "content_block_start": {
-              const idx = payload.index ?? 0;
-              const block = payload.content_block;
-              if (block?.type === "text") {
-                blockTypes.set(idx, "text");
-              } else if (block?.type === "tool_use") {
-                blockTypes.set(idx, "tool_use");
-                toolUseBuffers.set(idx, "");
-                if (block.id && block.name) {
-                  toolUseMeta.set(idx, { id: block.id, name: block.name });
-                }
-              } else if (block?.type === "thinking") {
-                // Anthropic emits a single `signature_delta` against the
-                // thinking block; capture the block-level signature here if
-                // the start event carries one (rare; the deltas carry it). (#290)
-                blockTypes.set(idx, "thinking");
-                if (
-                  typeof block.signature === "string" &&
-                  block.signature.length > 0
-                ) {
-                  lastSignature = block.signature;
-                }
-              }
+              this.handleAnthropicBlockStart(payload, s);
               break;
             }
             case "content_block_delta": {
-              const idx = payload.index ?? 0;
-              const delta = payload.delta;
-              if (!delta) break;
-              if (
-                delta.type === "text_delta" &&
-                typeof delta.text === "string"
-              ) {
-                blockTypes.set(idx, "text");
-                yield {
-                  id: upstreamId ?? this.makeId(),
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelId,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { content: delta.text },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-              } else if (
-                delta.type === "input_json_delta" &&
-                typeof delta.partial_json === "string"
-              ) {
-                toolUseBuffers.set(
-                  idx,
-                  (toolUseBuffers.get(idx) ?? "") + delta.partial_json,
-                );
-              } else if (
-                delta.type === "thinking_delta" &&
-                typeof delta.thinking === "string" &&
-                delta.thinking.length > 0
-              ) {
-                blockTypes.set(idx, "thinking");
-                yield {
-                  id: upstreamId ?? this.makeId(),
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelId,
-                  choices: [
-                    {
-                      index: 0,
-                      // OpenAI-shaped reasoning trace delta. Clients that
-                      // preserve it on the assistant message get the trace
-                      // replayed on the next turn. (#290)
-                      delta: { reasoning_content: delta.thinking },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-              } else if (
-                delta.type === "signature_delta" &&
-                typeof delta.signature === "string" &&
-                delta.signature.length > 0
-              ) {
-                lastSignature = delta.signature;
-              }
+              yield* this.handleAnthropicBlockDelta(payload, s);
               break;
             }
             case "content_block_stop": {
-              const idx = payload.index ?? 0;
-              if (blockTypes.get(idx) === "tool_use") {
-                const meta = toolUseMeta.get(idx) ?? {
-                  id: `toolu_${idx}`,
-                  name: "",
-                };
-                const args = toolUseBuffers.get(idx) ?? "";
-                yield {
-                  id: upstreamId ?? this.makeId(),
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelId,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: {
-                        tool_calls: [
-                          {
-                            id: meta.id,
-                            type: "function",
-                            function: { name: meta.name, arguments: args },
-                          },
-                        ],
-                      },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-              } else if (blockTypes.get(idx) === "thinking" && lastSignature) {
-                // Emit a single terminating chunk carrying the signature so
-                // clients can persist it on the assistant message. Clients
-                // that build a this-turn assistant message emit just the
-                // text chunks + this signature chunk. (#290)
-                const sig = lastSignature;
-                lastSignature = "";
-                yield {
-                  id: upstreamId ?? this.makeId(),
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelId,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { thinking_signature: sig },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-              }
+              yield* this.handleAnthropicBlockStop(payload, s);
               break;
             }
             case "message_delta": {
               const delta = payload.delta;
               if (delta?.stop_reason) {
-                finalStopReason = this.translateStopReason(delta.stop_reason);
+                s.finalStopReason = this.translateStopReason(delta.stop_reason);
               }
               if (payload.usage) {
-                finalUsage = {
-                  // input_tokens arrives on message_start; output_tokens is
-                  // updated on message_delta. If we missed message_start,
-                  // output is the only token we know.
+                s.finalUsage = {
                   prompt_tokens: 0,
                   completion_tokens: payload.usage.output_tokens ?? 0,
                   total_tokens: payload.usage.output_tokens ?? 0,
                 };
               }
-              const finish = yieldFinishIfNeeded();
+              const finish = this.buildFinishChunk({
+                emitted: emittedFinish,
+                sawFinishReason: sawFinishReason,
+                upstreamId: s.upstreamId,
+                modelId: s.modelId,
+                finalStopReason: s.finalStopReason,
+                finalUsage: s.finalUsage,
+              });
               if (finish) yield finish;
               break;
             }
             case "message_stop": {
-              const finish = yieldFinishIfNeeded();
+              const finish = this.buildFinishChunk({
+                emitted: emittedFinish,
+                sawFinishReason: sawFinishReason,
+                upstreamId: s.upstreamId,
+                modelId: s.modelId,
+                finalStopReason: s.finalStopReason,
+                finalUsage: s.finalUsage,
+              });
               if (finish) yield finish;
               return;
             }
             default:
-              // Unknown event types (ping, etc.) are ignored.
               break;
           }
         }
@@ -866,7 +922,14 @@ export class AnthropicCompatProvider extends BaseProvider {
 
       // Stream ended without message_stop — emit a finish chunk so the client
       // sees a clean termination rather than hanging.
-      const finish = yieldFinishIfNeeded();
+      const finish = this.buildFinishChunk({
+        emitted: emittedFinish,
+        sawFinishReason: sawFinishReason,
+        upstreamId: s.upstreamId,
+        modelId: s.modelId,
+        finalStopReason: s.finalStopReason,
+        finalUsage: s.finalUsage,
+      });
       if (finish) yield finish;
     } finally {
       reader.cancel().catch(() => {

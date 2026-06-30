@@ -92,12 +92,11 @@ export function prunePingHistory(
     const db = options.db ?? getDb();
     ensureTable(db);
     const cutoff = toSqliteTimestamp(
-      new Date(
-        (options.now ?? new Date()).getTime() - retentionDays * DAY_MS,
-      ),
+      new Date((options.now ?? new Date()).getTime() - retentionDays * DAY_MS),
     );
-    return db.prepare("DELETE FROM ping_history WHERE created_at < ?").run(cutoff)
-      .changes;
+    return db
+      .prepare("DELETE FROM ping_history WHERE created_at < ?")
+      .run(cutoff).changes;
   } catch (err) {
     console.error("[Retention] Failed to prune ping history:", err);
     return 0;

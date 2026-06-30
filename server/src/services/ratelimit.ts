@@ -1,7 +1,7 @@
 // Sliding window rate limit tracker with SQLite persistence.
 
-import { getDb } from '../db/index.js';
-import { getFeatureSetting } from './feature-settings.js';
+import { getDb } from "../db/index.js";
+import { getFeatureSetting } from "./feature-settings.js";
 
 interface Window {
   timestamps: number[];
@@ -12,7 +12,7 @@ interface Window {
 // Key format: "platform:modelId:keyId:type" where type is rpm|rpd|tpm|tpd
 const windows = new Map<string, Window>();
 type RateLimitDb = ReturnType<typeof getDb>;
-type UsageKind = 'request' | 'tokens';
+type UsageKind = "request" | "tokens";
 
 function getWindow(key: string): Window {
   let w = windows.get(key);
@@ -23,9 +23,13 @@ function getWindow(key: string): Window {
   return w;
 }
 
-function pruneTimestamps(timestamps: number[], windowMs: number, now: number): number[] {
+function pruneTimestamps(
+  timestamps: number[],
+  windowMs: number,
+  now: number,
+): number[] {
   const cutoff = now - windowMs;
-  return timestamps.filter(ts => ts > cutoff);
+  return timestamps.filter((ts) => ts > cutoff);
 }
 
 const MINUTE = 60 * 1000;
@@ -35,7 +39,7 @@ function withDb<T>(fn: (db: RateLimitDb) => T): T | undefined {
   try {
     return fn(getDb());
   } catch (err) {
-    console.error('[RateLimit] DB write failed:', err);
+    console.error("[RateLimit] DB write failed:", err);
     return undefined;
   }
 }
@@ -48,12 +52,14 @@ function recordUsage(
   tokens: number,
   now: number,
 ) {
-  withDb(db => {
+  withDb((db) => {
     db.prepare(`
       INSERT INTO rate_limit_usage (platform, model_id, key_id, kind, tokens, created_at_ms)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(platform, modelId, keyId, kind, tokens, now);
-    db.prepare('DELETE FROM rate_limit_usage WHERE created_at_ms <= ?').run(now - DAY);
+    db.prepare("DELETE FROM rate_limit_usage WHERE created_at_ms <= ?").run(
+      now - DAY,
+    );
   });
 }
 
@@ -64,8 +70,9 @@ function countPersistedRequests(
   windowMs: number,
   now: number,
 ): number | undefined {
-  return withDb(db => {
-    const row = db.prepare(`
+  return withDb((db) => {
+    const row = db
+      .prepare(`
       SELECT COUNT(*) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -73,7 +80,8 @@ function countPersistedRequests(
          AND key_id = ?
          AND kind = 'request'
          AND created_at_ms > ?
-    `).get(platform, modelId, keyId, now - windowMs) as { used: number };
+    `)
+      .get(platform, modelId, keyId, now - windowMs) as { used: number };
     return row.used;
   });
 }
@@ -85,8 +93,9 @@ function sumPersistedTokens(
   windowMs: number,
   now: number,
 ): number | undefined {
-  return withDb(db => {
-    const row = db.prepare(`
+  return withDb((db) => {
+    const row = db
+      .prepare(`
       SELECT COALESCE(SUM(tokens), 0) AS used
         FROM rate_limit_usage
        WHERE platform = ?
@@ -94,12 +103,17 @@ function sumPersistedTokens(
          AND key_id = ?
          AND kind = 'tokens'
          AND created_at_ms > ?
-    `).get(platform, modelId, keyId, now - windowMs) as { used: number };
+    `)
+      .get(platform, modelId, keyId, now - windowMs) as { used: number };
     return row.used;
   });
 }
 
-function memoryRequestCount(key: string, windowMs: number, now: number): number {
+function memoryRequestCount(
+  key: string,
+  windowMs: number,
+  now: number,
+): number {
   const w = getWindow(key);
   w.timestamps = pruneTimestamps(w.timestamps, windowMs, now);
   return w.timestamps.length;
@@ -107,7 +121,7 @@ function memoryRequestCount(key: string, windowMs: number, now: number): number 
 
 function memoryTokenCount(key: string, windowMs: number, now: number): number {
   const w = getWindow(key);
-  w.tokenTimestamps = w.tokenTimestamps.filter(t => t.ts > now - windowMs);
+  w.tokenTimestamps = w.tokenTimestamps.filter((t) => t.ts > now - windowMs);
   return w.tokenTimestamps.reduce((sum, t) => sum + t.tokens, 0);
 }
 
@@ -118,10 +132,20 @@ function requestCount(
   windowMs: number,
   now: number,
 ): number {
-  const persisted = countPersistedRequests(platform, modelId, keyId, windowMs, now);
+  const persisted = countPersistedRequests(
+    platform,
+    modelId,
+    keyId,
+    windowMs,
+    now,
+  );
   if (persisted !== undefined) return persisted;
-  const type = windowMs === MINUTE ? 'rpm' : 'rpd';
-  return memoryRequestCount(`${platform}:${modelId}:${keyId}:${type}`, windowMs, now);
+  const type = windowMs === MINUTE ? "rpm" : "rpd";
+  return memoryRequestCount(
+    `${platform}:${modelId}:${keyId}:${type}`,
+    windowMs,
+    now,
+  );
 }
 
 function tokenCount(
@@ -133,24 +157,35 @@ function tokenCount(
 ): number {
   const persisted = sumPersistedTokens(platform, modelId, keyId, windowMs, now);
   if (persisted !== undefined) return persisted;
-  const type = windowMs === MINUTE ? 'tpm' : 'tpd';
-  return memoryTokenCount(`${platform}:${modelId}:${keyId}:${type}`, windowMs, now);
+  const type = windowMs === MINUTE ? "tpm" : "tpd";
+  return memoryTokenCount(
+    `${platform}:${modelId}:${keyId}:${type}`,
+    windowMs,
+    now,
+  );
 }
 
 export function canMakeRequest(
   platform: string,
   modelId: string,
   keyId: number,
-  limits: { rpm: number | null; rpd: number | null; tpm: number | null; tpd: number | null },
+  limits: {
+    rpm: number | null;
+    rpd: number | null;
+    tpm: number | null;
+    tpd: number | null;
+  },
 ): boolean {
   const now = Date.now();
 
   if (limits.rpm !== null) {
-    if (requestCount(platform, modelId, keyId, MINUTE, now) >= limits.rpm) return false;
+    if (requestCount(platform, modelId, keyId, MINUTE, now) >= limits.rpm)
+      return false;
   }
 
   if (limits.rpd !== null) {
-    if (requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd) return false;
+    if (requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd)
+      return false;
   }
 
   return true;
@@ -193,8 +228,9 @@ const DEFAULT_PROVIDER_DAILY_REQUEST_CAPS: Record<string, number> = {
 };
 
 export function getProviderDailyRequestCap(platform: string): number | null {
-  const raw = process.env[`PROVIDER_DAILY_REQUEST_CAP_${platform.toUpperCase()}`];
-  if (raw !== undefined && raw.trim() !== '') {
+  const raw =
+    process.env[`PROVIDER_DAILY_REQUEST_CAP_${platform.toUpperCase()}`];
+  if (raw !== undefined && raw.trim() !== "") {
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) return n === 0 ? null : n;
   }
@@ -207,21 +243,27 @@ function countPersistedProviderRequests(
   windowMs: number,
   now: number,
 ): number | undefined {
-  return withDb(db => {
-    const row = db.prepare(`
+  return withDb((db) => {
+    const row = db
+      .prepare(`
       SELECT COUNT(*) AS used
         FROM rate_limit_usage
        WHERE platform = ?
          AND key_id = ?
          AND kind = 'request'
          AND created_at_ms > ?
-    `).get(platform, keyId, now - windowMs) as { used: number };
+    `)
+      .get(platform, keyId, now - windowMs) as { used: number };
     return row.used;
   });
 }
 
 // Total requests today for a provider account+key, summed across every model.
-export function providerDailyRequestCount(platform: string, keyId: number, now = Date.now()): number {
+export function providerDailyRequestCount(
+  platform: string,
+  keyId: number,
+  now = Date.now(),
+): number {
   const persisted = countPersistedProviderRequests(platform, keyId, DAY, now);
   if (persisted !== undefined) return persisted;
   // DB-unavailable fallback: sum the per-model rpd windows for this platform+key.
@@ -237,13 +279,21 @@ export function providerDailyRequestCount(platform: string, keyId: number, now =
 
 // False when this provider account+key has hit its shared daily request cap, so
 // the router skips every model on that provider for this key until UTC-ish reset.
-export function canUseProvider(platform: string, keyId: number, now = Date.now()): boolean {
+export function canUseProvider(
+  platform: string,
+  keyId: number,
+  now = Date.now(),
+): boolean {
   const cap = getProviderDailyRequestCap(platform);
   if (cap === null) return true;
   return providerDailyRequestCount(platform, keyId, now) < cap;
 }
 
-export function recordRequest(platform: string, modelId: string, keyId: number) {
+export function recordRequest(
+  platform: string,
+  modelId: string,
+  keyId: number,
+) {
   const now = Date.now();
 
   const rpmKey = `${platform}:${modelId}:${keyId}:rpm`;
@@ -252,7 +302,7 @@ export function recordRequest(platform: string, modelId: string, keyId: number) 
   const rpdKey = `${platform}:${modelId}:${keyId}:rpd`;
   getWindow(rpdKey).timestamps.push(now);
 
-  recordUsage(platform, modelId, keyId, 'request', 0, now);
+  recordUsage(platform, modelId, keyId, "request", 0, now);
 }
 
 export function recordTokens(
@@ -269,7 +319,7 @@ export function recordTokens(
   const tpdKey = `${platform}:${modelId}:${keyId}:tpd`;
   getWindow(tpdKey).tokenTimestamps.push({ ts: now, tokens });
 
-  recordUsage(platform, modelId, keyId, 'tokens', tokens, now);
+  recordUsage(platform, modelId, keyId, "tokens", tokens, now);
 }
 
 // Cooldown: when a provider returns 429, block that model+key for a period
@@ -284,16 +334,20 @@ const cooldowns = new Map<string, number>(); // key -> expiry timestamp
 const cooldownHits = new Map<string, number[]>(); // key -> timestamps of recent cooldown set events
 const HOUR = 60 * MINUTE;
 const COOLDOWN_DURATIONS = [
-  2 * MINUTE,   // 1st hit in 24h
-  10 * MINUTE,  // 2nd
-  HOUR,         // 3rd
-  DAY,          // 4th and beyond
+  2 * MINUTE, // 1st hit in 24h
+  10 * MINUTE, // 2nd
+  HOUR, // 3rd
+  DAY, // 4th and beyond
 ];
 
-export function getNextCooldownDuration(platform: string, modelId: string, keyId: number): number {
+export function getNextCooldownDuration(
+  platform: string,
+  modelId: string,
+  keyId: number,
+): number {
   const key = `${platform}:${modelId}:${keyId}`;
   const now = Date.now();
-  const hits = (cooldownHits.get(key) ?? []).filter(t => t > now - DAY);
+  const hits = (cooldownHits.get(key) ?? []).filter((t) => t > now - DAY);
   hits.push(now);
   cooldownHits.set(key, hits);
   const idx = Math.min(hits.length - 1, COOLDOWN_DURATIONS.length - 1);
@@ -303,13 +357,13 @@ export function getNextCooldownDuration(platform: string, modelId: string, keyId
 // Short cooldown for a transient (per-minute) 429 — recovers within ~one window.
 // Now backed by the `transient_cooldown_sec` feature setting (seconds → ms).
 export function getTransientCooldownMs(): number {
-  return (getFeatureSetting('transient_cooldown_sec') as number) * 1000;
+  return (getFeatureSetting("transient_cooldown_sec") as number) * 1000;
 }
 
 // Long cooldown for a 402 Payment Required (provider/key out of credits).
 // Now backed by the `payment_cooldown_hours` feature setting (hours → ms).
 export function getPaymentRequiredCooldownMs(): number {
-  return (getFeatureSetting('payment_cooldown_hours') as number) * 3600 * 1000;
+  return (getFeatureSetting("payment_cooldown_hours") as number) * 3600 * 1000;
 }
 
 /** Compute the cooldown duration for a retryable error. Encapsulates the
@@ -324,7 +378,13 @@ export function computeRetryCooldownMs(
   retryAfterMs?: number | null,
 ): number {
   if (isPaymentRequired) return getPaymentRequiredCooldownMs();
-  return getCooldownDurationForLimit(platform, modelId, keyId, limits, retryAfterMs);
+  return getCooldownDurationForLimit(
+    platform,
+    modelId,
+    keyId,
+    limits,
+    retryAfterMs,
+  );
 }
 
 // Decide how long to bench a model+key after an upstream 429. Escalate to the
@@ -351,9 +411,11 @@ export function isDailyLimitExhausted(
 ): boolean {
   const now = Date.now();
   const rpdExhausted =
-    limits.rpd !== null && requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd;
+    limits.rpd !== null &&
+    requestCount(platform, modelId, keyId, DAY, now) >= limits.rpd;
   const tpdExhausted =
-    limits.tpd !== null && tokenCount(platform, modelId, keyId, DAY, now) >= limits.tpd;
+    limits.tpd !== null &&
+    tokenCount(platform, modelId, keyId, DAY, now) >= limits.tpd;
   return rpdExhausted || tpdExhausted;
 }
 
@@ -370,7 +432,8 @@ export function getCooldownDurationForLimit(
   // Honor an upstream Retry-After as a floor: never bench shorter than our own
   // heuristic, but extend (capped at a day) when the provider explicitly asks
   // to wait longer than we otherwise would.
-  if (retryAfterMs != null && retryAfterMs > base) return Math.min(retryAfterMs, DAY);
+  if (retryAfterMs != null && retryAfterMs > base)
+    return Math.min(retryAfterMs, DAY);
   return base;
 }
 
@@ -379,20 +442,27 @@ function persistedCooldownExpiry(
   modelId: string,
   keyId: number,
 ): number | null | undefined {
-  return withDb(db => {
-    const row = db.prepare(`
+  return withDb((db) => {
+    const row = db
+      .prepare(`
       SELECT expires_at_ms
         FROM rate_limit_cooldowns
        WHERE platform = ?
          AND model_id = ?
          AND key_id = ?
-    `).get(platform, modelId, keyId) as { expires_at_ms: number } | undefined;
+    `)
+      .get(platform, modelId, keyId) as { expires_at_ms: number } | undefined;
     return row?.expires_at_ms ?? null;
   });
 }
 
-function persistCooldown(platform: string, modelId: string, keyId: number, expiresAtMs: number) {
-  withDb(db => {
+function persistCooldown(
+  platform: string,
+  modelId: string,
+  keyId: number,
+  expiresAtMs: number,
+) {
+  withDb((db) => {
     db.prepare(`
       INSERT INTO rate_limit_cooldowns (platform, model_id, key_id, expires_at_ms)
       VALUES (?, ?, ?, ?)
@@ -402,8 +472,12 @@ function persistCooldown(platform: string, modelId: string, keyId: number, expir
   });
 }
 
-function clearPersistedCooldown(platform: string, modelId: string, keyId: number) {
-  withDb(db => {
+function clearPersistedCooldown(
+  platform: string,
+  modelId: string,
+  keyId: number,
+) {
+  withDb((db) => {
     db.prepare(`
       DELETE FROM rate_limit_cooldowns
        WHERE platform = ?
@@ -418,19 +492,32 @@ function clearPersistedCooldown(platform: string, modelId: string, keyId: number
  * Called when a cooldown expires to prevent stale transient hits from
  * escalating future daily cooldowns.
  */
-export function clearCooldownHits(platform: string, modelId: string, keyId: number): void {
+export function clearCooldownHits(
+  platform: string,
+  modelId: string,
+  keyId: number,
+): void {
   const key = `${platform}:${modelId}:${keyId}`;
   cooldownHits.delete(key);
 }
 
-export function setCooldown(platform: string, modelId: string, keyId: number, durationMs = 60_000) {
+export function setCooldown(
+  platform: string,
+  modelId: string,
+  keyId: number,
+  durationMs = 60_000,
+) {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const expiresAtMs = Date.now() + durationMs;
   cooldowns.set(key, expiresAtMs);
   persistCooldown(platform, modelId, keyId, expiresAtMs);
 }
 
-export function isOnCooldown(platform: string, modelId: string, keyId: number): boolean {
+export function isOnCooldown(
+  platform: string,
+  modelId: string,
+  keyId: number,
+): boolean {
   const key = `${platform}:${modelId}:${keyId}:cooldown`;
   const now = Date.now();
   const persistedExpiry = persistedCooldownExpiry(platform, modelId, keyId);
@@ -459,14 +546,28 @@ export function getRateLimitStatus(
   platform: string,
   modelId: string,
   keyId: number,
-  limits: { rpm: number | null; rpd: number | null; tpm: number | null; tpd: number | null },
+  limits: {
+    rpm: number | null;
+    rpd: number | null;
+    tpm: number | null;
+    tpd: number | null;
+  },
 ) {
   const now = Date.now();
 
   return {
-    rpm: { used: requestCount(platform, modelId, keyId, MINUTE, now), limit: limits.rpm },
-    rpd: { used: requestCount(platform, modelId, keyId, DAY, now), limit: limits.rpd },
-    tpm: { used: tokenCount(platform, modelId, keyId, MINUTE, now), limit: limits.tpm },
+    rpm: {
+      used: requestCount(platform, modelId, keyId, MINUTE, now),
+      limit: limits.rpm,
+    },
+    rpd: {
+      used: requestCount(platform, modelId, keyId, DAY, now),
+      limit: limits.rpd,
+    },
+    tpm: {
+      used: tokenCount(platform, modelId, keyId, MINUTE, now),
+      limit: limits.tpm,
+    },
   };
 }
 

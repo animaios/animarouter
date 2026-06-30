@@ -1,17 +1,18 @@
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { getDb } from '../db/index.js';
-import { checkKeyHealth, checkAllKeys } from '../services/health.js';
-import { getKeyHealth, isHeartbeatEnabled } from '../services/heartbeat.js';
-import { hasProvider } from '../providers/index.js';
+import type { Request, Response } from "express";
+import { Router } from "express";
+import { getDb } from "../db/index.js";
+import { hasProvider } from "../providers/index.js";
+import { checkAllKeys, checkKeyHealth } from "../services/health.js";
+import { getKeyHealth, isHeartbeatEnabled } from "../services/heartbeat.js";
 
 export const healthRouter = Router();
 
 // Get health status for all platforms
-healthRouter.get('/', (_req: Request, res: Response) => {
+healthRouter.get("/", (_req: Request, res: Response) => {
   const db = getDb();
 
-  const platforms = db.prepare(`
+  const platforms = db
+    .prepare(`
     SELECT
       platform,
       COUNT(*) as total_keys,
@@ -24,16 +25,19 @@ healthRouter.get('/', (_req: Request, res: Response) => {
       SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) as enabled_keys
     FROM api_keys
     GROUP BY platform
-  `).all() as any[];
+  `)
+    .all() as any[];
 
-  const keys = db.prepare(`
+  const keys = db
+    .prepare(`
     SELECT id, platform, label, status, enabled, created_at, last_checked_at
     FROM api_keys
     ORDER BY platform, created_at DESC
-  `).all() as any[];
+  `)
+    .all() as any[];
 
   res.json({
-    platforms: platforms.map(p => ({
+    platforms: platforms.map((p) => ({
       platform: p.platform,
       hasProvider: hasProvider(p.platform),
       totalKeys: p.total_keys,
@@ -45,10 +49,10 @@ healthRouter.get('/', (_req: Request, res: Response) => {
       unknownKeys: p.unknown_keys,
       enabledKeys: p.enabled_keys,
     })),
-    keys: keys.map(k => {
+    keys: keys.map((k) => {
       let status = k.status;
       // Map rate_limited to sick for clearer UI semantics
-      if (status === 'rate_limited') status = 'sick';
+      if (status === "rate_limited") status = "sick";
       return {
         id: k.id,
         platform: k.platform,
@@ -63,10 +67,10 @@ healthRouter.get('/', (_req: Request, res: Response) => {
 });
 
 // Check a specific key
-healthRouter.post('/check/:keyId', async (req: Request, res: Response) => {
+healthRouter.post("/check/:keyId", async (req: Request, res: Response) => {
   const keyId = parseInt(req.params.keyId as string, 10);
   if (isNaN(keyId)) {
-    res.status(400).json({ error: { message: 'Invalid key ID' } });
+    res.status(400).json({ error: { message: "Invalid key ID" } });
     return;
   }
 
@@ -75,7 +79,7 @@ healthRouter.post('/check/:keyId', async (req: Request, res: Response) => {
 });
 
 // Check all keys
-healthRouter.post('/check-all', async (_req: Request, res: Response) => {
+healthRouter.post("/check-all", async (_req: Request, res: Response) => {
   await checkAllKeys();
   res.json({ success: true });
 });

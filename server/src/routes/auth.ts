@@ -1,15 +1,15 @@
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import { z } from 'zod';
+import type { Request, Response } from "express";
+import { Router } from "express";
+import { z } from "zod";
+import { isTrustedRequest } from "../lib/ip-trust.js";
 import {
-  userCount,
-  createUser,
-  verifyCredentials,
   createSession,
-  validateSession,
+  createUser,
   deleteSession,
-} from '../services/auth.js';
-import { isTrustedRequest } from '../lib/ip-trust.js';
+  userCount,
+  validateSession,
+  verifyCredentials,
+} from "../services/auth.js";
 
 export const authRouter = Router();
 
@@ -18,8 +18,8 @@ export const authRouter = Router();
 // /logout and /me validate the token themselves.
 
 const credentialsSchema = z.object({
-  email: z.string().email('A valid email is required'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  email: z.string().email("A valid email is required"),
+  password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
 // ── Brute-force throttle ──────────────────────────────────────────────────
@@ -48,8 +48,10 @@ function clearFailures(email: string): void {
 }
 
 function bearer(req: Request): string | undefined {
-  return req.headers.authorization?.replace(/^Bearer\s+/i, '')
-    ?? (req.headers['x-dashboard-token'] as string | undefined);
+  return (
+    req.headers.authorization?.replace(/^Bearer\s+/i, "") ??
+    (req.headers["x-dashboard-token"] as string | undefined)
+  );
 }
 
 // Has the dashboard been set up yet, and is this caller authenticated?
@@ -58,7 +60,7 @@ function bearer(req: Request): string | undefined {
 // session. The `email` field stays null for the LAN case — there is no
 // user identity, just network-trust — which keeps the client free to omit
 // any "signed in as X" UI.
-authRouter.get('/status', (req: Request, res: Response) => {
+authRouter.get("/status", (req: Request, res: Response) => {
   const session = validateSession(bearer(req));
   res.json({
     needsSetup: userCount() === 0,
@@ -69,14 +71,23 @@ authRouter.get('/status', (req: Request, res: Response) => {
 
 // First-run account creation. Only allowed while there are zero users, so it
 // can't be used to add accounts once the dashboard is claimed.
-authRouter.post('/setup', (req: Request, res: Response) => {
+authRouter.post("/setup", (req: Request, res: Response) => {
   if (userCount() > 0) {
-    res.status(409).json({ error: { message: 'Setup already completed. Use login instead.', type: 'setup_complete' } });
+    res.status(409).json({
+      error: {
+        message: "Setup already completed. Use login instead.",
+        type: "setup_complete",
+      },
+    });
     return;
   }
   const parsed = credentialsSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    res.status(400).json({
+      error: {
+        message: parsed.error.errors.map((e) => e.message).join(", "),
+      },
+    });
     return;
   }
   const user = createUser(parsed.data.email, parsed.data.password);
@@ -84,16 +95,25 @@ authRouter.post('/setup', (req: Request, res: Response) => {
   res.status(201).json({ token, email: user.email });
 });
 
-authRouter.post('/login', (req: Request, res: Response) => {
+authRouter.post("/login", (req: Request, res: Response) => {
   const parsed = credentialsSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    res.status(400).json({
+      error: {
+        message: parsed.error.errors.map((e) => e.message).join(", "),
+      },
+    });
     return;
   }
   const { email, password } = parsed.data;
 
   if (isLockedOut(email)) {
-    res.status(429).json({ error: { message: 'Too many failed attempts. Try again later.', type: 'rate_limit_error' } });
+    res.status(429).json({
+      error: {
+        message: "Too many failed attempts. Try again later.",
+        type: "rate_limit_error",
+      },
+    });
     return;
   }
 
@@ -101,7 +121,12 @@ authRouter.post('/login', (req: Request, res: Response) => {
   if (!user) {
     recordFailure(email);
     // Same message whether the email exists or not — don't leak which.
-    res.status(401).json({ error: { message: 'Invalid email or password', type: 'authentication_error' } });
+    res.status(401).json({
+      error: {
+        message: "Invalid email or password",
+        type: "authentication_error",
+      },
+    });
     return;
   }
 
@@ -110,15 +135,20 @@ authRouter.post('/login', (req: Request, res: Response) => {
   res.json({ token, email: user.email });
 });
 
-authRouter.post('/logout', (req: Request, res: Response) => {
+authRouter.post("/logout", (req: Request, res: Response) => {
   deleteSession(bearer(req));
   res.json({ success: true });
 });
 
-authRouter.get('/me', (req: Request, res: Response) => {
+authRouter.get("/me", (req: Request, res: Response) => {
   const session = validateSession(bearer(req));
   if (!session) {
-    res.status(401).json({ error: { message: 'Authentication required', type: 'authentication_error' } });
+    res.status(401).json({
+      error: {
+        message: "Authentication required",
+        type: "authentication_error",
+      },
+    });
     return;
   }
   res.json({ email: session.email });

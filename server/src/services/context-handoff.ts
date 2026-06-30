@@ -1,8 +1,8 @@
-import type { ChatMessage } from '@animarouter/shared/types.js';
-import { contentToString } from '../lib/content.js';
-import { getFeatureSetting } from './feature-settings.js';
+import type { ChatMessage } from "@animarouter/shared/types.js";
+import { contentToString } from "../lib/content.js";
+import { getFeatureSetting } from "./feature-settings.js";
 
-export type ContextHandoffMode = 'off' | 'on_model_switch';
+export type ContextHandoffMode = "off" | "on_model_switch";
 
 type TrimmedMessage = { role: string; content: string };
 
@@ -25,12 +25,12 @@ export const HANDOFF_MAX_TOKENS = Math.ceil((MAX_HANDOFF_CHARS + 400) / 4);
 const store = new Map<string, SessionContext>();
 
 export function getContextHandoffMode(): ContextHandoffMode {
-  const mode = getFeatureSetting('context_handoff_mode') as string;
-  return mode === 'on_model_switch' ? 'on_model_switch' : 'off';
+  const mode = getFeatureSetting("context_handoff_mode") as string;
+  return mode === "on_model_switch" ? "on_model_switch" : "off";
 }
 
 function getSessionTtlMs(): number {
-  return (getFeatureSetting('session_ttl_min') as number) * 60 * 1000;
+  return (getFeatureSetting("session_ttl_min") as number) * 60 * 1000;
 }
 
 // Slice without cutting through a surrogate pair. A bare String.slice can
@@ -44,9 +44,11 @@ function safeSlice(text: string, max: number): string {
   return text.slice(0, end);
 }
 
-function trimContent(content: ChatMessage['content']): string {
+function trimContent(content: ChatMessage["content"]): string {
   const text = contentToString(content);
-  return text.length > MAX_CONTENT_PER_MSG ? safeSlice(text, MAX_CONTENT_PER_MSG) + '…' : text;
+  return text.length > MAX_CONTENT_PER_MSG
+    ? safeSlice(text, MAX_CONTENT_PER_MSG) + "…"
+    : text;
 }
 
 function pruneExpired(): void {
@@ -58,13 +60,16 @@ function pruneExpired(): void {
   }
 }
 
-export function recordIncomingMessages(sessionKey: string, messages: ChatMessage[]): void {
+export function recordIncomingMessages(
+  sessionKey: string,
+  messages: ChatMessage[],
+): void {
   if (!sessionKey) return;
   pruneExpired();
 
   const trimmed = messages
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({ role: m.role, content: trimContent(m.content) }))
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role, content: trimContent(m.content) }))
     .slice(-MAX_RECENT_MESSAGES);
 
   // Mutate in place to preserve lastModelKey written by recordSuccessfulModel
@@ -72,7 +77,7 @@ export function recordIncomingMessages(sessionKey: string, messages: ChatMessage
   // If the incoming payload has no assistant turns, treat it as a fresh conversation
   // and clear lastModelKey — prevents spurious handoffs when a session ID is reused
   // after the sticky-session (30 min) TTL expires but before the handoff TTL (3 h).
-  const hasAssistant = messages.some(m => m.role === 'assistant');
+  const hasAssistant = messages.some((m) => m.role === "assistant");
   const existing = store.get(sessionKey);
   if (existing) {
     if (!hasAssistant) existing.lastModelKey = undefined;
@@ -91,17 +96,22 @@ export function recordIncomingMessages(sessionKey: string, messages: ChatMessage
       if (now - v.updatedAt > ttl) store.delete(k);
     }
     if (store.size > MAX_STORE_SIZE) {
-      const sorted = [...store.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);
-      for (const [k] of sorted.slice(0, store.size - MAX_STORE_SIZE)) store.delete(k);
+      const sorted = [...store.entries()].sort(
+        (a, b) => a[1].updatedAt - b[1].updatedAt,
+      );
+      for (const [k] of sorted.slice(0, store.size - MAX_STORE_SIZE))
+        store.delete(k);
     }
   }
 }
 
 function buildSummary(messages: TrimmedMessage[]): string {
-  const lines = messages.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`);
-  const joined = lines.join('\n');
+  const lines = messages.map(
+    (m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`,
+  );
+  const joined = lines.join("\n");
   return joined.length > MAX_HANDOFF_CHARS
-    ? safeSlice(joined, MAX_HANDOFF_CHARS) + '\n…[truncated]'
+    ? safeSlice(joined, MAX_HANDOFF_CHARS) + "\n…[truncated]"
     : joined;
 }
 
@@ -121,7 +131,8 @@ export function maybeInjectContextHandoff(params: {
   selectedModelKey: string;
 }): { messages: ChatMessage[]; injected: boolean; injectedTokens: number } {
   const { mode, sessionKey, messages, selectedModelKey } = params;
-  if (mode === 'off' || !sessionKey) return { messages, injected: false, injectedTokens: 0 };
+  if (mode === "off" || !sessionKey)
+    return { messages, injected: false, injectedTokens: 0 };
 
   const ctx = store.get(sessionKey);
   if (!ctx?.lastModelKey || ctx.lastModelKey === selectedModelKey) {
@@ -130,29 +141,30 @@ export function maybeInjectContextHandoff(params: {
 
   // Skip if a handoff message is already present — handles both plain strings
   // and the array-content format that OpenCode/Continue.dev send.
-  const alreadyPresent = messages.some(m => {
-    if (m.role !== 'system') return false;
-    const text = typeof m.content === 'string' ? m.content : contentToString(m.content);
-    return text.startsWith('AnimaRouter context handoff:')
+  const alreadyPresent = messages.some((m) => {
+    if (m.role !== "system") return false;
+    const text =
+      typeof m.content === "string" ? m.content : contentToString(m.content);
+    return text.startsWith("AnimaRouter context handoff:");
   });
   if (alreadyPresent) return { messages, injected: false, injectedTokens: 0 };
 
   const summary = buildSummary(ctx.recentMessages);
   const handoffContent = [
-    'AnimaRouter context handoff:',
+    "AnimaRouter context handoff:",
     `You are taking over an ongoing conversation from another model (${ctx.lastModelKey} → ${selectedModelKey}).`,
-    'Continue the user\'s task using the conversation context already provided in this request.',
-    'Do not restart the task, re-ask already answered setup questions, or discard prior tool results.',
-    'Respect the user\'s latest message as the highest-priority instruction.',
-    '',
-    'Recent session summary:',
+    "Continue the user's task using the conversation context already provided in this request.",
+    "Do not restart the task, re-ask already answered setup questions, or discard prior tool results.",
+    "Respect the user's latest message as the highest-priority instruction.",
+    "",
+    "Recent session summary:",
     summary,
-  ].join('\n');
+  ].join("\n");
 
-  const handoffMsg: ChatMessage = { role: 'system', content: handoffContent };
+  const handoffMsg: ChatMessage = { role: "system", content: handoffContent };
 
   // Insert after any leading system messages so provider system-prompt ordering is preserved
-  const insertAt = messages.findIndex(m => m.role !== 'system');
+  const insertAt = messages.findIndex((m) => m.role !== "system");
   const pos = insertAt === -1 ? messages.length : insertAt;
 
   return {
@@ -174,7 +186,11 @@ export function recordSuccessfulModel(params: {
     ctx.lastModelKey = modelKey;
     ctx.updatedAt = Date.now();
   } else {
-    store.set(sessionKey, { lastModelKey: modelKey, recentMessages: [], updatedAt: Date.now() });
+    store.set(sessionKey, {
+      lastModelKey: modelKey,
+      recentMessages: [],
+      updatedAt: Date.now(),
+    });
     if (store.size > MAX_STORE_SIZE) {
       const now = Date.now();
       const ttl = getSessionTtlMs();
@@ -182,8 +198,11 @@ export function recordSuccessfulModel(params: {
         if (now - v.updatedAt > ttl) store.delete(k);
       }
       if (store.size > MAX_STORE_SIZE) {
-        const sorted = [...store.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);
-        for (const [k] of sorted.slice(0, store.size - MAX_STORE_SIZE)) store.delete(k);
+        const sorted = [...store.entries()].sort(
+          (a, b) => a[1].updatedAt - b[1].updatedAt,
+        );
+        for (const [k] of sorted.slice(0, store.size - MAX_STORE_SIZE))
+          store.delete(k);
       }
     }
   }

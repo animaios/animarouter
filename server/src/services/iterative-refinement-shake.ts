@@ -60,7 +60,10 @@ export interface IterativeRefinementOscillatorDecision {
   mode: "oscillator" | "single_model";
   config: OscillatorConfig;
   loadShedActive: boolean;
-  skipReason?: "non_iterative_refinement_strategy" | "pinned_model" | "load_shed";
+  skipReason?:
+    | "non_iterative_refinement_strategy"
+    | "pinned_model"
+    | "load_shed";
 }
 
 export interface IterativeRefinementOscillatorDecisionInput
@@ -267,8 +270,6 @@ export function isIterativeRefinementLoadShedActive(
     config.loadShedThreshold > 0 && currentConcurrent > config.loadShedThreshold
   );
 }
-
-
 
 export function getIterativeRefinementOscillatorDecision(
   input: IterativeRefinementOscillatorDecisionInput,
@@ -580,7 +581,9 @@ function hasToolCalls(result: OscillatorModelCallResult): boolean {
   );
 }
 
-function extractToolCalls(result: OscillatorModelCallResult): ChatToolCall[] | undefined {
+function extractToolCalls(
+  result: OscillatorModelCallResult,
+): ChatToolCall[] | undefined {
   if (result == null || typeof result === "string") return undefined;
   return (result as { toolCalls?: ChatToolCall[] }).toolCalls;
 }

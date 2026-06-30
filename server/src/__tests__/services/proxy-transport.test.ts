@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { initDb } from '../../db/index.js';
-import { upsertOutboundTransport } from '../../services/outbound-transports.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { initDb } from "../../db/index.js";
+import { upsertOutboundTransport } from "../../services/outbound-transports.js";
 
 // ---------------------------------------------------------------------------
 // Mock env vars before importing — the module reads them at call time, not
@@ -11,8 +11,8 @@ const ORIGINAL_ROUTER_URL = process.env.PROXY_ROUTER_URL;
 const ORIGINAL_AUTH_KEY = process.env.PROXY_AUTH_KEY;
 
 function setProxyEnv() {
-  process.env.PROXY_ROUTER_URL = 'https://router.example.workers.dev';
-  process.env.PROXY_AUTH_KEY = 'test-auth-key-1234';
+  process.env.PROXY_ROUTER_URL = "https://router.example.workers.dev";
+  process.env.PROXY_AUTH_KEY = "test-auth-key-1234";
 }
 
 function clearProxyEnv() {
@@ -23,152 +23,152 @@ function clearProxyEnv() {
 // Must re-import each time to pick up env var changes — but since the module
 // reads env vars at call time (not at import), a single import is fine.
 import {
+  buildProxyUrl,
+  computeWorkerIndex,
+  getRelayTransport,
   isProxyTransportConfigured,
   isRelayTransportConfigured,
-  getRelayTransport,
-  transportIdFromUseProxy,
-  buildProxyUrl,
   proxyChatCompletion,
   proxyStreamChatCompletion,
-  computeWorkerIndex,
-} from '../../services/proxy-transport.js';
+  transportIdFromUseProxy,
+} from "../../services/proxy-transport.js";
 
 // ── transport registry ───────────────────────────────────────────────────
 
-describe('transport registry', () => {
+describe("transport registry", () => {
   afterEach(clearProxyEnv);
 
-  it('maps legacy useProxy flags to transport ids', () => {
-    expect(transportIdFromUseProxy(false)).toBe('direct');
-    expect(transportIdFromUseProxy(true)).toBe('cloudflare-worker');
+  it("maps legacy useProxy flags to transport ids", () => {
+    expect(transportIdFromUseProxy(false)).toBe("direct");
+    expect(transportIdFromUseProxy(true)).toBe("cloudflare-worker");
   });
 
-  it('treats direct as configured and unknown relay ids as unavailable', () => {
-    expect(isRelayTransportConfigured('direct')).toBe(true);
-    expect(getRelayTransport('direct')).toBeUndefined();
-    expect(isRelayTransportConfigured('netlify-function')).toBe(false);
+  it("treats direct as configured and unknown relay ids as unavailable", () => {
+    expect(isRelayTransportConfigured("direct")).toBe(true);
+    expect(getRelayTransport("direct")).toBeUndefined();
+    expect(isRelayTransportConfigured("netlify-function")).toBe(false);
   });
 
-  it('registers the Cloudflare Worker relay transport', () => {
-    const transport = getRelayTransport('cloudflare-worker');
-    expect(transport?.id).toBe('cloudflare-worker');
+  it("registers the Cloudflare Worker relay transport", () => {
+    const transport = getRelayTransport("cloudflare-worker");
+    expect(transport?.id).toBe("cloudflare-worker");
     expect(transport?.supportsStreaming).toBe(true);
   });
 
-  it('checks Cloudflare Worker relay configuration through the registry', () => {
-    expect(isRelayTransportConfigured('cloudflare-worker')).toBe(false);
+  it("checks Cloudflare Worker relay configuration through the registry", () => {
+    expect(isRelayTransportConfigured("cloudflare-worker")).toBe(false);
     setProxyEnv();
-    expect(isRelayTransportConfigured('cloudflare-worker')).toBe(true);
+    expect(isRelayTransportConfigured("cloudflare-worker")).toBe(true);
   });
 });
 
 // ── isProxyTransportConfigured ─────────────────────────────────────────────
 
-describe('isProxyTransportConfigured', () => {
+describe("isProxyTransportConfigured", () => {
   afterEach(() => {
     delete process.env.PROXY_ROUTER_URL;
     delete process.env.PROXY_AUTH_KEY;
   });
 
-  it('returns false when neither env var is set', () => {
+  it("returns false when neither env var is set", () => {
     expect(isProxyTransportConfigured()).toBe(false);
   });
 
-  it('returns false when only PROXY_ROUTER_URL is set', () => {
-    process.env.PROXY_ROUTER_URL = 'https://router.example.workers.dev';
+  it("returns false when only PROXY_ROUTER_URL is set", () => {
+    process.env.PROXY_ROUTER_URL = "https://router.example.workers.dev";
     expect(isProxyTransportConfigured()).toBe(false);
   });
 
-  it('returns false when only PROXY_AUTH_KEY is set', () => {
-    process.env.PROXY_AUTH_KEY = 'some-key';
+  it("returns false when only PROXY_AUTH_KEY is set", () => {
+    process.env.PROXY_AUTH_KEY = "some-key";
     expect(isProxyTransportConfigured()).toBe(false);
   });
 
-  it('returns true when both env vars are set', () => {
-    process.env.PROXY_ROUTER_URL = 'https://router.example.workers.dev';
-    process.env.PROXY_AUTH_KEY = 'some-key';
+  it("returns true when both env vars are set", () => {
+    process.env.PROXY_ROUTER_URL = "https://router.example.workers.dev";
+    process.env.PROXY_AUTH_KEY = "some-key";
     expect(isProxyTransportConfigured()).toBe(true);
   });
 });
 
 // ── buildProxyUrl ─────────────────────────────────────────────────────────
 
-describe('buildProxyUrl', () => {
+describe("buildProxyUrl", () => {
   beforeEach(setProxyEnv);
   afterEach(clearProxyEnv);
 
-  it('constructs correct proxy URL from provider base URL', () => {
-    const url = buildProxyUrl('https://api.openai.com/v1');
-    expect(url).toContain('https://router.example.workers.dev');
-    expect(url).toContain('/test-auth-key-1234/1/');
+  it("constructs correct proxy URL from provider base URL", () => {
+    const url = buildProxyUrl("https://api.openai.com/v1");
+    expect(url).toContain("https://router.example.workers.dev");
+    expect(url).toContain("/test-auth-key-1234/1/");
     // The upstream URL is base64url-encoded
-    const encoded = url.split('/1/')[1];
-    const decoded = Buffer.from(encoded, 'base64url').toString('utf-8');
-    expect(decoded).toBe('https://api.openai.com/v1/chat/completions');
+    const encoded = url.split("/1/")[1];
+    const decoded = Buffer.from(encoded, "base64url").toString("utf-8");
+    expect(decoded).toBe("https://api.openai.com/v1/chat/completions");
   });
 
-  it('strips trailing slashes from router URL', () => {
-    process.env.PROXY_ROUTER_URL = 'https://router.example.workers.dev///';
-    const url = buildProxyUrl('https://api.openai.com/v1');
+  it("strips trailing slashes from router URL", () => {
+    process.env.PROXY_ROUTER_URL = "https://router.example.workers.dev///";
+    const url = buildProxyUrl("https://api.openai.com/v1");
     expect(url).toMatch(/^https:\/\/router\.example\.workers\.dev\//);
     expect(url).not.toMatch(/\.dev\/\//);
   });
 
-  it('strips trailing slashes from provider base URL', () => {
-    const url = buildProxyUrl('https://api.openai.com/v1///');
-    const encoded = url.split('/1/')[1];
-    const decoded = Buffer.from(encoded, 'base64url').toString('utf-8');
-    expect(decoded).toBe('https://api.openai.com/v1/chat/completions');
+  it("strips trailing slashes from provider base URL", () => {
+    const url = buildProxyUrl("https://api.openai.com/v1///");
+    const encoded = url.split("/1/")[1];
+    const decoded = Buffer.from(encoded, "base64url").toString("utf-8");
+    expect(decoded).toBe("https://api.openai.com/v1/chat/completions");
   });
 
-  it('appends /chat/completions to the provider base URL', () => {
-    const url = buildProxyUrl('https://api.groq.com/openai/v1');
-    const encoded = url.split('/1/')[1];
-    const decoded = Buffer.from(encoded, 'base64url').toString('utf-8');
-    expect(decoded).toBe('https://api.groq.com/openai/v1/chat/completions');
+  it("appends /chat/completions to the provider base URL", () => {
+    const url = buildProxyUrl("https://api.groq.com/openai/v1");
+    const encoded = url.split("/1/")[1];
+    const decoded = Buffer.from(encoded, "base64url").toString("utf-8");
+    expect(decoded).toBe("https://api.groq.com/openai/v1/chat/completions");
   });
 
-  it('throws if env vars are not set', () => {
+  it("throws if env vars are not set", () => {
     clearProxyEnv();
-    expect(() => buildProxyUrl('https://api.openai.com/v1')).toThrow(
-      'PROXY_ROUTER_URL and PROXY_AUTH_KEY must be set',
+    expect(() => buildProxyUrl("https://api.openai.com/v1")).toThrow(
+      "PROXY_ROUTER_URL and PROXY_AUTH_KEY must be set",
     );
   });
 
-  it('produces valid base64url encoding (no +/= padding chars)', () => {
-    const url = buildProxyUrl('https://api.openai.com/v1');
-    const encoded = url.split('/1/')[1];
+  it("produces valid base64url encoding (no +/= padding chars)", () => {
+    const url = buildProxyUrl("https://api.openai.com/v1");
+    const encoded = url.split("/1/")[1];
     expect(encoded).not.toMatch(/[+=/]/);
   });
 
-  it('falls back to an enabled DB transport when env vars are absent', () => {
+  it("falls back to an enabled DB transport when env vars are absent", () => {
     clearProxyEnv();
-    process.env.NODE_ENV = 'test';
-    initDb(':memory:');
+    process.env.NODE_ENV = "test";
+    initDb(":memory:");
     upsertOutboundTransport({
-      name: 'test-worker',
-      endpointUrl: 'https://db-worker.example.workers.dev',
-      authKey: 'db-auth-key',
-      allowedHosts: '*',
-      placementRegion: 'azure:swedencentral',
+      name: "test-worker",
+      endpointUrl: "https://db-worker.example.workers.dev",
+      authKey: "db-auth-key",
+      allowedHosts: "*",
+      placementRegion: "azure:swedencentral",
     });
 
     expect(isProxyTransportConfigured()).toBe(true);
-    const url = buildProxyUrl('https://api.openai.com/v1');
-    expect(url).toContain('https://db-worker.example.workers.dev');
-    expect(url).toContain('/db-auth-key/1/');
+    const url = buildProxyUrl("https://api.openai.com/v1");
+    expect(url).toContain("https://db-worker.example.workers.dev");
+    expect(url).toContain("/db-auth-key/1/");
   });
 });
 
 // ── proxyChatCompletion ───────────────────────────────────────────────────
 
-describe('proxyChatCompletion', () => {
+describe("proxyChatCompletion", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     setProxyEnv();
     fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
@@ -179,75 +179,92 @@ describe('proxyChatCompletion', () => {
     if (ORIGINAL_AUTH_KEY) process.env.PROXY_AUTH_KEY = ORIGINAL_AUTH_KEY;
   });
 
-  it('returns parsed JSON on success', async () => {
-    const mockResponse = { id: 'chatcmpl-1', choices: [{ message: { content: 'hello' } }] };
+  it("returns parsed JSON on success", async () => {
+    const mockResponse = {
+      id: "chatcmpl-1",
+      choices: [{ message: { content: "hello" } }],
+    };
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(mockResponse),
     });
 
     const result = await proxyChatCompletion(
-      'https://api.openai.com/v1',
-      'sk-test-key',
-      { model: 'gpt-4', messages: [{ role: 'user', content: 'hi' }] },
+      "https://api.openai.com/v1",
+      "sk-test-key",
+      { model: "gpt-4", messages: [{ role: "user", content: "hi" }] },
     );
 
     expect(result).toEqual(mockResponse);
   });
 
-  it('sends Authorization header with the API key', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+  it("sends Authorization header with the API key", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({}),
+    });
 
-    await proxyChatCompletion('https://api.openai.com/v1', 'sk-test-key', {});
-
-    const call = fetchMock.mock.calls[0];
-    expect(call[1].headers['Authorization']).toBe('Bearer sk-test-key');
-  });
-
-  it('sends X-Proxy-Session-Id header when sessionId is provided', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
-
-    await proxyChatCompletion('https://api.openai.com/v1', 'sk-test', {}, 'sess-abc123');
+    await proxyChatCompletion("https://api.openai.com/v1", "sk-test-key", {});
 
     const call = fetchMock.mock.calls[0];
-    expect(call[1].headers['X-Proxy-Session-Id']).toBe('sess-abc123');
+    expect(call[1].headers["Authorization"]).toBe("Bearer sk-test-key");
   });
 
-  it('does NOT send X-Proxy-Session-Id header when sessionId is undefined', async () => {
-    fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+  it("sends X-Proxy-Session-Id header when sessionId is provided", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({}),
+    });
 
-    await proxyChatCompletion('https://api.openai.com/v1', 'sk-test', {});
+    await proxyChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+      "sess-abc123",
+    );
 
     const call = fetchMock.mock.calls[0];
-    expect(call[1].headers['X-Proxy-Session-Id']).toBeUndefined();
+    expect(call[1].headers["X-Proxy-Session-Id"]).toBe("sess-abc123");
   });
 
-  it('throws with status on non-OK response', async () => {
+  it("does NOT send X-Proxy-Session-Id header when sessionId is undefined", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({}),
+    });
+
+    await proxyChatCompletion("https://api.openai.com/v1", "sk-test", {});
+
+    const call = fetchMock.mock.calls[0];
+    expect(call[1].headers["X-Proxy-Session-Id"]).toBeUndefined();
+  });
+
+  it("throws with status on non-OK response", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 500,
-      text: () => Promise.resolve('Internal Server Error'),
+      text: () => Promise.resolve("Internal Server Error"),
       headers: new Headers(),
     });
 
     await expect(
-      proxyChatCompletion('https://api.openai.com/v1', 'sk-test', {}),
-    ).rejects.toThrow('proxy transport error: 500');
+      proxyChatCompletion("https://api.openai.com/v1", "sk-test", {}),
+    ).rejects.toThrow("proxy transport error: 500");
   });
 
-  it('propagates retryAfterMs from retry-after header', async () => {
+  it("propagates retryAfterMs from retry-after header", async () => {
     const headers = new Headers();
-    headers.set('retry-after', '30');
+    headers.set("retry-after", "30");
 
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 429,
-      text: () => Promise.resolve('rate limited'),
+      text: () => Promise.resolve("rate limited"),
       headers,
     });
 
     try {
-      await proxyChatCompletion('https://api.openai.com/v1', 'sk-test', {});
+      await proxyChatCompletion("https://api.openai.com/v1", "sk-test", {});
     } catch (err: any) {
       expect(err.status).toBe(429);
       expect(err.retryAfterMs).toBe(30000);
@@ -257,12 +274,12 @@ describe('proxyChatCompletion', () => {
 
 // ── proxyStreamChatCompletion ──────────────────────────────────────────────
 
-describe('proxyStreamChatCompletion', () => {
+describe("proxyStreamChatCompletion", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   function makeSSEStream(sseData: string) {
     const encoder = new TextEncoder();
-    const chunks = sseData.split('|CHUNK|');
+    const chunks = sseData.split("|CHUNK|");
     return new ReadableStream({
       start(controller) {
         for (const chunk of chunks) {
@@ -276,7 +293,7 @@ describe('proxyStreamChatCompletion', () => {
   beforeEach(() => {
     setProxyEnv();
     fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
@@ -286,9 +303,15 @@ describe('proxyStreamChatCompletion', () => {
     if (ORIGINAL_AUTH_KEY) process.env.PROXY_AUTH_KEY = ORIGINAL_AUTH_KEY;
   });
 
-  it('yields parsed JSON objects from SSE data lines', async () => {
-    const chunk1 = JSON.stringify({ id: '1', choices: [{ delta: { content: 'hel' } }] });
-    const chunk2 = JSON.stringify({ id: '1', choices: [{ delta: { content: 'lo' } }] });
+  it("yields parsed JSON objects from SSE data lines", async () => {
+    const chunk1 = JSON.stringify({
+      id: "1",
+      choices: [{ delta: { content: "hel" } }],
+    });
+    const chunk2 = JSON.stringify({
+      id: "1",
+      choices: [{ delta: { content: "lo" } }],
+    });
 
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -297,17 +320,24 @@ describe('proxyStreamChatCompletion', () => {
     });
 
     const results: Record<string, unknown>[] = [];
-    for await (const chunk of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+    for await (const chunk of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+    )) {
       results.push(chunk);
     }
 
     expect(results).toHaveLength(2);
-    expect(results[0].id).toBe('1');
-    expect(results[1].id).toBe('1');
+    expect(results[0].id).toBe("1");
+    expect(results[1].id).toBe("1");
   });
 
-  it('cancels the upstream stream when the consumer stops early', async () => {
-    const chunk = JSON.stringify({ id: '1', choices: [{ delta: { content: 'hi' } }] });
+  it("cancels the upstream stream when the consumer stops early", async () => {
+    const chunk = JSON.stringify({
+      id: "1",
+      choices: [{ delta: { content: "hi" } }],
+    });
     const encoder = new TextEncoder();
     let cancelCalled = false;
     const body = new ReadableStream({
@@ -325,33 +355,49 @@ describe('proxyStreamChatCompletion', () => {
       headers: new Headers(),
     });
 
-    for await (const parsed of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
-      expect(parsed.id).toBe('1');
+    for await (const parsed of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+    )) {
+      expect(parsed.id).toBe("1");
       break;
     }
 
     expect(cancelCalled).toBe(true);
   });
 
-  it('stops on data: [DONE]', async () => {
-    const chunk1 = JSON.stringify({ id: '1', choices: [{ delta: { content: 'hi' } }] });
+  it("stops on data: [DONE]", async () => {
+    const chunk1 = JSON.stringify({
+      id: "1",
+      choices: [{ delta: { content: "hi" } }],
+    });
 
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      body: makeSSEStream(`data: ${chunk1}\n\ndata: [DONE]\n\ndata: {"should":"not appear"}\n\n`),
+      body: makeSSEStream(
+        `data: ${chunk1}\n\ndata: [DONE]\n\ndata: {"should":"not appear"}\n\n`,
+      ),
       headers: new Headers(),
     });
 
     const results: Record<string, unknown>[] = [];
-    for await (const chunk of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+    for await (const chunk of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+    )) {
       results.push(chunk);
     }
 
     expect(results).toHaveLength(1);
   });
 
-  it('skips comment lines (SSE keep-alive)', async () => {
-    const chunk1 = JSON.stringify({ id: '1', choices: [{ delta: { content: 'a' } }] });
+  it("skips comment lines (SSE keep-alive)", async () => {
+    const chunk1 = JSON.stringify({
+      id: "1",
+      choices: [{ delta: { content: "a" } }],
+    });
 
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -360,15 +406,22 @@ describe('proxyStreamChatCompletion', () => {
     });
 
     const results: Record<string, unknown>[] = [];
-    for await (const chunk of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+    for await (const chunk of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+    )) {
       results.push(chunk);
     }
 
     expect(results).toHaveLength(1);
   });
 
-  it('skips malformed JSON data lines gracefully', async () => {
-    const chunk1 = JSON.stringify({ id: '1', choices: [{ delta: { content: 'a' } }] });
+  it("skips malformed JSON data lines gracefully", async () => {
+    const chunk1 = JSON.stringify({
+      id: "1",
+      choices: [{ delta: { content: "a" } }],
+    });
 
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -377,44 +430,56 @@ describe('proxyStreamChatCompletion', () => {
     });
 
     const results: Record<string, unknown>[] = [];
-    for await (const chunk of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+    for await (const chunk of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+    )) {
       results.push(chunk);
     }
 
     expect(results).toHaveLength(1);
-    expect(results[0].id).toBe('1');
+    expect(results[0].id).toBe("1");
   });
 
-  it('throws with status on non-OK response', async () => {
+  it("throws with status on non-OK response", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 502,
-      text: () => Promise.resolve('bad gateway'),
+      text: () => Promise.resolve("bad gateway"),
       headers: new Headers(),
     });
 
     await expect(
       (async () => {
-        for await (const _ of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+        for await (const _ of proxyStreamChatCompletion(
+          "https://api.openai.com/v1",
+          "sk-test",
+          {},
+        )) {
           // consume
         }
       })(),
-    ).rejects.toThrow('proxy transport error: 502');
+    ).rejects.toThrow("proxy transport error: 502");
   });
 
-  it('propagates retryAfterMs from retry-after header on error', async () => {
+  it("propagates retryAfterMs from retry-after header on error", async () => {
     const headers = new Headers();
-    headers.set('retry-after', '15');
+    headers.set("retry-after", "15");
 
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 429,
-      text: () => Promise.resolve('rate limited'),
+      text: () => Promise.resolve("rate limited"),
       headers,
     });
 
     try {
-      for await (const _ of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+      for await (const _ of proxyStreamChatCompletion(
+        "https://api.openai.com/v1",
+        "sk-test",
+        {},
+      )) {
         // consume
       }
     } catch (err: any) {
@@ -423,39 +488,48 @@ describe('proxyStreamChatCompletion', () => {
     }
   });
 
-  it('includes stream: true in request body', async () => {
+  it("includes stream: true in request body", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      body: makeSSEStream('data: [DONE]\n\n'),
+      body: makeSSEStream("data: [DONE]\n\n"),
       headers: new Headers(),
     });
 
-    for await (const _ of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', { model: 'gpt-4' })) {
+    for await (const _ of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      { model: "gpt-4" },
+    )) {
       // consume
     }
 
     const call = fetchMock.mock.calls[0];
     const body = JSON.parse(call[1].body);
     expect(body.stream).toBe(true);
-    expect(body.model).toBe('gpt-4');
+    expect(body.model).toBe("gpt-4");
   });
 
-  it('sends X-Proxy-Session-Id header when sessionId is provided', async () => {
+  it("sends X-Proxy-Session-Id header when sessionId is provided", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      body: makeSSEStream('data: [DONE]\n\n'),
+      body: makeSSEStream("data: [DONE]\n\n"),
       headers: new Headers(),
     });
 
-    for await (const _ of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {}, 'my-session')) {
+    for await (const _ of proxyStreamChatCompletion(
+      "https://api.openai.com/v1",
+      "sk-test",
+      {},
+      "my-session",
+    )) {
       // consume
     }
 
     const call = fetchMock.mock.calls[0];
-    expect(call[1].headers['X-Proxy-Session-Id']).toBe('my-session');
+    expect(call[1].headers["X-Proxy-Session-Id"]).toBe("my-session");
   });
 
-  it('throws when response body is null', async () => {
+  it("throws when response body is null", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       body: null,
@@ -464,30 +538,34 @@ describe('proxyStreamChatCompletion', () => {
 
     await expect(
       (async () => {
-        for await (const _ of proxyStreamChatCompletion('https://api.openai.com/v1', 'sk-test', {})) {
+        for await (const _ of proxyStreamChatCompletion(
+          "https://api.openai.com/v1",
+          "sk-test",
+          {},
+        )) {
           // consume
         }
       })(),
-    ).rejects.toThrow('no response body');
+    ).rejects.toThrow("no response body");
   });
 });
 
 // ── computeWorkerIndex ─────────────────────────────────────────────────────
 
-describe('computeWorkerIndex', () => {
-  it('returns deterministic index for same session', () => {
-    const idx1 = computeWorkerIndex('session-abc', 3);
-    const idx2 = computeWorkerIndex('session-abc', 3);
+describe("computeWorkerIndex", () => {
+  it("returns deterministic index for same session", () => {
+    const idx1 = computeWorkerIndex("session-abc", 3);
+    const idx2 = computeWorkerIndex("session-abc", 3);
     expect(idx1).toBe(idx2);
   });
 
-  it('returns different indices for different sessions', () => {
-    const idx1 = computeWorkerIndex('session-abc', 3);
-    const idx2 = computeWorkerIndex('session-xyz', 3);
+  it("returns different indices for different sessions", () => {
+    const idx1 = computeWorkerIndex("session-abc", 3);
+    const idx2 = computeWorkerIndex("session-xyz", 3);
     expect(idx1).not.toBe(idx2);
   });
 
-  it('always returns value in range [0, workerCount)', () => {
+  it("always returns value in range [0, workerCount)", () => {
     for (let i = 0; i < 100; i++) {
       const idx = computeWorkerIndex(`session-${i}`, 3);
       expect(idx).toBeGreaterThanOrEqual(0);
@@ -495,7 +573,7 @@ describe('computeWorkerIndex', () => {
     }
   });
 
-  it('distributes sessions across workers', () => {
+  it("distributes sessions across workers", () => {
     const buckets = new Map<number, number>();
     for (let i = 0; i < 300; i++) {
       const idx = computeWorkerIndex(`session-${i}`, 3);
@@ -508,10 +586,10 @@ describe('computeWorkerIndex', () => {
     }
   });
 
-  it('produces consistent index matching the key affinity hash pattern', () => {
+  it("produces consistent index matching the key affinity hash pattern", () => {
     // Verify same SHA1 pattern used by key affinity (readUInt32BE % count)
-    const idx = computeWorkerIndex('session-abc', 3);
-    expect(typeof idx).toBe('number');
+    const idx = computeWorkerIndex("session-abc", 3);
+    expect(typeof idx).toBe("number");
     expect(Number.isInteger(idx)).toBe(true);
   });
 });
