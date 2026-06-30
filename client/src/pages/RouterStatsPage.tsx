@@ -42,6 +42,7 @@ import type {
 } from "../../../shared/types";
 import { HourlyProductivityChart } from "./HourlyProductivityChart";
 import { PerModelProductivityChart } from "./PerModelProductivityChart";
+import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import {
   adaptiveSmoothing,
   blendHourlyWithPings,
@@ -628,9 +629,16 @@ function ModelLeaderboard({
               {rows.map((m) => (
                 <TableRow key={`${m.platform}:${m.modelId}`}>
                   <TableCell className="max-w-[280px] pl-4 text-sm font-medium">
-                    <span className="block truncate" title={m.displayName}>
-                      {m.displayName}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="block truncate" title={m.displayName}>
+                        {m.displayName}
+                      </span>
+                      <ModelHealthPopover
+                        label={m.displayName}
+                        health={{ successRate: m.successRate }}
+                        totalRequests={m.requests}
+                      />
+                    </div>
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {m.platform}

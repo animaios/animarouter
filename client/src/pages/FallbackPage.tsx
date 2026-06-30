@@ -37,6 +37,7 @@ import {
 import { ModelsTabs } from "@/components/models-tabs";
 import { PageHeader } from "@/components/page-header";
 import { Tooltip } from "@/components/tooltip";
+import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -770,6 +771,19 @@ function RowContent({
       <td className="py-2 pr-3 align-middle">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-sm">{row.displayName}</span>
+          {!row.isGroup && (
+            <ModelHealthPopover
+              label={row.displayName}
+              health={{
+                reliability: row.reliability,
+                speed: row.speed,
+                intelligence: row.intelligence,
+                latency: row.latency,
+                successRate: row.successRate,
+              }}
+              totalRequests={row.totalRequests}
+            />
+          )}
           <span className="text-xs text-muted-foreground">{row.platform}</span>
           {row.isGroup && (
             <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-foreground/10 text-foreground">
