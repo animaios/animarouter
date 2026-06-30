@@ -1,5 +1,37 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAICompatProvider } from '../../providers/openai-compat.js';
+
+const enc = new TextEncoder();
+
+function sseChunk(content: string, finishReason: string | null = null) {
+  return {
+    id: 'chatcmpl-test',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model: 'test-model',
+    choices: [{ index: 0, delta: { content }, finish_reason: finishReason }],
+  };
+}
+
+function streamResponse(parts: string[]) {
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const part of parts) controller.enqueue(enc.encode(part));
+      controller.close();
+    },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
+async function collectStreamText(provider: OpenAICompatProvider) {
+  const chunks = [];
+  for await (const chunk of provider.streamChatCompletion('k', [{ role: 'user', content: 'hi' }], 'test-model')) {
+    chunks.push(chunk);
+  }
+  return chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? '').join('');
+}
 
 describe('OpenAICompatProvider', () => {
   let provider: OpenAICompatProvider;
@@ -11,6 +43,10 @@ describe('OpenAICompatProvider', () => {
       baseUrl: 'https://api.test.com/v1',
       extraHeaders: { 'X-Custom': 'test' },
     });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('should set platform and name from config', () => {
@@ -142,6 +178,34 @@ describe('OpenAICompatProvider', () => {
     await expect(
       provider.chatCompletion('key', [{ role: 'user', content: 'hi' }], 'model')
     ).rejects.toThrow(/Too many requests/);
+  });
+
+  it('streams newline-terminated SSE data frames through the OpenAI-compatible reader', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(streamResponse([
+      `data: ${JSON.stringify(sseChunk('Hel'))}\n\n`,
+      `data: ${JSON.stringify(sseChunk('lo', 'stop'))}\n\n`,
+      'data: [DONE]\n\n',
+    ]));
+
+    await expect(collectStreamText(provider)).resolves.toBe('Hello');
+  });
+
+  it('streams a final buffered SSE data line that arrives without a trailing newline', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(streamResponse([
+      `data: ${JSON.stringify(sseChunk('Hel'))}\n\n`,
+      `data: ${JSON.stringify(sseChunk('lo', 'stop'))}`,
+    ]));
+
+    await expect(collectStreamText(provider)).resolves.toBe('Hello');
+  });
+
+  it('honors a final buffered [DONE] marker without requiring a trailing newline', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(streamResponse([
+      `data: ${JSON.stringify(sseChunk('Hi'))}\n\n`,
+      'data: [DONE]',
+    ]));
+
+    await expect(collectStreamText(provider)).resolves.toBe('Hi');
   });
 
   it('explains a non-JSON 200 body instead of surfacing the raw parse error (#189)', async () => {
