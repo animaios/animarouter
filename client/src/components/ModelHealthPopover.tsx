@@ -1,3 +1,4 @@
+import { Activity } from "lucide-react";
 import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -9,7 +10,6 @@ import {
   ResponsiveContainer,
   Tooltip,
 } from "recharts";
-import { Activity } from "lucide-react";
 import { type ModelHealthInput, toRadarAxes } from "@/lib/health-radar";
 
 interface ModelHealthPopoverProps {
@@ -39,7 +39,6 @@ function RadarTooltipContent({
     </div>
   );
 }
-
 
 export function ModelHealthPopover({
   label,
@@ -74,7 +73,7 @@ export function ModelHealthPopover({
         onFocus={open_}
         onBlur={close_}
       >
-        <Activity aria-hidden className="size-3" />
+        <Activity aria-hidden className="size-3 text-orange-500" />
       </button>
       {open &&
         createPortal(
