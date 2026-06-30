@@ -3,3 +3,24 @@
 # Use the same keys as in project.yml here. Any setting you specify will override the corresponding
 # setting in project.yml, allowing you to customise the configuration for your local development environment
 # without affecting the project configuration in project.yml (which is intended to be versioned).
+
+project_name: "my-vue-ts-app"
+
+languages:
+  - vue
+
+encoding: "utf-8"
+
+ignore_all_files_in_gitignore: true
+
+ignored_paths:
+  - "**/node_modules/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/.vite/**"
+
+read_only: false
+
+added_modes:
+  - editing
+  - interactive
