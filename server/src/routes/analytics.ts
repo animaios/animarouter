@@ -679,6 +679,127 @@ analyticsRouter.get('/hourly', (req: Request, res: Response) => {
   res.json(result);
 });
 
+// Per-model hourly productivity breakdown. Returns all models that have any
+// activity in the range, with per-UTC-hour zero-filled 24-bucket stats the
+// client can render in a vertical single-model chart.
+analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
+  const range = normalizeAnalyticsRange((req.query.range as string) ?? '24h');
+  const since = getSinceTimestamp(range);
+  const db = getDb();
+
+  const active = getActivePlatforms(db);
+  if (active.length === 0) return res.json({ models: [] });
+  const pf = buildPlatformFilter(active, 'r');
+  const mf = buildModelEnabledFilter();
+
+  // Only consider models that have served at least one request in the
+  // current range. Top 20 — narrows the tab strip and keeps the payload
+  // reasonable.
+  const modelRows = db.prepare(`
+    SELECT
+      r.platform,
+      r.model_id,
+      m.display_name,
+      COUNT(*) as total_requests
+    FROM requests r
+    ${mf.joinSql}
+    WHERE r.created_at >= ?
+      ${pf.sql}
+      ${mf.whereSql}
+    GROUP BY r.platform, r.model_id
+    HAVING COUNT(*) > 0
+    ORDER BY total_requests DESC
+    LIMIT 20
+  `).all(since, ...pf.params) as Array<{
+    platform: string;
+    model_id: string;
+    display_name: string | null;
+    total_requests: number;
+  }>;
+
+  if (modelRows.length === 0) return res.json({ models: [] });
+
+  const pf2 = buildPlatformFilter(active, 'r');
+
+  const hourlyRows = db.prepare(`
+    SELECT
+      r.platform,
+      r.model_id,
+      CAST(strftime('%H', r.created_at) AS INTEGER) as hour,
+      COUNT(*) as requests,
+      AVG(r.latency_ms) as avg_latency_ms,
+      AVG(
+        CASE WHEN r.latency_ms > 0
+          THEN (COALESCE(r.output_tokens, 0) + COALESCE(r.reasoning_tokens, 0)) * 1000.0 / r.latency_ms
+          ELSE 0
+        END
+      ) as avg_tok_per_sec,
+      AVG(CASE WHEN r.status = 'error' THEN 100.0 ELSE 0.0 END) as error_rate
+    FROM requests r
+    ${mf.joinSql}
+    WHERE r.created_at >= ?
+      ${pf2.sql}
+      ${mf.whereSql}
+    GROUP BY r.platform, r.model_id, strftime('%H', r.created_at)
+    ORDER BY r.platform ASC, r.model_id ASC
+  `).all(since, ...pf2.params) as Array<{
+    platform: string;
+    model_id: string;
+    hour: number;
+    requests: number;
+    avg_latency_ms: number;
+    avg_tok_per_sec: number;
+    error_rate: number;
+  }>;
+
+  // Index hourly rows by platform\0modelId → hour → row
+  const hourlyIndex = new Map<string, Map<number, (typeof hourlyRows)[number]>>();
+  for (const h of hourlyRows) {
+    const k = `${h.platform} ${h.model_id}`;
+    let perModel = hourlyIndex.get(k);
+    if (!perModel) {
+      perModel = new Map();
+      hourlyIndex.set(k, perModel);
+    }
+    perModel.set(h.hour, h);
+  }
+
+  const models = modelRows.map((m) => {
+    const k = `${m.platform} ${m.model_id}`;
+    const perModel = hourlyIndex.get(k);
+    const hourly: Array<{
+      hour: number;
+      requests: number;
+      avgLatencyMs: number;
+      avgTokPerSec: number;
+      errorRate: number;
+      successRate: number;
+    }> = Array.from({ length: 24 }, (_, hour) => {
+      const r = perModel?.get(hour);
+      const requests = r?.requests ?? 0;
+      const errorRate = r?.error_rate ?? 0;
+      return {
+        hour,
+        requests,
+        avgLatencyMs: Math.round(r?.avg_latency_ms ?? 0),
+        avgTokPerSec: Number((r?.avg_tok_per_sec ?? 0).toFixed(1)),
+        errorRate: Math.round(errorRate * 10) / 10,
+        successRate:
+          requests > 0 ? Math.round((100 - errorRate) * 10) / 10 : 0,
+      };
+    });
+    return {
+      platform: m.platform,
+      modelId: m.model_id,
+      displayName: m.display_name ?? m.model_id,
+      totalRequests: m.total_requests,
+      hourly,
+    };
+  });
+
+  res.json({ models });
+});
+
 // Collapsed 24-bucket ping stats, for the Router Stats productivity chart's
 // overlay. Cheap "hi" pings fire all day — even when you're asleep — so use
 // this to fill the off-hours baseline rather than treating missing hours as

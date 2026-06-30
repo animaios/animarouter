@@ -6,6 +6,7 @@ import {
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
+  rankModelsByProductivity,
   rankProductiveWindows,
   rebucketHourlyByLocal,
 } from "./router-stats-data";
@@ -462,5 +463,67 @@ describe("adaptiveSmoothing", () => {
     expect(smoothed[0]).toBeLessThan(100);
     // Index 2 (adjacent to 0 via wrap) also picks up some signal
     expect(smoothed[2]).toBeGreaterThan(0);
+  });
+});
+
+describe("rankModelsByProductivity", () => {
+  const mk = (hour: number, requests: number, avgLatencyMs: number, successRate: number) => ({
+    hour,
+    requests,
+    avgLatencyMs,
+    avgTokPerSec: 50,
+    errorRate: 0,
+    successRate,
+  });
+
+  it("sorts models with lower latency first", () => {
+    const ranked = rankModelsByProductivity([
+      {
+        platform: "a",
+        modelId: "slow",
+        displayName: "Slow",
+        totalRequests: 10,
+        hourly: Array.from({ length: 24 }, (_, i) => mk(i, 10, 2000, 100)),
+      },
+      {
+        platform: "b",
+        modelId: "fast",
+        displayName: "Fast",
+        totalRequests: 10,
+        hourly: Array.from({ length: 24 }, (_, i) => mk(i, 10, 500, 100)),
+      },
+    ]);
+    expect(ranked[0].modelId).toBe("fast");
+    expect(ranked[1].modelId).toBe("slow");
+  });
+
+  it("assigns bestScore 0 and bestHour 0 when no hourly data", () => {
+    const ranked = rankModelsByProductivity([
+      {
+        platform: "a",
+        modelId: "empty",
+        displayName: "Empty",
+        totalRequests: 0,
+        hourly: Array.from({ length: 24 }, (_, i) => mk(i, 0, 0, 0)),
+      },
+    ]);
+    expect(ranked[0].bestScore).toBe(0);
+    expect(ranked[0].bestHour).toBe(0);
+  });
+
+  it("flags bestHour on a single strong hour", () => {
+    const ranked = rankModelsByProductivity([
+      {
+        platform: "a",
+        modelId: "spiky",
+        displayName: "Spiky",
+        totalRequests: 1,
+        hourly: Array.from({ length: 24 }, (_, i) =>
+          i === 15 ? mk(15, 100, 100, 100) : mk(i, 0, 0, 0),
+        ),
+      },
+    ]);
+    expect(ranked[0].bestHour).toBe(15);
+    expect(ranked[0].bestScore).toBeGreaterThan(0);
   });
 });

@@ -1,11 +1,16 @@
 import type {
   HourlyStat,
+  ModelHourlyStat,
   ModelStats,
   ModelTimelineResponse,
   PingHourlyStat,
 } from "../../../shared/types";
 
-export type { PingHourlyStat };
+export type {
+  ModelHourlyResponse,
+  ModelHourlyStat,
+  PingHourlyStat,
+} from "../../../shared/types";
 
 export interface ProviderMixSlice {
   id: string;
@@ -439,6 +444,70 @@ export function blendHourlyWithPings(
 // ── Adaptive Smoothing ────────────────────────────────────────────────────
 // Default 5-hour weighted kernel (1,2,3,2,1)/9. Sparse-hour fallback (count<3)
 // uses a wider 7-hour kernel (1,1,2,3,2,1,1)/11.
+
+// ── Per-model productivity ──────────────────────────────────────────────
+// Same 60/30/10 weighting as the aggregate ranker, but applied to a single
+// model's hourly breakdown. Used to sort the vertical tab strip.
+
+export interface ModelProductivity {
+  platform: string;
+  modelId: string;
+  displayName: string;
+  totalRequests: number;
+  /** Best productivity score across all hours (0-100). */
+  bestScore: number;
+  /** Hour of the best window start (for quick preview). */
+  bestHour: number;
+  /** Per-hour scores, length 24. */
+  hourScores: number[];
+}
+
+export function rankModelsByProductivity(
+  models: ReadonlyArray<{
+    platform: string;
+    modelId: string;
+    displayName: string;
+    totalRequests: number;
+    hourly: ReadonlyArray<ModelHourlyStat>;
+  }>,
+): ModelProductivity[] {
+  // Use a shared latency baseline across ALL models so we compare on the
+  // same scale. Otherwise a uniformly-slow model normalizes against itself
+  // and scores identically to a uniformly-fast one.
+  const globalMaxLatency = Math.max(
+    1,
+    ...models.flatMap((m) => m.hourly.map((h) => h.avgLatencyMs)),
+  );
+  return models
+    .map((m) => {
+      const rows = [...m.hourly];
+      const hourScores = rows.map((r) => {
+        if (r.requests === 0) return 0;
+        const latencyScore = (1 - r.avgLatencyMs / globalMaxLatency) * 60;
+        const successScore = (r.successRate / 100) * 30;
+        const tokScore = Math.min(r.avgTokPerSec / 80, 1) * 10;
+        return Math.round(latencyScore + successScore + tokScore);
+      });
+      let bestScore = 0;
+      let bestHour = 0;
+      for (let h = 0; h < 24; h++) {
+        if (hourScores[h] > bestScore) {
+          bestScore = hourScores[h];
+          bestHour = h;
+        }
+      }
+      return {
+        platform: m.platform,
+        modelId: m.modelId,
+        displayName: m.displayName,
+        totalRequests: m.totalRequests,
+        bestScore,
+        bestHour,
+        hourScores,
+      };
+    })
+    .sort((a, b) => b.bestScore - a.bestScore);
+}
 
 const KERNEL_5 = [1, 2, 3, 2, 1];
 const KERNEL_5_SUM = KERNEL_5.reduce((a, b) => a + b, 0);

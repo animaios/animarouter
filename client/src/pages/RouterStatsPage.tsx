@@ -41,13 +41,17 @@ import type {
   PlatformStats,
 } from "../../../shared/types";
 import { HourlyProductivityChart } from "./HourlyProductivityChart";
+import { PerModelProductivityChart } from "./PerModelProductivityChart";
 import {
   adaptiveSmoothing,
   blendHourlyWithPings,
   buildModelMixData,
   coerceModelTimeline,
   coerceRows,
+  rankModelsByProductivity,
+  type ModelHourlyResponse,
   type ModelMixData,
+  type ModelProductivity,
   type PingHourlyStat,
   type RebucketedHourlyStat,
   rankProductiveWindows,
@@ -791,6 +795,14 @@ export default function RouterStatsPage() {
       apiFetch<PingHourlyStat[]>(`/api/analytics/pings-hourly?range=${range}`),
   });
 
+  const { data: modelHourlyResponse } = useQuery({
+    queryKey: ["analytics", "hourly-by-model", range],
+    queryFn: () =>
+      apiFetch<ModelHourlyResponse>(
+        `/api/analytics/hourly-by-model?range=${range}`,
+      ),
+  });
+
   const utcOffsetMinutes = useMemo(() => new Date().getTimezoneOffset(), []);
 
   const hourlyLocal = useMemo(
@@ -858,6 +870,12 @@ export default function RouterStatsPage() {
   const hourlyWindows = useMemo(
     () => rankProductiveWindows(rankableHourly),
     [rankableHourly],
+  );
+
+  // Ranked models by best productivity score (for the per-model chart)
+  const rankedModels: ModelProductivity[] = useMemo(
+    () => rankModelsByProductivity(modelHourlyResponse?.models ?? []),
+    [modelHourlyResponse],
   );
 
   const modelTimeline = useMemo(
@@ -973,6 +991,14 @@ export default function RouterStatsPage() {
           pingRows={pingHourlyLocal}
         />
         <ModelMixDonut data={modelMixData} />
+      </section>
+
+      <section>
+        <PerModelProductivityChart
+          data={modelHourlyResponse ?? { models: [] }}
+          ranked={rankedModels}
+          pingRows={pingHourlyLocal}
+        />
       </section>
 
       <section>

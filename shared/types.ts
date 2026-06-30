@@ -561,6 +561,28 @@ export interface PingHourlyStat {
   successRate: number;
 }
 
+// Per-model hourly productivity buckets. Mirrors HourlyStat's shape.
+export interface ModelHourlyStat {
+  hour: number;
+  requests: number;
+  avgLatencyMs: number;
+  avgTokPerSec: number;
+  errorRate: number;
+  successRate: number;
+}
+
+// All-model hourly breakdown with per-model zero-filled buckets.
+export interface ModelHourlyResponse {
+  models: Array<{
+    platform: string;
+    modelId: string;
+    displayName: string;
+    totalRequests: number;
+    /** Per-UTC-hour stats, zero-filled to length 24 (index = hour). */
+    hourly: ModelHourlyStat[];
+  }>;
+}
+
 export interface ErrorDistribution {
   byCategory: { category: string; count: number }[];
   byPlatform: { platform: string; count: number }[];

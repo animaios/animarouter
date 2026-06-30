@@ -716,4 +716,87 @@ describe('Analytics API', () => {
       expect(row.tokPerSec).toBe(0);
     });
   });
+
+  describe('hourly-by-model per-model baseline', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-29T12:00:00.000Z'));
+  });
+
+  function insertModelRequest(
+    platform: string,
+    modelId: string,
+    latencyMs: number,
+    createdAt: string,
+  ) {
+    getDb().prepare(`
+      INSERT INTO requests (platform, model_id, status, input_tokens, output_tokens, latency_ms, error, created_at)
+      VALUES (?, ?, 'success', 10, 20, ?, NULL, ?)
+    `).run(platform, modelId, latencyMs, createdAt);
+  }
+
+  it('returns empty models array when no activity', async () => {
+    insertKey('mhempty', 1);
+    insertModel('mhempty', 'm1');
+    insertFallbackConfig('mhempty', 'm1', 1);
+
+    const { status, body } = await request(app, '/api/analytics/hourly-by-model?range=24h');
+
+    expect(status).toBe(200);
+    expect(body.models).toEqual([]);
+  });
+
+  it('returns per-UTC-hour zero-filled buckets for each model', async () => {
+    insertKey('mhfill', 1);
+    insertModel('mhfill', 'm1');
+    insertFallbackConfig('mhfill', 'm1', 1);
+    insertModelRequest('mhfill', 'm1', 500, '2026-05-29 03:30:00');
+    insertModelRequest('mhfill', 'm1', 700, '2026-05-29 22:15:00');
+
+    const { status, body } = await request(app, '/api/analytics/hourly-by-model?range=24h');
+
+    expect(status).toBe(200);
+    expect(body.models.length).toBe(1);
+    const model = body.models[0];
+    expect(model.modelId).toBe('m1');
+    expect(model.hourly).toHaveLength(24);
+    expect(model.hourly[3].requests).toBe(1);
+    expect(model.hourly[3].avgLatencyMs).toBe(500);
+    expect(model.hourly[22].requests).toBe(1);
+    expect(model.hourly[22].avgLatencyMs).toBe(700);
+    expect(model.hourly[0].requests).toBe(0);
+  });
+
+  it('groups models independently', async () => {
+    insertKey('mhmulti', 1);
+    insertModel('mhmulti', 'fast');
+    insertModel('mhmulti', 'slow');
+    insertFallbackConfig('mhmulti', 'fast', 1);
+    insertFallbackConfig('mhmulti', 'slow', 1);
+    insertModelRequest('mhmulti', 'fast', 200, '2026-05-29 10:00:00');
+    insertModelRequest('mhmulti', 'slow', 1500, '2026-05-29 10:30:00');
+
+    const { status, body } = await request(app, '/api/analytics/hourly-by-model?range=24h');
+
+    expect(status).toBe(200);
+    expect(body.models.length).toBe(2);
+    const fast = body.models.find((m: any) => m.modelId === 'fast');
+    const slow = body.models.find((m: any) => m.modelId === 'slow');
+    expect(fast).toBeDefined();
+    expect(slow).toBeDefined();
+    expect(fast.hourly[10].avgLatencyMs).toBe(200);
+    expect(slow.hourly[10].avgLatencyMs).toBe(1500);
+  });
+
+  it('respects the active-platform filter', async () => {
+    // mghost key is disabled → platform is inactive → no models returned
+    insertKey('mghost', 0);
+    insertModelRequest('mghost', 'm1', 500, '2026-05-29 04:00:00');
+
+    const { status, body } = await request(app, '/api/analytics/hourly-by-model?range=24h');
+
+    expect(status).toBe(200);
+    expect(body.models.length).toBe(0);
+  });
+  });
 });
