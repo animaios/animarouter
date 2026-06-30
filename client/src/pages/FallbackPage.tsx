@@ -793,14 +793,6 @@ function RowContent({
                 : "s"}
             </span>
           )}
-          {row.groupKey && (
-            <span
-              title={row.groupKey}
-              className="text-[10px] rounded-full px-1.5 py-0.5 border border-muted-foreground/25 text-muted-foreground bg-muted/30"
-            >
-              {row.groupDisplayName ?? row.groupKey}
-            </span>
-          )}
           {row.supportsVision && (
             <span
               title="Accepts image input"
