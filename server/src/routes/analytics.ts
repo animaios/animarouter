@@ -1,70 +1,84 @@
-import { Router } from 'express';
-import type { Request, Response } from 'express';
-import type Database from 'better-sqlite3';
-import { getDb } from '../db/index.js';
+import type Database from "better-sqlite3";
+import type { Request, Response } from "express";
+import { Router } from "express";
+import { getDb } from "../db/index.js";
 
 export const analyticsRouter = Router();
 
 // Format UTC timestamps the same way SQLite stores created_at text values.
 const toSqliteDateTime = (timestamp: number) =>
-    new Date(timestamp).toISOString().slice(0, 19).replace('T', ' ');
+  new Date(timestamp).toISOString().slice(0, 19).replace("T", " ");
 
 // Return the rolling cutoff timestamp for the selected analytics range.
 function getSinceTimestamp(range: string): string {
   const now = Date.now();
 
   switch (range) {
-    case '15m':
+    case "15m":
       return toSqliteDateTime(now - 15 * 60 * 1000);
-    case '1h':
+    case "1h":
       return toSqliteDateTime(now - 60 * 60 * 1000);
-    case '24h':
+    case "24h":
       return toSqliteDateTime(now - 24 * 60 * 60 * 1000);
-    case '30d':
+    case "30d":
       return toSqliteDateTime(now - 30 * 24 * 60 * 60 * 1000);
-    case '7d':
+    case "7d":
     default:
       return toSqliteDateTime(now - 7 * 24 * 60 * 60 * 1000);
   }
 }
 
-type AnalyticsRange = '15m' | '1h' | '24h' | '7d' | '30d';
-type TimelineInterval = 'minute' | '5min' | 'hour' | 'day';
+type AnalyticsRange = "15m" | "1h" | "24h" | "7d" | "30d";
+type TimelineInterval = "minute" | "5min" | "hour" | "day";
 
 function normalizeAnalyticsRange(range: string): AnalyticsRange {
   switch (range) {
-    case '15m':
-    case '1h':
-    case '24h':
-    case '30d':
+    case "15m":
+    case "1h":
+    case "24h":
+    case "30d":
       return range;
-    case '7d':
+    case "7d":
     default:
-      return '7d';
+      return "7d";
   }
 }
 
-const DEFAULT_TIMELINE_INTERVAL_BY_RANGE: Record<AnalyticsRange, TimelineInterval> = {
-  '15m': 'minute',
-  '1h': '5min',
-  '24h': 'hour',
-  '7d': 'day',
-  '30d': 'day',
+const DEFAULT_TIMELINE_INTERVAL_BY_RANGE: Record<
+  AnalyticsRange,
+  TimelineInterval
+> = {
+  "15m": "minute",
+  "1h": "5min",
+  "24h": "hour",
+  "7d": "day",
+  "30d": "day",
 };
 
-const ALLOWED_TIMELINE_INTERVALS_BY_RANGE: Record<AnalyticsRange, readonly TimelineInterval[]> = {
-  '15m': ['minute', '5min', 'hour', 'day'],
-  '1h': ['minute', '5min', 'hour', 'day'],
-  '24h': ['minute', '5min', 'hour', 'day'],
-  '7d': ['hour', 'day'],
-  '30d': ['hour', 'day'],
+const ALLOWED_TIMELINE_INTERVALS_BY_RANGE: Record<
+  AnalyticsRange,
+  readonly TimelineInterval[]
+> = {
+  "15m": ["minute", "5min", "hour", "day"],
+  "1h": ["minute", "5min", "hour", "day"],
+  "24h": ["minute", "5min", "hour", "day"],
+  "7d": ["hour", "day"],
+  "30d": ["hour", "day"],
 };
 
 function isTimelineInterval(value: unknown): value is TimelineInterval {
-  return value === 'minute' || value === '5min' || value === 'hour' || value === 'day';
+  return (
+    value === "minute" ||
+    value === "5min" ||
+    value === "hour" ||
+    value === "day"
+  );
 }
 
-function getTimelineInterval(range: string, requested?: string): TimelineInterval {
+function getTimelineInterval(
+  range: string,
+  requested?: string,
+): TimelineInterval {
   const normalizedRange = normalizeAnalyticsRange(range);
   const defaultInterval = DEFAULT_TIMELINE_INTERVAL_BY_RANGE[normalizedRange];
   if (!isTimelineInterval(requested)) {
@@ -83,21 +97,26 @@ function getTimelineBucketSql(interval: TimelineInterval) {
   // dateFormat is a hardcoded whitelist; never user-controlled.
   // For 5-minute buckets we floor the minute value to the nearest multiple of 5.
   const dateFormat =
-    interval === 'minute' ? '%Y-%m-%dT%H:%M:00' :
-    interval === '5min'   ? "strftime('%Y-%m-%dT%H:', r.created_at) || printf('%02d', (CAST(strftime('%M', r.created_at) AS INTEGER) / 5) * 5) || ':00'" :
-    interval === 'hour'   ? '%Y-%m-%dT%H:00:00' : '%Y-%m-%d';
+    interval === "minute"
+      ? "%Y-%m-%dT%H:%M:00"
+      : interval === "5min"
+        ? "strftime('%Y-%m-%dT%H:', r.created_at) || printf('%02d', (CAST(strftime('%M', r.created_at) AS INTEGER) / 5) * 5) || ':00'"
+        : interval === "hour"
+          ? "%Y-%m-%dT%H:00:00"
+          : "%Y-%m-%d";
 
   // selectExpr and groupExpr must be identical SQL fragments so SELECT and GROUP BY match.
-  const selectExpr = interval === '5min'
-    ? dateFormat
-    : `strftime('${dateFormat}', r.created_at)`;
+  const selectExpr =
+    interval === "5min"
+      ? dateFormat
+      : `strftime('${dateFormat}', r.created_at)`;
 
   return { selectExpr, groupExpr: selectExpr };
 }
 
 const BUCKET_MS: Record<TimelineInterval, number> = {
   minute: 60 * 1000,
-  '5min': 5 * 60 * 1000,
+  "5min": 5 * 60 * 1000,
   hour: 60 * 60 * 1000,
   day: 24 * 60 * 60 * 1000,
 };
@@ -107,16 +126,19 @@ const floorToBucket = (ms: number, size: number): number =>
 
 function msToBucketKey(ms: number, interval: TimelineInterval): string {
   const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, '0');
+  const pad = (n: number) => String(n).padStart(2, "0");
   const datePart = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-  if (interval === 'day') return datePart;
+  if (interval === "day") return datePart;
   return `${datePart}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:00`;
 }
 
-function buildTimelineBuckets(since: string, interval: TimelineInterval): Array<{ key: string; timestamp: string }> {
+function buildTimelineBuckets(
+  since: string,
+  interval: TimelineInterval,
+): Array<{ key: string; timestamp: string }> {
   const bucketSize = BUCKET_MS[interval];
   const nowMs = Date.now();
-  const sinceMs = new Date(since.replace(' ', 'T') + 'Z').getTime();
+  const sinceMs = new Date(since.replace(" ", "T") + "Z").getTime();
   const startBucket = floorToBucket(sinceMs, bucketSize);
   const endBucket = floorToBucket(nowMs, bucketSize);
 
@@ -125,7 +147,7 @@ function buildTimelineBuckets(since: string, interval: TimelineInterval): Array<
     const key = msToBucketKey(t, interval);
     buckets.push({
       key,
-      timestamp: interval === 'day' ? key + 'T00:00:00Z' : key + 'Z',
+      timestamp: interval === "day" ? key + "T00:00:00Z" : key + "Z",
     });
   }
 
@@ -134,7 +156,9 @@ function buildTimelineBuckets(since: string, interval: TimelineInterval): Array<
 
 /** Return platforms that have ≥1 enabled key AND ≥1 model. */
 function getActivePlatforms(db: Database.Database): string[] {
-  return (db.prepare(`
+  return (
+    db
+      .prepare(`
     SELECT DISTINCT k.platform
     FROM api_keys k
     WHERE k.enabled = 1
@@ -142,19 +166,21 @@ function getActivePlatforms(db: Database.Database): string[] {
         SELECT 1 FROM models m
         WHERE m.platform = k.platform
       )
-  `).all() as { platform: string }[]).map(r => r.platform);
+  `)
+      .all() as { platform: string }[]
+  ).map((r) => r.platform);
 }
 
 /** Build an IN-clause fragment for active platforms.
  *  Returns { sql, params } — sql is '' when no active platforms exist. */
 function buildPlatformFilter(
   activePlatforms: string[],
-  alias = '',
+  alias = "",
 ): { sql: string; params: string[] } {
-  if (activePlatforms.length === 0) return { sql: '', params: [] };
-  const col = alias ? `${alias}.platform` : 'platform';
+  if (activePlatforms.length === 0) return { sql: "", params: [] };
+  const col = alias ? `${alias}.platform` : "platform";
   return {
-    sql: `AND ${col} IN (${activePlatforms.map(() => '?').join(',')})`,
+    sql: `AND ${col} IN (${activePlatforms.map(() => "?").join(",")})`,
     params: activePlatforms,
   };
 }
@@ -168,37 +194,48 @@ function buildModelEnabledFilter() {
   return {
     joinSql: `LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
       LEFT JOIN fallback_config fc ON fc.model_db_id = m.id`,
-    whereSql: '',
+    whereSql: "",
   };
 }
 
 interface SummaryResponse {
-  totalRequests: number; successRate: number;
-  totalInputTokens: number; totalOutputTokens: number;
+  totalRequests: number;
+  successRate: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
   avgLatencyMs: number;
-  pinnedRequests: number; pinHonoredRequests: number;
+  pinnedRequests: number;
+  pinHonoredRequests: number;
 }
 
 const EMPTY_SUMMARY: SummaryResponse = {
-  totalRequests: 0, successRate: 0,
-  totalInputTokens: 0, totalOutputTokens: 0,
+  totalRequests: 0,
+  successRate: 0,
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
   avgLatencyMs: 0,
-  pinnedRequests: 0, pinHonoredRequests: 0,
+  pinnedRequests: 0,
+  pinHonoredRequests: 0,
 };
-const EMPTY_ERROR_DIST = { byCategory: [] as any[], byPlatform: [] as any[], detailed: [] as any[] };
+const EMPTY_ERROR_DIST = {
+  byCategory: [] as any[],
+  byPlatform: [] as any[],
+  detailed: [] as any[],
+};
 
 // Summary stats
-analyticsRouter.get('/summary', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
+analyticsRouter.get("/summary", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
   if (active.length === 0) return res.json(EMPTY_SUMMARY);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
-  const stats = db.prepare(`
+  const stats = db
+    .prepare(`
     SELECT
       COUNT(*) as total_requests,
       SUM(CASE WHEN r.status = 'success' THEN 1 ELSE 0 END) as success_count,
@@ -212,10 +249,12 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
     WHERE r.created_at >= ?
       ${pf.sql}
       ${mf.whereSql}
-  `).get(since, ...pf.params) as any;
+  `)
+    .get(since, ...pf.params) as any;
 
   const totalRequests = stats.total_requests ?? 0;
-  const successRate = totalRequests > 0 ? (stats.success_count / totalRequests) * 100 : 0;
+  const successRate =
+    totalRequests > 0 ? (stats.success_count / totalRequests) * 100 : 0;
 
   res.json({
     totalRequests,
@@ -232,17 +271,18 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
 });
 
 // Stats grouped by model
-analyticsRouter.get('/by-model', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
+analyticsRouter.get("/by-model", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
   if (active.length === 0) return res.json([]);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(`
     SELECT
       r.platform,
       r.model_id,
@@ -265,36 +305,40 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC
-  `).all(since, ...pf.params) as any[];
+  `)
+    .all(since, ...pf.params) as any[];
 
-  res.json(rows.map(r => ({
-    platform: r.platform,
-    modelId: r.model_id,
-    displayName: r.display_name ?? r.model_id,
-    requests: r.requests,
-    successRate: Math.round(r.success_rate * 10) / 10,
-    avgLatencyMs: Math.round(r.avg_latency_ms),
-    totalInputTokens: r.total_input_tokens ?? 0,
-    totalOutputTokens: r.total_output_tokens ?? 0,
-    totalReasoningTokens: r.total_reasoning_tokens ?? 0,
-    // Requests this model served because the client pinned it by name.
-    pinnedRequests: r.pinned_requests ?? 0,
-    tokPerSec: r.tok_per_sec ?? 0,
-  })));
+  res.json(
+    rows.map((r) => ({
+      platform: r.platform,
+      modelId: r.model_id,
+      displayName: r.display_name ?? r.model_id,
+      requests: r.requests,
+      successRate: Math.round(r.success_rate * 10) / 10,
+      avgLatencyMs: Math.round(r.avg_latency_ms),
+      totalInputTokens: r.total_input_tokens ?? 0,
+      totalOutputTokens: r.total_output_tokens ?? 0,
+      totalReasoningTokens: r.total_reasoning_tokens ?? 0,
+      // Requests this model served because the client pinned it by name.
+      pinnedRequests: r.pinned_requests ?? 0,
+      tokPerSec: r.tok_per_sec ?? 0,
+    })),
+  );
 });
 
 // Stats grouped by platform
-analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
+analyticsRouter.get("/by-platform", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
   if (active.length === 0) return res.json([]);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(`
     SELECT
       r.platform,
       COUNT(*) as requests,
@@ -309,34 +353,44 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY r.platform
     ORDER BY requests DESC
-  `).all(since, ...pf.params) as any[];
+  `)
+    .all(since, ...pf.params) as any[];
 
-  res.json(rows.map(r => ({
-    platform: r.platform,
-    requests: r.requests,
-    successRate: Math.round(r.success_rate * 10) / 10,
-    avgLatencyMs: Math.round(r.avg_latency_ms),
-    totalInputTokens: r.total_input_tokens ?? 0,
-    totalOutputTokens: r.total_output_tokens ?? 0,
-  })));
+  res.json(
+    rows.map((r) => ({
+      platform: r.platform,
+      requests: r.requests,
+      successRate: Math.round(r.success_rate * 10) / 10,
+      avgLatencyMs: Math.round(r.avg_latency_ms),
+      totalInputTokens: r.total_input_tokens ?? 0,
+      totalOutputTokens: r.total_output_tokens ?? 0,
+    })),
+  );
 });
 
 // Timeline data
-analyticsRouter.get('/timeline', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
-  const interval = getTimelineInterval(range, req.query.interval as string | undefined);
+analyticsRouter.get("/timeline", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
+  const interval = getTimelineInterval(
+    range,
+    req.query.interval as string | undefined,
+  );
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
   const { selectExpr, groupExpr } = getTimelineBucketSql(interval);
 
   // Only query when there are active platforms; otherwise dbRows stays empty
   // and the zero-fill below still produces a full flat-line x-axis.
-  const dbRows = active.length === 0 ? [] : db.prepare(`
+  const dbRows =
+    active.length === 0
+      ? []
+      : (db
+          .prepare(`
     SELECT
       ${selectExpr} as timestamp,
       COUNT(*) as requests,
@@ -349,18 +403,21 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY ${groupExpr}
     ORDER BY timestamp ASC
-  `).all(since, ...pf.params) as any[];
+  `)
+          .all(since, ...pf.params) as any[]);
 
-  const dataMap = new Map(dbRows.map(r => [r.timestamp, r]));
-  const filled = buildTimelineBuckets(since, interval).map(({ key, timestamp }) => {
-    const r = dataMap.get(key);
-    return {
-      timestamp,
-      requests: r?.requests ?? 0,
-      successCount: r?.success_count ?? 0,
-      failureCount: r?.failure_count ?? 0,
-    };
-  });
+  const dataMap = new Map(dbRows.map((r) => [r.timestamp, r]));
+  const filled = buildTimelineBuckets(since, interval).map(
+    ({ key, timestamp }) => {
+      const r = dataMap.get(key);
+      return {
+        timestamp,
+        requests: r?.requests ?? 0,
+        successCount: r?.success_count ?? 0,
+        failureCount: r?.failure_count ?? 0,
+      };
+    },
+  );
 
   res.json(filled);
 });
@@ -387,19 +444,26 @@ function getModelTimelineLimit(rawLimit: unknown): number {
 }
 
 // Timeline data stacked by served model
-analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
-  const interval = getTimelineInterval(range, req.query.interval as string | undefined);
+analyticsRouter.get("/model-timeline", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
+  const interval = getTimelineInterval(
+    range,
+    req.query.interval as string | undefined,
+  );
   const limit = getModelTimelineLimit(req.query.limit);
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
   const { selectExpr, groupExpr } = getTimelineBucketSql(interval);
 
-  const topRows = active.length === 0 ? [] : db.prepare(`
+  const topRows =
+    active.length === 0
+      ? []
+      : (db
+          .prepare(`
     SELECT
       r.platform,
       r.model_id,
@@ -413,15 +477,19 @@ analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC, r.platform ASC, r.model_id ASC
     LIMIT ?
-  `).all(since, ...pf.params, limit) as ModelTimelineSeriesRow[];
+  `)
+          .all(since, ...pf.params, limit) as ModelTimelineSeriesRow[]);
 
-  const topByModel = new Map<string, {
-    key: string;
-    platform: string;
-    modelId: string;
-    displayName: string;
-    requests: number;
-  }>();
+  const topByModel = new Map<
+    string,
+    {
+      key: string;
+      platform: string;
+      modelId: string;
+      displayName: string;
+      requests: number;
+    }
+  >();
 
   topRows.forEach((row, index) => {
     topByModel.set(getModelMapKey(row.platform, row.model_id), {
@@ -433,7 +501,11 @@ analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
     });
   });
 
-  const bucketRows = active.length === 0 ? [] : db.prepare(`
+  const bucketRows =
+    active.length === 0
+      ? []
+      : (db
+          .prepare(`
     SELECT
       ${selectExpr} as timestamp,
       r.platform,
@@ -447,19 +519,22 @@ analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY ${groupExpr}, r.platform, r.model_id
     ORDER BY timestamp ASC
-  `).all(since, ...pf.params) as ModelTimelineBucketRow[];
+  `)
+          .all(since, ...pf.params) as ModelTimelineBucketRow[]);
 
   const otherRequests = bucketRows.reduce((sum, row) => {
-    return topByModel.has(getModelMapKey(row.platform, row.model_id)) ? sum : sum + row.requests;
+    return topByModel.has(getModelMapKey(row.platform, row.model_id))
+      ? sum
+      : sum + row.requests;
   }, 0);
 
   const series = Array.from(topByModel.values());
   if (otherRequests > 0) {
     series.push({
-      key: 'other',
-      platform: '',
-      modelId: '__other__',
-      displayName: 'Other',
+      key: "other",
+      platform: "",
+      modelId: "__other__",
+      displayName: "Other",
       requests: otherRequests,
     });
   }
@@ -480,8 +555,10 @@ analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
     const point = pointMap.get(row.timestamp);
     if (!point) continue;
 
-    const topSeries = topByModel.get(getModelMapKey(row.platform, row.model_id));
-    const key = topSeries?.key ?? 'other';
+    const topSeries = topByModel.get(
+      getModelMapKey(row.platform, row.model_id),
+    );
+    const key = topSeries?.key ?? "other";
     point[key] = Number(point[key] ?? 0) + row.requests;
     point.totalRequests = Number(point.totalRequests ?? 0) + row.requests;
   }
@@ -493,18 +570,19 @@ analyticsRouter.get('/model-timeline', (req: Request, res: Response) => {
 });
 
 // Error distribution (grouped by error type and platform)
-analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
+analyticsRouter.get("/error-distribution", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
   if (active.length === 0) return res.json(EMPTY_ERROR_DIST);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
   // Group errors by category (extract the key part of the error message)
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(`
     SELECT
       r.platform,
       r.model_id,
@@ -526,10 +604,12 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY r.platform, error_category
     ORDER BY count DESC
-  `).all(since, ...pf.params) as any[];
+  `)
+    .all(since, ...pf.params) as any[];
 
   // Also get totals by category
-  const byCategory = db.prepare(`
+  const byCategory = db
+    .prepare(`
     SELECT
       CASE
         WHEN r.error LIKE '%429%' OR r.error LIKE '%rate limit%' OR r.error LIKE '%too many%' OR r.error LIKE '%quota%' THEN 'Rate Limited (429)'
@@ -549,10 +629,12 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY category
     ORDER BY count DESC
-  `).all(since, ...pf.params) as any[];
+  `)
+    .all(since, ...pf.params) as any[];
 
   // Errors by platform
-  const byPlatform = db.prepare(`
+  const byPlatform = db
+    .prepare(`
     SELECT r.platform, COUNT(*) as count
     FROM requests r
     ${mf.joinSql}
@@ -561,7 +643,8 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY r.platform
     ORDER BY count DESC
-  `).all(since, ...pf.params) as any[];
+  `)
+    .all(since, ...pf.params) as any[];
 
   res.json({
     byCategory,
@@ -571,17 +654,18 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
 });
 
 // Recent errors
-analyticsRouter.get('/errors', (req: Request, res: Response) => {
-  const range = (req.query.range as string) ?? '24h';
+analyticsRouter.get("/errors", (req: Request, res: Response) => {
+  const range = (req.query.range as string) ?? "24h";
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
   if (active.length === 0) return res.json([]);
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(`
     SELECT r.id, r.platform, r.model_id, r.error, r.latency_ms, r.created_at
     FROM requests r
     ${mf.joinSql}
@@ -590,24 +674,27 @@ analyticsRouter.get('/errors', (req: Request, res: Response) => {
       ${mf.whereSql}
     ORDER BY r.created_at DESC
     LIMIT 50
-  `).all(since, ...pf.params) as any[];
+  `)
+    .all(since, ...pf.params) as any[];
 
-  res.json(rows.map(r => ({
-    id: r.id,
-    platform: r.platform,
-    modelId: r.model_id,
-    error: r.error,
-    latencyMs: r.latency_ms,
-    createdAt: r.created_at,
-  })));
+  res.json(
+    rows.map((r) => ({
+      id: r.id,
+      platform: r.platform,
+      modelId: r.model_id,
+      error: r.error,
+      latencyMs: r.latency_ms,
+      createdAt: r.created_at,
+    })),
+  );
 });
 
 // Hourly productivity buckets (local time-of-day, 0-23). Zero-filled so the
 // chart always renders a full 24-bar axis per range. "Productivity" here is
 // latency-focused: lower avg response time + higher tok/s + lower error rate
 // = a more productive hour for the router.
-analyticsRouter.get('/hourly', (req: Request, res: Response) => {
-  const range = normalizeAnalyticsRange((req.query.range as string) ?? '24h');
+analyticsRouter.get("/hourly", (req: Request, res: Response) => {
+  const range = normalizeAnalyticsRange((req.query.range as string) ?? "24h");
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -624,7 +711,7 @@ analyticsRouter.get('/hourly', (req: Request, res: Response) => {
     return res.json(zeros);
   }
 
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
   // `created_at` is stored as UTC in SQLite. Convert to a datetime, then to
@@ -632,7 +719,8 @@ analyticsRouter.get('/hourly', (req: Request, res: Response) => {
   // we group by the UTC hour-of-day. The client re-buckets into the user's
   // local timezone by applying their current UTC offset — this keeps the
   // server stateless and avoids shipping tz data.
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(`
     SELECT
       CAST(strftime('%H', r.created_at) AS INTEGER) as hour,
       COUNT(*) as requests,
@@ -651,7 +739,8 @@ analyticsRouter.get('/hourly', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY strftime('%H', r.created_at)
     ORDER BY hour ASC
-  `).all(since, ...pf.params) as Array<{
+  `)
+    .all(since, ...pf.params) as Array<{
     hour: number;
     requests: number;
     avg_latency_ms: number;
@@ -682,20 +771,21 @@ analyticsRouter.get('/hourly', (req: Request, res: Response) => {
 // Per-model hourly productivity breakdown. Returns all models that have any
 // activity in the range, with per-UTC-hour zero-filled 24-bucket stats the
 // client can render in a vertical single-model chart.
-analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
-  const range = normalizeAnalyticsRange((req.query.range as string) ?? '24h');
+analyticsRouter.get("/hourly-by-model", (req: Request, res: Response) => {
+  const range = normalizeAnalyticsRange((req.query.range as string) ?? "24h");
   const since = getSinceTimestamp(range);
   const db = getDb();
 
   const active = getActivePlatforms(db);
   if (active.length === 0) return res.json({ models: [] });
-  const pf = buildPlatformFilter(active, 'r');
+  const pf = buildPlatformFilter(active, "r");
   const mf = buildModelEnabledFilter();
 
   // Only consider models that have served at least one request in the
   // current range. Top 20 — narrows the tab strip and keeps the payload
   // reasonable.
-  const modelRows = db.prepare(`
+  const modelRows = db
+    .prepare(`
     SELECT
       r.platform,
       r.model_id,
@@ -710,7 +800,8 @@ analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
     HAVING COUNT(*) > 0
     ORDER BY total_requests DESC
     LIMIT 20
-  `).all(since, ...pf.params) as Array<{
+  `)
+    .all(since, ...pf.params) as Array<{
     platform: string;
     model_id: string;
     display_name: string | null;
@@ -719,9 +810,10 @@ analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
 
   if (modelRows.length === 0) return res.json({ models: [] });
 
-  const pf2 = buildPlatformFilter(active, 'r');
+  const pf2 = buildPlatformFilter(active, "r");
 
-  const hourlyRows = db.prepare(`
+  const hourlyRows = db
+    .prepare(`
     SELECT
       r.platform,
       r.model_id,
@@ -742,7 +834,8 @@ analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
       ${mf.whereSql}
     GROUP BY r.platform, r.model_id, strftime('%H', r.created_at)
     ORDER BY r.platform ASC, r.model_id ASC
-  `).all(since, ...pf2.params) as Array<{
+  `)
+    .all(since, ...pf2.params) as Array<{
     platform: string;
     model_id: string;
     hour: number;
@@ -753,7 +846,10 @@ analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
   }>;
 
   // Index hourly rows by platform\0modelId → hour → row
-  const hourlyIndex = new Map<string, Map<number, (typeof hourlyRows)[number]>>();
+  const hourlyIndex = new Map<
+    string,
+    Map<number, (typeof hourlyRows)[number]>
+  >();
   for (const h of hourlyRows) {
     const k = `${h.platform} ${h.model_id}`;
     let perModel = hourlyIndex.get(k);
@@ -784,8 +880,7 @@ analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
         avgLatencyMs: Math.round(r?.avg_latency_ms ?? 0),
         avgTokPerSec: Number((r?.avg_tok_per_sec ?? 0).toFixed(1)),
         errorRate: Math.round(errorRate * 10) / 10,
-        successRate:
-          requests > 0 ? Math.round((100 - errorRate) * 10) / 10 : 0,
+        successRate: requests > 0 ? Math.round((100 - errorRate) * 10) / 10 : 0,
       };
     });
     return {
@@ -804,8 +899,8 @@ analyticsRouter.get('/hourly-by-model', (req: Request, res: Response) => {
 // overlay. Cheap "hi" pings fire all day — even when you're asleep — so use
 // this to fill the off-hours baseline rather than treating missing hours as
 // "perfect".
-analyticsRouter.get('/pings-hourly', (req: Request, res: Response) => {
-  const range = normalizeAnalyticsRange((req.query.range as string) ?? '24h');
+analyticsRouter.get("/pings-hourly", (req: Request, res: Response) => {
+  const range = normalizeAnalyticsRange((req.query.range as string) ?? "24h");
   const since = getSinceTimestamp(range);
   const db = getDb();
 
@@ -820,9 +915,10 @@ analyticsRouter.get('/pings-hourly', (req: Request, res: Response) => {
     }));
     return res.json(zeros);
   }
-  const pf = buildPlatformFilter(active, '');
+  const pf = buildPlatformFilter(active, "");
 
-  const rows = db.prepare(`
+  const rows = db
+    .prepare(`
     SELECT
       CAST(strftime('%H', ph.created_at) AS INTEGER) as hour,
       COUNT(*) as requests,
@@ -833,7 +929,8 @@ analyticsRouter.get('/pings-hourly', (req: Request, res: Response) => {
       ${pf.sql}
     GROUP BY strftime('%H', ph.created_at)
     ORDER BY hour ASC
-  `).all(since, ...pf.params) as Array<{
+  `)
+    .all(since, ...pf.params) as Array<{
     hour: number;
     requests: number;
     avg_latency_ms: number;

@@ -985,6 +985,541 @@ function pinnedModelExhaustedError(): Error {
   return err;
 }
 
+/**
+ * Resolve a valid key for a flat-chain entry, decrypt it, gate it through
+ * the provider's parallel-request cap, and build a RouteResult. Returns null
+ * if no key or slot is available (caller falls through to the next model).
+ */
+function tryRouteFlatEntry(
+  db: Database,
+  entry: ChainRow,
+  skipKeys: Set<string> | undefined,
+  keyAffinityEnabled: boolean,
+  providerStickyEnabled: boolean,
+  options: RouteOptions | undefined,
+): RouteResult | null {
+  const rrKey = `${entry.platform}:${entry.model_id}`;
+
+  const keys = db
+    .prepare(
+      "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
+    )
+    .all(entry.platform) as KeyRow[];
+
+  if (keys.length === 0) return null;
+  const useKeyAffinity =
+    (keyAffinityEnabled ||
+      (providerStickyEnabled && options?.stickySessionKey)) &&
+    options?.stickySessionKey;
+
+  const heartbeatEnabled = isHeartbeatEnabled();
+  const healthyKeys = keys.filter((k) => isKeyHealthy(k.id, entry.model_id));
+  if (heartbeatEnabled && healthyKeys.length === 0) return null;
+
+  const unhealthyKeys = heartbeatEnabled
+    ? []
+    : keys.filter((k) => !isKeyHealthy(k.id, entry.model_id));
+
+  let keyOrder: KeyRow[];
+  let idx: number;
+  let rrIdx = 0;
+  if (useKeyAffinity) {
+    keyOrder = [...healthyKeys, ...unhealthyKeys];
+    const hash = crypto
+      .createHash("sha1")
+      .update(options!.stickySessionKey!)
+      .digest();
+    const hashInt = hash.readUInt32BE(0);
+    idx = hashInt % keyOrder.length;
+  } else {
+    rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+    const orderedHealthyKeys = heartbeatEnabled
+      ? speedWeightedShuffle(healthyKeys, entry.model_id, entry.platform)
+      : rotateArray(healthyKeys, rrIdx);
+    keyOrder = [...orderedHealthyKeys, ...rotateArray(unhealthyKeys, rrIdx)];
+    idx = 0;
+  }
+
+  for (let attempt = 0; attempt < keyOrder.length; attempt++) {
+    const actualIdx = useKeyAffinity
+      ? (idx + attempt) % keyOrder.length
+      : attempt;
+    const key = keyOrder[actualIdx];
+
+    const fullSkipId = `${entry.platform}:${entry.model_id}:${key.id}`;
+    if (skipKeys?.has(fullSkipId)) continue;
+    if (isExhausted(key.id, entry.model_id)) continue;
+
+    if (!useKeyAffinity) {
+      roundRobinIndex.set(rrKey, rrIdx + attempt + 1);
+    }
+
+    const cp = db
+      .prepare(
+        "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
+      )
+      .get(entry.platform) as
+      | { max_parallel_requests: number | null }
+      | undefined;
+    const maxPar = cp?.max_parallel_requests ?? null;
+    if (!tryReserveSlot(entry.platform, maxPar)) continue;
+
+    let decryptedKey: string;
+    try {
+      decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
+    } catch {
+      db.prepare(
+        "UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?",
+      ).run(key.id);
+      releaseSlot(entry.platform);
+      continue;
+    }
+
+    const release = () => releaseSlot(entry.platform);
+
+    if (useKeyAffinity) {
+      console.log(
+        `[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`,
+      );
+      publish({
+        type: "routing.key_affinity_selected",
+        id: "",
+        sessionKey: options!.stickySessionKey!.slice(0, 8),
+        keyId: key.id,
+        model: entry.model_id,
+        at: Date.now(),
+      });
+    }
+
+    return {
+      provider: buildProviderFor(entry.platform)!,
+      modelId: entry.model_id,
+      modelDbId: entry.model_db_id,
+      apiKey: decryptedKey,
+      keyId: key.id,
+      platform: entry.platform,
+      displayName: entry.display_name,
+      rpdLimit: entry.rpd_limit,
+      tpdLimit: entry.tpd_limit,
+      maxOutputTokens: entry.max_output_tokens,
+      release,
+      useProxy: key.use_proxy === 1,
+      transportId: transportIdFromUseProxy(key.use_proxy === 1),
+    };
+  }
+
+  if (!useKeyAffinity) {
+    roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
+  }
+  return null;
+}
+
+/**
+ * Resolve a flat-chain (non-grouped) route. Loops the ordered chain, checks
+ * vision/tools/context guards, and calls tryRouteFlatEntry for each model.
+ */
+function routeFlat(
+  db: Database,
+  chain: ChainRow[],
+  strategy: RoutingStrategy,
+  estimatedTokens: number,
+  skipKeys: Set<string> | undefined,
+  preferredModelDbId: number | undefined,
+  requireVision: boolean,
+  requireTools: boolean,
+  skipModels: Set<number> | undefined,
+  options: RouteOptions | undefined,
+): RouteResult {
+  const sortedChain = orderChain(chain, strategy);
+
+  if (preferredModelDbId) {
+    const idx = sortedChain.findIndex(
+      (e) => e.model_db_id === preferredModelDbId,
+    );
+    if (idx > 0) {
+      const [preferred] = sortedChain.splice(idx, 1);
+      sortedChain.unshift(preferred);
+    }
+  }
+
+  const pinMode = options?.pinMode ?? false;
+  const keyAffinityEnabled = getFeatureSetting(
+    "key_affinity_enabled",
+  ) as boolean;
+
+  for (const entry of sortedChain) {
+    if (skipModels?.has(entry.model_db_id)) continue;
+    if (requireVision && !entry.supports_vision) continue;
+    if (requireTools && !entry.supports_tools) continue;
+    if (entry.context_window != null && estimatedTokens > entry.context_window)
+      continue;
+    if (entry.tpm_limit != null && estimatedTokens > entry.tpm_limit) continue;
+
+    const provider = buildProviderFor(entry.platform);
+    if (!provider) continue;
+
+    let providerStickyEnabled = false;
+    if (!keyAffinityEnabled) {
+      const stickyRow = db
+        .prepare(
+          "SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?",
+        )
+        .get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
+      providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
+    }
+
+    const result = tryRouteFlatEntry(
+      db,
+      entry,
+      skipKeys,
+      keyAffinityEnabled,
+      providerStickyEnabled,
+      options,
+    );
+    if (result) return result;
+
+    // In pin mode, no available keys for the pinned model means exhausted.
+    if (
+      pinMode &&
+      preferredModelDbId &&
+      entry.model_db_id === preferredModelDbId
+    ) {
+      throw pinnedModelExhaustedError();
+    }
+  }
+
+  const err = new Error(
+    "All models exhausted. Add more API keys or check provider status.",
+  ) as any;
+  err.status = 429;
+  throw err;
+}
+
+/**
+ * Resolve a grouped route. Loads the group chain and all providers in bulk,
+ * walks each group scored by quality, then per-provider iterates its keys.
+ */
+function routeGroupAware(
+  db: Database,
+  strategy: RoutingStrategy,
+  estimatedTokens: number,
+  skipKeys: Set<string> | undefined,
+  preferredModelDbId: number | undefined,
+  requireVision: boolean,
+  requireTools: boolean,
+  skipModels: Set<number> | undefined,
+  options: RouteOptions | undefined,
+): RouteResult {
+  const groupChain = db
+    .prepare(`
+    SELECT fc.group_id, fc.priority, fc.enabled,
+           mg.group_key, mg.display_name, mg.benchmark_score,
+           mg.intelligence_rank, mg.size_label, mg.context_window,
+           mg.max_output_tokens, mg.supports_vision, mg.supports_tools
+    FROM fallback_config fc
+    JOIN model_groups mg ON mg.id = fc.group_id
+    WHERE fc.enabled = 1 AND mg.enabled = 1
+  `)
+    .all() as GroupChainRow[];
+
+  const allGroupIds = groupChain.map((g) => g.group_id);
+  let allProviders: ProviderRow[] = [];
+  if (allGroupIds.length > 0) {
+    const placeholders = allGroupIds.map(() => "?").join(", ");
+    allProviders = db
+      .prepare(`
+      SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
+             m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
+             m.key_id, m.enabled, m.supports_vision, m.supports_tools,
+             m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
+             m.max_output_tokens
+      FROM models m
+      WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
+    `)
+      .all(...allGroupIds) as ProviderRow[];
+  }
+
+  const providersByGroup = new Map<number, ProviderRow[]>();
+  for (const provider of allProviders) {
+    const providers = providersByGroup.get(provider.group_id);
+    if (providers) providers.push(provider);
+    else providersByGroup.set(provider.group_id, [provider]);
+  }
+
+  const speedComposites = allProviders.map((p) =>
+    speedCompositeFromRank(p.speed_rank, p.size_label),
+  );
+  const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
+  const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
+
+  const latencyComposites = allProviders.map((p) =>
+    latencyCompositeFromSize(p.size_label),
+  );
+  const latencyMin = latencyComposites.length
+    ? Math.min(...latencyComposites)
+    : 0;
+  const latencyMax = latencyComposites.length
+    ? Math.max(...latencyComposites)
+    : 0;
+
+  const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+  const sortedGroupChain = orderGroupChain(
+    groupChain,
+    strategy,
+    providersByGroup,
+    weights,
+    speedMin,
+    speedMax,
+    latencyMin,
+    latencyMax,
+    true,
+  );
+  const pinMode = options?.pinMode ?? false;
+
+  let preferredGroupId = options?.preferredGroupId;
+  if (preferredGroupId == null && preferredModelDbId) {
+    const prefGroupRow = db
+      .prepare("SELECT group_id FROM models WHERE id = ?")
+      .get(preferredModelDbId) as { group_id: number | null } | undefined;
+    preferredGroupId = prefGroupRow?.group_id ?? undefined;
+  }
+  if (preferredGroupId != null) {
+    const idx = sortedGroupChain.findIndex(
+      (g) => g.group_id === preferredGroupId,
+    );
+    if (idx > 0) {
+      const [preferred] = sortedGroupChain.splice(idx, 1);
+      sortedGroupChain.unshift(preferred);
+    } else if (idx < 0 && pinMode) {
+      throw pinnedModelExhaustedError();
+    }
+  }
+  const routeGroupChain =
+    pinMode && preferredGroupId != null
+      ? sortedGroupChain.filter((g) => g.group_id === preferredGroupId)
+      : sortedGroupChain;
+  if (pinMode && preferredGroupId != null && routeGroupChain.length === 0) {
+    throw pinnedModelExhaustedError();
+  }
+
+  const keyAffinityEnabled = getFeatureSetting(
+    "key_affinity_enabled",
+  ) as boolean;
+
+  for (const group of routeGroupChain) {
+    const isPreferredGroup =
+      preferredGroupId != null && group.group_id === preferredGroupId;
+    if (requireVision && !group.supports_vision) {
+      if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+      continue;
+    }
+    if (requireTools && !group.supports_tools) {
+      if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+      continue;
+    }
+    if (
+      group.context_window != null &&
+      estimatedTokens > group.context_window
+    ) {
+      if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+      continue;
+    }
+
+    const providers = providersByGroup.get(group.group_id) ?? [];
+    if (providers.length === 0) {
+      if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+      continue;
+    }
+
+    const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+    const providersScored = providers
+      .map((p) => {
+        const { subScore } = providerSubScore(
+          p,
+          weightsForSub,
+          speedMin,
+          speedMax,
+          latencyMin,
+          latencyMax,
+          true,
+        );
+        return { p, subScore };
+      })
+      .sort(
+        (a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank,
+      );
+
+    for (const { p: provider } of providersScored) {
+      if (skipModels?.has(provider.model_db_id)) continue;
+
+      const prov = buildProviderFor(provider.platform);
+      if (!prov) continue;
+
+      let providerStickyEnabled = false;
+      if (!keyAffinityEnabled) {
+        const stickyRow = db
+          .prepare(
+            "SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?",
+          )
+          .get(provider.platform) as
+          | { sticky_sessions_enabled: number }
+          | undefined;
+        providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
+      }
+
+      const result = tryRouteGroupProvider(
+        db,
+        provider,
+        skipKeys,
+        keyAffinityEnabled,
+        providerStickyEnabled,
+        options,
+      );
+      if (result) {
+        return { ...result, groupId: group.group_id };
+      }
+
+      const rrKey = `${provider.platform}:${provider.model_id}`;
+      roundRobinIndex.set(rrKey, (roundRobinIndex.get(rrKey) ?? 0) + 1);
+    }
+    if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
+  }
+
+  const err = new Error(
+    "All models exhausted. Add more API keys or check provider status.",
+  ) as any;
+  err.status = 429;
+  throw err;
+}
+
+/**
+ * Try to reserve a key for a single grouped provider. Returns a RouteResult
+ * on success, null otherwise (caller moves to the next provider).
+ */
+function tryRouteGroupProvider(
+  db: Database,
+  provider: ProviderRow,
+  skipKeys: Set<string> | undefined,
+  keyAffinityEnabled: boolean,
+  providerStickyEnabled: boolean,
+  options: RouteOptions | undefined,
+): RouteResult | null {
+  const keys = db
+    .prepare(
+      "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
+    )
+    .all(provider.platform) as KeyRow[];
+
+  if (keys.length === 0) return null;
+
+  const heartbeatEnabled = isHeartbeatEnabled();
+  const healthyKeys = keys.filter((k) => isKeyHealthy(k.id, provider.model_id));
+  if (heartbeatEnabled && healthyKeys.length === 0) return null;
+
+  const unhealthyKeys = heartbeatEnabled
+    ? []
+    : keys.filter((k) => !isKeyHealthy(k.id, provider.model_id));
+
+  const rrKey = `${provider.platform}:${provider.model_id}`;
+  const useKeyAffinity =
+    (keyAffinityEnabled ||
+      (providerStickyEnabled && options?.stickySessionKey)) &&
+    options?.stickySessionKey;
+
+  let keyOrder: KeyRow[];
+  let idx: number;
+  let rrIdx = 0;
+  if (useKeyAffinity) {
+    keyOrder = [...healthyKeys, ...unhealthyKeys];
+    const hash = crypto
+      .createHash("sha1")
+      .update(options!.stickySessionKey!)
+      .digest();
+    const hashInt = hash.readUInt32BE(0);
+    idx = hashInt % keyOrder.length;
+  } else {
+    rrIdx = roundRobinIndex.get(rrKey) ?? 0;
+    const orderedHealthyKeys = heartbeatEnabled
+      ? speedWeightedShuffle(healthyKeys, provider.model_id, provider.platform)
+      : rotateArray(healthyKeys, rrIdx);
+    keyOrder = [...orderedHealthyKeys, ...rotateArray(unhealthyKeys, rrIdx)];
+    idx = 0;
+  }
+
+  for (let attempt = 0; attempt < keyOrder.length; attempt++) {
+    const actualIdx = useKeyAffinity
+      ? (idx + attempt) % keyOrder.length
+      : attempt;
+    const key = keyOrder[actualIdx];
+
+    const skipId = `${provider.platform}:${provider.model_id}:${key.id}`;
+    if (skipKeys?.has(skipId)) continue;
+    if (isExhausted(key.id, provider.model_id)) continue;
+
+    if (!useKeyAffinity) {
+      roundRobinIndex.set(rrKey, rrIdx + attempt + 1);
+    }
+
+    const cp = db
+      .prepare(
+        "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
+      )
+      .get(provider.platform) as
+      | { max_parallel_requests: number | null }
+      | undefined;
+    const maxPar = cp?.max_parallel_requests ?? null;
+    if (!tryReserveSlot(provider.platform, maxPar)) continue;
+
+    let decryptedKey: string;
+    try {
+      decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
+    } catch {
+      db.prepare(
+        "UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?",
+      ).run(key.id);
+      releaseSlot(provider.platform);
+      continue;
+    }
+
+    const release = () => releaseSlot(provider.platform);
+
+    if (useKeyAffinity) {
+      console.log(
+        `[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`,
+      );
+      publish({
+        type: "routing.key_affinity_selected",
+        id: "",
+        sessionKey: options!.stickySessionKey!.slice(0, 8),
+        keyId: key.id,
+        model: provider.model_id,
+        at: Date.now(),
+      });
+    }
+
+    return {
+      provider: buildProviderFor(provider.platform)!,
+      modelId: provider.model_id,
+      modelDbId: provider.model_db_id,
+      apiKey: decryptedKey,
+      keyId: key.id,
+      platform: provider.platform,
+      displayName: provider.display_name,
+      rpdLimit: provider.rpd_limit,
+      tpdLimit: provider.tpd_limit,
+      maxOutputTokens: provider.max_output_tokens,
+      release,
+      useProxy: key.use_proxy === 1,
+      transportId: transportIdFromUseProxy(key.use_proxy === 1),
+    };
+  }
+
+  if (!useKeyAffinity) {
+    roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
+  }
+  return null;
+}
+
 export function routeRequest(
   estimatedTokens = 1000,
   skipKeys?: Set<string>,
@@ -995,328 +1530,26 @@ export function routeRequest(
   options?: RouteOptions,
 ): RouteResult {
   const db = getDb();
-
   const strategy = getRoutingStrategy();
-  if (strategy !== "priority") refreshStatsCache(db);
-
-  // –– GROUP-AWARE ROUTING –––––––––––––––––––––––––––––––––––––––––––––––––
-  const groupingEnabled = getSetting("model_grouping_enabled") === "true";
-  if (groupingEnabled) {
-    // Query the group chain: fallback_config JOIN model_groups
-    const groupChain = db
-      .prepare(`
-      SELECT fc.group_id, fc.priority, fc.enabled,
-             mg.group_key, mg.display_name, mg.benchmark_score,
-             mg.intelligence_rank, mg.size_label, mg.context_window,
-             mg.max_output_tokens, mg.supports_vision, mg.supports_tools
-      FROM fallback_config fc
-      JOIN model_groups mg ON mg.id = fc.group_id
-      WHERE fc.enabled = 1 AND mg.enabled = 1
-    `)
-      .all() as GroupChainRow[];
-
-    // Pre-compute normalization ranges for provider sub-scoring
-    // Load providers once and group them in memory to avoid N+1 queries on the
-    // API hot path.
-    const allGroupIds = groupChain.map((g) => g.group_id);
-    let allProviders: ProviderRow[] = [];
-    if (allGroupIds.length > 0) {
-      const placeholders = allGroupIds.map(() => "?").join(", ");
-      allProviders = db
-        .prepare(`
-        SELECT m.id as model_db_id, m.group_id, m.platform, m.model_id, m.display_name,
-               m.speed_rank, m.rpm_limit, m.rpd_limit, m.tpm_limit, m.tpd_limit,
-               m.key_id, m.enabled, m.supports_vision, m.supports_tools,
-               m.context_window, m.benchmark_score, m.intelligence_rank, m.size_label,
-               m.max_output_tokens
-        FROM models m
-        WHERE m.group_id IN (${placeholders}) AND m.enabled = 1
-      `)
-        .all(...allGroupIds) as ProviderRow[];
-    }
-    const providersByGroup = new Map<number, ProviderRow[]>();
-    for (const provider of allProviders) {
-      const providers = providersByGroup.get(provider.group_id);
-      if (providers) providers.push(provider);
-      else providersByGroup.set(provider.group_id, [provider]);
-    }
-
-    // Compute min/max for speed/latency normalization across all providers
-    const speedComposites = allProviders.map((p) =>
-      speedCompositeFromRank(p.speed_rank, p.size_label),
-    );
-    const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
-    const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
-
-    const latencyComposites = allProviders.map((p) =>
-      latencyCompositeFromSize(p.size_label),
-    );
-    const latencyMin = latencyComposites.length
-      ? Math.min(...latencyComposites)
-      : 0;
-    const latencyMax = latencyComposites.length
-      ? Math.max(...latencyComposites)
-      : 0;
-
-    const weights = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-    const sortedGroupChain = orderGroupChain(
-      groupChain,
-      strategy,
-      providersByGroup,
-      weights,
-      speedMin,
-      speedMax,
-      latencyMin,
-      latencyMax,
-      true,
-    );
-    const pinMode = options?.pinMode ?? false;
-
-    // Sticky/group pinning: move the preferred group to the front. Explicit
-    // group pins take precedence; deriving from preferredModelDbId preserves
-    // sticky-session compatibility for older callers.
-    let preferredGroupId = options?.preferredGroupId;
-    if (preferredGroupId == null && preferredModelDbId) {
-      // Find which group contains the preferred model
-      const prefGroupRow = db
-        .prepare("SELECT group_id FROM models WHERE id = ?")
-        .get(preferredModelDbId) as { group_id: number | null } | undefined;
-      preferredGroupId = prefGroupRow?.group_id ?? undefined;
-    }
-    if (preferredGroupId != null) {
-      const idx = sortedGroupChain.findIndex(
-        (g) => g.group_id === preferredGroupId,
-      );
-      if (idx > 0) {
-        const [preferred] = sortedGroupChain.splice(idx, 1);
-        sortedGroupChain.unshift(preferred);
-      } else if (idx < 0 && pinMode) {
-        throw pinnedModelExhaustedError();
-      }
-    }
-    const routeGroupChain =
-      pinMode && preferredGroupId != null
-        ? sortedGroupChain.filter((g) => g.group_id === preferredGroupId)
-        : sortedGroupChain;
-    if (pinMode && preferredGroupId != null && routeGroupChain.length === 0) {
-      throw pinnedModelExhaustedError();
-    }
-
-    for (const group of routeGroupChain) {
-      const isPreferredGroup =
-        preferredGroupId != null && group.group_id === preferredGroupId;
-      // Filter by vision/tools/context at the GROUP level
-      if (requireVision && !group.supports_vision) {
-        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
-        continue;
-      }
-      if (requireTools && !group.supports_tools) {
-        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
-        continue;
-      }
-      if (
-        group.context_window != null &&
-        estimatedTokens > group.context_window
-      ) {
-        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
-        continue;
-      }
-
-      const providers = providersByGroup.get(group.group_id) ?? [];
-
-      if (providers.length === 0) {
-        if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
-        continue;
-      }
-
-      // Score and sort providers within this group
-      const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
-      const providersScored = providers
-        .map((p) => {
-          const { subScore, axes } = providerSubScore(
-            p,
-            weightsForSub,
-            speedMin,
-            speedMax,
-            latencyMin,
-            latencyMax,
-            true,
-          );
-          return { p, subScore, axes };
-        })
-        .sort(
-          (a, b) => b.subScore - a.subScore || a.p.speed_rank - b.p.speed_rank,
-        );
-
-      for (const { p: provider } of providersScored) {
-        // Models the caller has ruled out for this request
-        if (skipModels?.has(provider.model_db_id)) continue;
-
-        // Same provider/key resolution as flat chain
-        const prov = buildProviderFor(provider.platform);
-        if (!prov) continue;
-
-        const keys = db
-          .prepare(
-            "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
-          )
-          .all(provider.platform) as KeyRow[];
-
-        if (keys.length === 0) {
-          continue;
-        }
-
-        // Key health filtering
-        const heartbeatEnabled = isHeartbeatEnabled();
-        const healthyKeys = keys.filter((k) =>
-          isKeyHealthy(k.id, provider.model_id),
-        );
-
-        if (heartbeatEnabled && healthyKeys.length === 0) {
-          continue;
-        }
-
-        const unhealthyKeys = heartbeatEnabled
-          ? []
-          : keys.filter((k) => !isKeyHealthy(k.id, provider.model_id));
-
-        // Key ordering
-        const rrKey = `${provider.platform}:${provider.model_id}`;
-        const keyAffinityEnabled = getFeatureSetting(
-          "key_affinity_enabled",
-        ) as boolean;
-        let providerStickyEnabled = false;
-        if (!keyAffinityEnabled) {
-          const stickyRow = db
-            .prepare(
-              "SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?",
-            )
-            .get(provider.platform) as
-            | { sticky_sessions_enabled: number }
-            | undefined;
-          providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
-        }
-        const useKeyAffinity =
-          (keyAffinityEnabled ||
-            (providerStickyEnabled && options?.stickySessionKey)) &&
-          options?.stickySessionKey;
-
-        let keyOrder: KeyRow[];
-        let idx: number;
-        let rrIdx = 0;
-        if (useKeyAffinity) {
-          keyOrder = [...healthyKeys, ...unhealthyKeys];
-          const hash = crypto
-            .createHash("sha1")
-            .update(options!.stickySessionKey!)
-            .digest();
-          const hashInt = hash.readUInt32BE(0);
-          idx = hashInt % keyOrder.length;
-        } else {
-          rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-          // When heartbeat is enabled, shuffle healthy keys by combined token
-          // speed, ping latency, and advisor feedback.
-          const orderedHealthyKeys = heartbeatEnabled
-            ? speedWeightedShuffle(
-                healthyKeys,
-                provider.model_id,
-                provider.platform,
-              )
-            : rotateArray(healthyKeys, rrIdx);
-          keyOrder = [
-            ...orderedHealthyKeys,
-            ...rotateArray(unhealthyKeys, rrIdx),
-          ];
-          idx = 0;
-        }
-
-        for (let attempt = 0; attempt < keyOrder.length; attempt++) {
-          const actualIdx = useKeyAffinity
-            ? (idx + attempt) % keyOrder.length
-            : attempt;
-          const key = keyOrder[actualIdx];
-
-          const skipId = `${provider.platform}:${provider.model_id}:${key.id}`;
-          if (skipKeys?.has(skipId)) continue;
-          if (isExhausted(key.id, provider.model_id)) continue;
-
-          // Parallel request gating
-          const cp = db
-            .prepare(
-              "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
-            )
-            .get(provider.platform) as
-            | { max_parallel_requests: number | null }
-            | undefined;
-          const maxPar = cp?.max_parallel_requests ?? null;
-          if (!tryReserveSlot(provider.platform, maxPar)) continue;
-
-          let decryptedKey: string;
-          try {
-            decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
-          } catch {
-            db.prepare(
-              "UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?",
-            ).run(key.id);
-            releaseSlot(provider.platform);
-            continue;
-          }
-
-          const release = () => releaseSlot(provider.platform);
-
-          if (useKeyAffinity) {
-            console.log(
-              `[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`,
-            );
-            publish({
-              type: "routing.key_affinity_selected",
-              id: "",
-              sessionKey: options!.stickySessionKey!.slice(0, 8),
-              keyId: key.id,
-              model: provider.model_id,
-              at: Date.now(),
-            });
-          }
-
-          return {
-            provider: prov,
-            modelId: provider.model_id,
-            modelDbId: provider.model_db_id,
-            apiKey: decryptedKey,
-            keyId: key.id,
-            platform: provider.platform,
-            displayName: provider.display_name,
-            rpdLimit: provider.rpd_limit,
-            tpdLimit: provider.tpd_limit,
-            maxOutputTokens: provider.max_output_tokens,
-            release,
-            useProxy: key.use_proxy === 1,
-            transportId: transportIdFromUseProxy(key.use_proxy === 1),
-            groupId: group.group_id,
-          };
-        }
-
-        // If we reach here, this provider has NO available keys.
-        if (!useKeyAffinity) {
-          roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
-        }
-      }
-      // If we reach here, all providers in this group are exhausted. In pin
-      // mode, the preferred group is the full allowed surface; otherwise try
-      // the next group in the fallback chain.
-      if (pinMode && isPreferredGroup) throw pinnedModelExhaustedError();
-    }
-
-    // All groups exhausted
-    const err = new Error(
-      "All models exhausted. Add more API keys or check provider status.",
-    ) as any;
-    err.status = 429;
-    throw err;
+  if (strategy !== "priority") {
+    refreshStatsCache(db);
   }
 
-  // –– FLAT CHAIN (LEGACY) –––––––––––––––––––––––––––––––––––––––––––––––––––
-  // Get the enabled fallback chain joined with the fields the scorer needs.
+  const groupingEnabled = getSetting("model_grouping_enabled") === "true";
+  if (groupingEnabled) {
+    return routeGroupAware(
+      db,
+      strategy,
+      estimatedTokens,
+      skipKeys,
+      preferredModelDbId,
+      requireVision,
+      requireTools,
+      skipModels,
+      options,
+    );
+  }
+
   const chain = db
     .prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
@@ -1331,290 +1564,18 @@ export function routeRequest(
   `)
     .all() as ChainRow[];
 
-  const sortedChain = orderChain(chain, strategy);
-
-  // Sticky session: move preferred model to front of chain
-  if (preferredModelDbId) {
-    const idx = sortedChain.findIndex(
-      (e) => e.model_db_id === preferredModelDbId,
-    );
-    if (idx > 0) {
-      const [preferred] = sortedChain.splice(idx, 1);
-      sortedChain.unshift(preferred);
-    }
-  }
-
-  const pinMode = options?.pinMode ?? false;
-
-  for (const entry of sortedChain) {
-    // Models the caller has ruled out for this request — e.g. a 404
-    // "model removed upstream" already seen this request: trying the same
-    // model again on a different key would just burn another attempt on the
-    // same dead route (PR #111, credits @barbotkonv).
-    if (skipModels?.has(entry.model_db_id)) continue;
-
-    // Vision requests skip text-only models — including a sticky/preferred one,
-    // which is correct: don't pin an image turn to a model that can't see it.
-    if (requireVision && !entry.supports_vision) continue;
-
-    // Tool-bearing requests skip models that can't emit structured tool_calls.
-    // A model that "answers" a tool request with the call serialized as text
-    // looks successful at the transport level while the client's harness sees
-    // nothing — worse than a failover. Applies to sticky models too, same
-    // reasoning as vision above.
-    if (requireTools && !entry.supports_tools) continue;
-
-    // Context-aware routing: skip a model whose context window can't hold the
-    // request, so a large prompt never selects a small-context model and burns
-    // a failover hop on a 413 "request too large" (#167). Only enforced when we
-    // know the model's window; estimatedTokens already includes the reserved
-    // output (max_tokens), so this is the total-context check the model must
-    // satisfy. A 413 that slips through is still retryable downstream, and the
-    // failed model is put on cooldown — so this is a fast-path, not the only
-    // guard. If every model is too small, the loop falls through and the caller
-    // gets the normal "all models exhausted" error rather than a wasted sweep.
-    if (entry.context_window != null && estimatedTokens > entry.context_window)
-      continue;
-
-    // Same guard for a model with a small per-minute token budget: a single
-    // request that alone exceeds tpm_limit can never fit one minute of quota and
-    // returns a guaranteed 413 (e.g. Groq gpt-oss-120b: 131k context but 8k TPM).
-    // estimatedTokens already includes reserved output, mirroring the check above.
-    if (entry.tpm_limit != null && estimatedTokens > entry.tpm_limit) continue;
-
-    // Resolve the provider for this platform. Built-in platforms return their
-    // registered singleton; custom slugs look up their base URL from
-    // custom_providers. If neither resolves (e.g. the custom provider row
-    // was deleted), skip the model.
-    const provider = buildProviderFor(entry.platform);
-    if (!provider) continue;
-    // Get enabled keys that have not already failed validation or decryption.
-    const keys = db
-      .prepare(
-        "SELECT * FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown', 'error')",
-      )
-      .all(entry.platform) as KeyRow[];
-
-    if (keys.length === 0) {
-      if (
-        pinMode &&
-        preferredModelDbId &&
-        entry.model_db_id === preferredModelDbId
-      ) {
-        const pinErr = new Error(
-          "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
-        ) as any;
-        pinErr.code = "PINNED_MODEL_EXHAUSTED";
-        pinErr.status = 429;
-        throw pinErr;
-      }
-      continue;
-    }
-
-    // Get limits once for this model
-    const limits = {
-      rpm: entry.rpm_limit,
-      rpd: entry.rpd_limit,
-      tpm: entry.tpm_limit,
-      tpd: entry.tpd_limit,
-    };
-
-    // Try all keys for this model before giving up on it.
-    const rrKey = `${entry.platform}:${entry.model_id}`;
-    const keyAffinityEnabled = getFeatureSetting(
-      "key_affinity_enabled",
-    ) as boolean;
-    // Backward compat: when global key affinity is off, fall back to per-provider
-    // sticky_sessions_enabled column for custom providers.
-    let providerStickyEnabled = false;
-    if (!keyAffinityEnabled) {
-      const stickyRow = db
-        .prepare(
-          "SELECT sticky_sessions_enabled FROM custom_providers WHERE slug = ?",
-        )
-        .get(entry.platform) as { sticky_sessions_enabled: number } | undefined;
-      providerStickyEnabled = stickyRow?.sticky_sessions_enabled === 1;
-    }
-    const useKeyAffinity =
-      (keyAffinityEnabled ||
-        (providerStickyEnabled && options?.stickySessionKey)) &&
-      options?.stickySessionKey; // Only use affinity if we have a valid session key
-
-    // ── Key health filtering ──
-    // When the heartbeat is enabled, only keys that have been prewarmed
-    // and confirmed healthy by heartbeat pings are eligible for routing.
-    // Cold keys (never pinged) and unhealthy keys (failed pings) are
-    // excluded — they must first pass a heartbeat cycle to prove health.
-    // When heartbeat is disabled, all keys are usable (backward compat).
-    const heartbeatEnabled = isHeartbeatEnabled();
-    const healthyKeys = keys.filter((k) => isKeyHealthy(k.id, entry.model_id));
-
-    if (heartbeatEnabled && healthyKeys.length === 0) {
-      // No prewarmed healthy keys for this model — skip to the next model.
-      // In pin mode, throw immediately instead of falling through silently.
-      if (
-        pinMode &&
-        preferredModelDbId &&
-        entry.model_db_id === preferredModelDbId
-      ) {
-        const pinErr = new Error(
-          "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
-        ) as any;
-        pinErr.code = "PINNED_MODEL_EXHAUSTED";
-        pinErr.status = 429;
-        throw pinErr;
-      }
-      continue;
-    }
-
-    // Split keys by health status so healthy keys are ALWAYS tried first,
-    // regardless of round-robin offset. Apply round-robin within each group
-    // independently to maintain fair distribution while respecting health.
-    const unhealthyKeys = heartbeatEnabled
-      ? []
-      : keys.filter((k) => !isKeyHealthy(k.id, entry.model_id));
-
-    // Build the key ordering array and starting index.
-    // For key affinity: concatenate healthy+unhealthy and hash into it.
-    // For round-robin: rotate within each health group independently so
-    // healthy keys are ALWAYS tried first regardless of the offset.
-
-    let keyOrder: KeyRow[];
-    let idx: number;
-    let rrIdx = 0; // For round-robin increment tracking
-    if (useKeyAffinity) {
-      keyOrder = [...healthyKeys, ...unhealthyKeys];
-      const hash = crypto
-        .createHash("sha1")
-        .update(options!.stickySessionKey!)
-        .digest();
-      const hashInt = hash.readUInt32BE(0);
-      idx = hashInt % keyOrder.length;
-    } else {
-      rrIdx = roundRobinIndex.get(rrKey) ?? 0;
-      // When heartbeat is enabled, shuffle healthy keys by combined token
-      // speed, ping latency, and advisor feedback.
-      const orderedHealthyKeys = heartbeatEnabled
-        ? speedWeightedShuffle(healthyKeys, entry.model_id, entry.platform)
-        : rotateArray(healthyKeys, rrIdx);
-      keyOrder = [...orderedHealthyKeys, ...rotateArray(unhealthyKeys, rrIdx)];
-      idx = 0; // start from beginning — healthy-first guaranteed by construction
-    }
-
-    for (let attempt = 0; attempt < keyOrder.length; attempt++) {
-      const actualIdx = useKeyAffinity
-        ? (idx + attempt) % keyOrder.length
-        : attempt;
-      const key = keyOrder[actualIdx];
-
-      const skipId = `${entry.platform}:${entry.model_id}:${key.id}`;
-
-      // skipKeys accumulation gates attempts to avoid
-      // re-hammering the same key within one request sweep.
-      if (skipKeys?.has(skipId)) continue;
-      if (isExhausted(key.id, entry.model_id)) continue;
-
-      // Rate-limit pre-checks removed. Key health is determined by the
-      // heartbeat system (per-key degradation) instead of predictive quota
-      // tracking. The proxy's retry loop + cooldown-on-failure handles any
-      // actual 429s that slip through.
-
-      // provider was already resolved above; if it came back undefined (e.g.
-      // a custom provider row was deleted), we already continued.
-
-      // We found a working key for this model!
-      if (!useKeyAffinity) {
-        roundRobinIndex.set(rrKey, rrIdx + attempt + 1);
-      }
-
-      // ── Parallel request gating (provider-level) ──
-      // Check if this provider has a concurrency cap and try to reserve a slot.
-      const cp = db
-        .prepare(
-          "SELECT max_parallel_requests FROM custom_providers WHERE slug = ?",
-        )
-        .get(entry.platform) as
-        | { max_parallel_requests: number | null }
-        | undefined;
-      const maxPar = cp?.max_parallel_requests ?? null;
-      if (!tryReserveSlot(entry.platform, maxPar)) continue; // at capacity, try next model
-      let decryptedKey: string;
-      try {
-        decryptedKey = decrypt(key.encrypted_key, key.iv, key.auth_tag);
-      } catch {
-        // Decrypt failure is permanent — disable the key so it's never
-        // selected again (Fix 1 includes status='error' in routing).
-        db.prepare(
-          "UPDATE api_keys SET status = 'invalid', enabled = 0, last_checked_at = datetime('now') WHERE id = ?",
-        ).run(key.id);
-        releaseSlot(entry.platform);
-        continue;
-      }
-
-      // Build the release function so callers can decrement the slot.
-      const release = () => releaseSlot(entry.platform);
-
-      if (useKeyAffinity) {
-        console.log(
-          `[Proxy] Key affinity selected key ${key.id} for session ${options!.stickySessionKey!.slice(0, 8)}`,
-        );
-        publish({
-          type: "routing.key_affinity_selected",
-          id: "",
-          sessionKey: options!.stickySessionKey!.slice(0, 8),
-          keyId: key.id,
-          model: entry.model_id,
-          at: Date.now(),
-        });
-      }
-
-      return {
-        provider: provider,
-        modelId: entry.model_id,
-        modelDbId: entry.model_db_id,
-        apiKey: decryptedKey,
-        keyId: key.id,
-        platform: entry.platform,
-        displayName: entry.display_name,
-        rpdLimit: limits.rpd,
-        tpdLimit: limits.tpd,
-        maxOutputTokens: entry.max_output_tokens,
-        release,
-        useProxy: key.use_proxy === 1,
-        transportId: transportIdFromUseProxy(key.use_proxy === 1),
-      };
-    }
-
-    // If we reach here, this specific model has NO available keys.
-    // Update round-robin index even if we failed so we don't get stuck.
-    if (!useKeyAffinity) {
-      roundRobinIndex.set(rrKey, (idx + 1) % keyOrder.length);
-    }
-
-    // In pin mode, don't fall through to the next model.
-    if (
-      pinMode &&
-      preferredModelDbId &&
-      entry.model_db_id === preferredModelDbId
-    ) {
-      const pinErr = new Error(
-        "Pinned model exhausted — all keys for the requested model are rate-limited or on cooldown.",
-      ) as any;
-      pinErr.code = "PINNED_MODEL_EXHAUSTED";
-      pinErr.status = 429;
-      throw pinErr;
-    }
-
-    // We don't explicitly penalize the model here because the fact that we
-    // couldn't find a key means we will naturally move to the next model
-    // in the sortedChain for THIS specific request.
-  }
-
-  const err = new Error(
-    "All models exhausted. Add more API keys or check provider status.",
-  ) as any;
-  err.status = 429;
-  throw err;
+  return routeFlat(
+    db,
+    chain,
+    strategy,
+    estimatedTokens,
+    skipKeys,
+    preferredModelDbId,
+    requireVision,
+    requireTools,
+    skipModels,
+    options,
+  );
 }
 /**
  * Racing mode: return one viable key per distinct model in the fallback chain.

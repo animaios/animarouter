@@ -83,6 +83,225 @@ function resolveProviderBaseUrl(provider: BaseProvider): string {
   );
 }
 
+/** Normalize inbound messages to the strict OpenAI shape. Echo-tolerant:
+ *  missing/empty/null tool_calls, id-less tool calls, object-type arguments,
+ *  null/missing tool message content, and the legacy `function` role. (#200) */
+function buildChatMessages(
+  m: any,
+  pending: string[],
+  synthetic: { n: number },
+): ChatMessage {
+  if (m.role === "assistant") {
+    const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
+    const isEmptyContent =
+      m.content == null ||
+      (typeof m.content === "string" && m.content.length === 0) ||
+      (Array.isArray(m.content) && m.content.length === 0);
+    const assistantContent: ChatMessage["content"] = hasToolCalls
+      ? (m.content ?? null)
+      : isEmptyContent
+        ? ""
+        : m.content!;
+    return {
+      role: "assistant",
+      content: assistantContent,
+      ...(m.name ? { name: m.name } : {}),
+      ...(typeof m.reasoning_content === "string" &&
+      m.reasoning_content.length > 0
+        ? { reasoning_content: m.reasoning_content }
+        : {}),
+      ...(typeof m.thinking_signature === "string" &&
+      m.thinking_signature.length > 0
+        ? { thinking_signature: m.thinking_signature }
+        : {}),
+      ...(hasToolCalls
+        ? {
+            tool_calls: m.tool_calls.map((tc: any) => {
+              const id =
+                tc.id && tc.id.length > 0
+                  ? tc.id
+                  : `call_auto_${++synthetic.n}`;
+              pending.push(id);
+              return {
+                id,
+                type: "function" as const,
+                function: {
+                  name: tc.function.name,
+                  arguments: toolCallArgsToString(tc.function.arguments),
+                },
+                thought_signature: tc.thought_signature,
+              };
+            }),
+          }
+        : {}),
+    };
+  }
+
+  if (m.role === "tool") {
+    return {
+      role: "tool",
+      content: m.content ?? "",
+      tool_call_id: takeToolCallId(m.tool_call_id, pending),
+      ...(m.name ? { name: m.name } : {}),
+    };
+  }
+
+  if (m.role === "function") {
+    return {
+      role: "tool",
+      content: m.content ?? "",
+      tool_call_id: takeToolCallId(undefined, pending),
+      name: m.name,
+    };
+  }
+
+  // user/developer/system
+  return {
+    role: m.role === "developer" ? "system" : m.role,
+    content: m.content,
+    ...(m.name ? { name: m.name } : {}),
+  };
+}
+
+function takeToolCallId(given: string | undefined, pending: string[]): string {
+  if (given && given.length > 0) {
+    const qi = pending.indexOf(given);
+    if (qi !== -1) pending.splice(qi, 1);
+    return given;
+  }
+  return pending.shift() ?? "";
+}
+
+/** Resolve the preferred model + group id from `model` field. */
+function resolvePreferredModel(opts: {
+  db: any;
+  requestedModel: string | undefined;
+  groupingEnabled: boolean;
+  messages: ChatMessage[];
+  sessionIdHeader?: string;
+  res: Response;
+}): {
+  preferredModel: number | undefined;
+  preferredGroupId: number | undefined;
+  strictPinnedModelDbId: number | undefined;
+} {
+  const {
+    db,
+    requestedModel,
+    groupingEnabled,
+    messages,
+    sessionIdHeader,
+    res,
+  } = opts;
+
+  if (requestedModel === "auto" && !requestedModel) {
+    // omitted model — auto-route via sticky
+    return {
+      preferredModel: getStickyModel(messages, sessionIdHeader),
+      preferredGroupId: undefined,
+      strictPinnedModelDbId: undefined,
+    };
+  }
+
+  if (!requestedModel || requestedModel === "auto") {
+    return {
+      preferredModel: getStickyModel(messages, sessionIdHeader),
+      preferredGroupId: undefined,
+      strictPinnedModelDbId: undefined,
+    };
+  }
+
+  const slashIdx = requestedModel.indexOf("/");
+  let enabled: any;
+  let exactPlatformModel = false;
+  if (slashIdx > 0) {
+    const platform = requestedModel.slice(0, slashIdx);
+    const modelId = requestedModel.slice(slashIdx + 1);
+    enabled = db
+      .prepare(
+        "SELECT id, group_id, model_id FROM models WHERE platform = ? AND model_id = ? AND enabled = 1",
+      )
+      .get(platform, modelId);
+    exactPlatformModel = !!enabled;
+  }
+
+  let preferredGroupId: number | undefined;
+  if (groupingEnabled) {
+    const aliasCache = getAliasCache(db);
+    const groupKey = resolveGroupKey(
+      exactPlatformModel && enabled ? enabled.model_id : requestedModel,
+      aliasCache,
+    );
+    const group = db
+      .prepare(
+        "SELECT id FROM model_groups WHERE group_key = ? AND enabled = 1",
+      )
+      .get(groupKey);
+    if (group) {
+      preferredGroupId = group.id;
+    } else if (enabled?.group_id != null) {
+      const enabledGroup = db
+        .prepare("SELECT id FROM model_groups WHERE id = ? AND enabled = 1")
+        .get(enabled.group_id);
+      preferredGroupId = enabledGroup?.id;
+    }
+  }
+
+  let preferredModel: number | undefined;
+  let strictPinnedModelDbId: number | undefined;
+  if (enabled) {
+    preferredModel = enabled.id;
+    if (exactPlatformModel) strictPinnedModelDbId = enabled.id;
+  }
+
+  if (!enabled && (!groupingEnabled || preferredGroupId == null)) {
+    enabled = db
+      .prepare(
+        "SELECT id, group_id, model_id FROM models WHERE model_id = ? AND enabled = 1",
+      )
+      .get(requestedModel);
+    if (enabled) {
+      preferredModel = enabled.id;
+      strictPinnedModelDbId = enabled.id;
+      if (
+        groupingEnabled &&
+        preferredGroupId == null &&
+        enabled.group_id != null
+      ) {
+        const enabledGroup = db
+          .prepare("SELECT id FROM model_groups WHERE id = ? AND enabled = 1")
+          .get(enabled.group_id);
+        preferredGroupId = enabledGroup?.id;
+      }
+    }
+  }
+
+  if (!preferredModel && preferredGroupId == null) {
+    const groupKey = groupingEnabled
+      ? resolveGroupKey(requestedModel, getAliasCache(db))
+      : undefined;
+    const disabledGroup = groupKey
+      ? db
+          .prepare("SELECT id FROM model_groups WHERE group_key = ?")
+          .get(groupKey)
+      : undefined;
+    const disabled = db
+      .prepare("SELECT id FROM models WHERE model_id = ?")
+      .get(requestedModel);
+    const reason =
+      disabled || disabledGroup ? "is disabled" : "is not in the catalog";
+    res.status(400).json({
+      error: {
+        message: `Model '${requestedModel}' ${reason}. Use 'auto' (or omit the 'model' field) to auto-route, or call /v1/models for the available list.`,
+        type: "invalid_request_error",
+        code: "model_not_found",
+      },
+    });
+  }
+
+  return { preferredModel, preferredGroupId, strictPinnedModelDbId };
+}
+
 export const proxyRouter = Router();
 
 // Virtual "auto" model. Clients like Hermes require a non-empty `model` field

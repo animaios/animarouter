@@ -25,7 +25,10 @@
 // shape names — it maps every request knob down to a wire field that
 // documentation confirms the provider accepts. (#290)
 
-import type { ThinkingConfig, ThinkingEffort } from '@animarouter/shared/types.js';
+import type {
+  ThinkingConfig,
+  ThinkingEffort,
+} from "@animarouter/shared/types.js";
 
 // ─── Combined request view ────────────────────────────────────────────────
 
@@ -39,7 +42,7 @@ export interface ThinkingRequest {
   // Token budget (Anthropic budget_tokens / Gemini 2.5 thinkingBudget).
   budget?: number;
   // Anthropic display hint.
-  display?: 'summarized' | 'omitted';
+  display?: "summarized" | "omitted";
   // Whether the response should include the raw reasoning trace alongside the
   // summarized text. Anthropic: always true for 'summarized' display. Gemini:
   // true iff `includeThoughts` is unset or true. OpenAI-compat: ignored
@@ -63,12 +66,12 @@ export function normalizeThinking(opts: {
   const t = opts.thinking;
   if (t) {
     // mode flags
-    if (t.type === 'enabled') {
+    if (t.type === "enabled") {
       out.enabled = true;
-    } else if (t.type === 'adaptive') {
+    } else if (t.type === "adaptive") {
       out.adaptive = true;
       out.enabled = true; // adaptive implies on
-    } else if (t.type === 'disabled') {
+    } else if (t.type === "disabled") {
       out.enabled = false;
     } else if (effort) {
       // No explicit type but effort was given: turn thinking on by default so
@@ -79,7 +82,8 @@ export function normalizeThinking(opts: {
     }
     if (t.budget !== undefined) out.budget = t.budget;
     if (t.display !== undefined) out.display = t.display;
-    if (t.includeThoughts !== undefined) out.includeThoughts = t.includeThoughts;
+    if (t.includeThoughts !== undefined)
+      out.includeThoughts = t.includeThoughts;
   } else if (effort) {
     out.enabled = true; // `reasoning_effort` alone is treated as enable.
   }
@@ -98,20 +102,24 @@ export function normalizeThinking(opts: {
  * We don't know which Anthropic model we're talking to at the provider layer —
  * the choice between `enabled` and `adaptive` is left to the caller; the
  * proxy decides based on the model id from the catalog, when available. */
-export function anthropicThinking(
-  normalized: ThinkingRequest | undefined,
-): { thinking?: Record<string, unknown>; output_config?: Record<string, unknown> } {
+export function anthropicThinking(normalized: ThinkingRequest | undefined): {
+  thinking?: Record<string, unknown>;
+  output_config?: Record<string, unknown>;
+} {
   if (!normalized) return {};
-  const out: { thinking?: Record<string, unknown>; output_config?: Record<string, unknown> } = {};
+  const out: {
+    thinking?: Record<string, unknown>;
+    output_config?: Record<string, unknown>;
+  } = {};
 
   if (normalized.enabled === false) {
-    return { thinking: { type: 'disabled' } };
+    return { thinking: { type: "disabled" } };
   }
 
   if (normalized.adaptive) {
-    out.thinking = { type: 'adaptive' };
+    out.thinking = { type: "adaptive" };
   } else if (normalized.enabled === true) {
-    const t: Record<string, unknown> = { type: 'enabled' };
+    const t: Record<string, unknown> = { type: "enabled" };
     if (normalized.budget !== undefined) t.budget_tokens = normalized.budget;
     if (normalized.display) t.display = normalized.display;
     out.thinking = t;
@@ -130,13 +138,13 @@ export function anthropicThinking(
 // `thinkingBudget`. The `'minimal'` effort only applies to series that
 // accept it (Gemini 3); we therefore never index with `minimal` — the
 // translation pre-checks the value. (#290)
-type GeminiEffort = Exclude<ThinkingEffort, 'minimal'>;
+type GeminiEffort = Exclude<ThinkingEffort, "minimal">;
 const GEMINI_3_LEVEL: Record<GeminiEffort, string> = {
-  max: 'high',
-  xhigh: 'high',
-  high: 'high',
-  medium: 'medium',
-  low: 'low',
+  max: "high",
+  xhigh: "high",
+  high: "high",
+  medium: "medium",
+  low: "low",
 };
 const GEMINI_BUDGET: Record<GeminiEffort, number> = {
   max: 24576,
@@ -156,7 +164,7 @@ export function geminiThinkingConfig(
   if (normalized.enabled === false) {
     const isG3 = /gemini[-_]?3/i.test(modelId);
     if (!isG3) return { thinkingBudget: 0 };
-    return { thinkingLevel: 'minimal' };
+    return { thinkingLevel: "minimal" };
   }
   if (!normalized.enabled) {
     // bail with no block — model picks its own default.
@@ -172,8 +180,8 @@ export function geminiThinkingConfig(
   // first — explicit budget always wins, otherwise the chosen series'
   // native envelope carries the effort. #290
   if (isG3) {
-    if (normalized.effort === 'minimal') {
-      cfg.thinkingLevel = 'minimal';
+    if (normalized.effort === "minimal") {
+      cfg.thinkingLevel = "minimal";
     } else if (normalized.effort) {
       cfg.thinkingLevel = GEMINI_3_LEVEL[normalized.effort];
     } else if (normalized.budget !== undefined) {
@@ -210,10 +218,12 @@ export function geminiThinkingConfig(
  */
 export function openaiCompatThinkingBody(
   normalized: ThinkingRequest | undefined,
-  original: {
-    reasoning_effort?: ThinkingEffort;
-    thinking?: ThinkingConfig;
-  } | undefined,
+  original:
+    | {
+        reasoning_effort?: ThinkingEffort;
+        thinking?: ThinkingConfig;
+      }
+    | undefined,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (!normalized) return out;

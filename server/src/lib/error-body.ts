@@ -15,7 +15,7 @@ interface UnknownError {
 
 /** Type guard: the value is an object that *might* be a provider error body. */
 function isUnknownErrorBody(value: unknown): value is UnknownError {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === "object";
 }
 
 /** Read `body.error.message`, `body.errors[0].message`, `body.detail`, or
@@ -25,21 +25,24 @@ function isUnknownErrorBody(value: unknown): value is UnknownError {
 export function extractErrorMessage(value: unknown): string | undefined {
   if (!isUnknownErrorBody(value)) return undefined;
 
-  if (typeof value.error === 'string') return value.error;
-  if (isUnknownErrorBody(value.error) && typeof value.error.message === 'string') {
+  if (typeof value.error === "string") return value.error;
+  if (
+    isUnknownErrorBody(value.error) &&
+    typeof value.error.message === "string"
+  ) {
     return value.error.message;
   }
 
   if (Array.isArray(value.errors)) {
     for (const item of value.errors) {
-      if (typeof item === 'string') return item;
-      if (isUnknownErrorBody(item) && typeof item.message === 'string') {
+      if (typeof item === "string") return item;
+      if (isUnknownErrorBody(item) && typeof item.message === "string") {
         return item.message;
       }
     }
   }
 
-  if (typeof value.detail === 'string') return value.detail;
-  if (typeof value.message === 'string') return value.message;
+  if (typeof value.detail === "string") return value.detail;
+  if (typeof value.message === "string") return value.message;
   return undefined;
 }

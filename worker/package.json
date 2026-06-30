@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "deploy": "npx wrangler deploy"
+    "deploy": "npx wrangler deploy",
+    "lint:complexity": "npx eslint . --config ../eslint.config.js"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

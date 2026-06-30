@@ -348,7 +348,6 @@ export function buildContextBridge(params: {
   };
 }
 
-
 /**
  * Creates a streaming-compatible context bridge.
  * The bridge is a step-boundary transform, not a streaming transform.
@@ -408,7 +407,8 @@ export function createStreamingContextBridge(params: {
     previousResponse: string,
     mode: "injection" | "anchor",
   ): string {
-    const provider = mode === "injection" ? foundationProvider : injectionProvider;
+    const provider =
+      mode === "injection" ? foundationProvider : injectionProvider;
     const { cleanText } = sanitizeForBridge(previousResponse, provider);
     if (!cleanText) {
       return "";

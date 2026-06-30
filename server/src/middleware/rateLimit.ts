@@ -1,5 +1,5 @@
-import type { Request, Response, NextFunction } from 'express';
-import { getFeatureSetting } from '../services/feature-settings.js';
+import type { NextFunction, Request, Response } from "express";
+import { getFeatureSetting } from "../services/feature-settings.js";
 
 // Per-IP fixed-window rate limiter for the public /v1 proxy (#35, item #6).
 //
@@ -24,7 +24,7 @@ interface WindowState {
 }
 
 function getLimit(): number {
-  const n = getFeatureSetting('proxy_rate_limit_rpm') as number;
+  const n = getFeatureSetting("proxy_rate_limit_rpm") as number;
   return Math.max(0, Math.floor(n));
 }
 
@@ -32,14 +32,18 @@ export function createProxyRateLimiter() {
   const limit = getLimit();
   const windows = new Map<string, WindowState>();
 
-  return function proxyRateLimit(req: Request, res: Response, next: NextFunction): void {
+  return function proxyRateLimit(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void {
     if (limit === 0) {
       next();
       return;
     }
 
     const now = Date.now();
-    const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
+    const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
 
     let state = windows.get(ip);
     if (!state || now >= state.resetAt) {
@@ -55,7 +59,7 @@ export function createProxyRateLimiter() {
       // If all entries are still active (not expired), evict the oldest window
       // to guarantee the map never exceeds MAX_TRACKED_IPS.
       if (windows.size > MAX_TRACKED_IPS) {
-        let oldestKey = '';
+        let oldestKey = "";
         let oldestReset = Infinity;
         for (const [k, v] of windows) {
           if (v.resetAt < oldestReset) {
@@ -67,17 +71,20 @@ export function createProxyRateLimiter() {
       }
     }
 
-    res.setHeader('X-RateLimit-Limit', String(limit));
-    res.setHeader('X-RateLimit-Remaining', String(Math.max(0, limit - state.count)));
-    res.setHeader('X-RateLimit-Reset', String(Math.ceil(state.resetAt / 1000)));
+    res.setHeader("X-RateLimit-Limit", String(limit));
+    res.setHeader(
+      "X-RateLimit-Remaining",
+      String(Math.max(0, limit - state.count)),
+    );
+    res.setHeader("X-RateLimit-Reset", String(Math.ceil(state.resetAt / 1000)));
 
     if (state.count > limit) {
       const retryAfter = Math.max(1, Math.ceil((state.resetAt - now) / 1000));
-      res.setHeader('Retry-After', String(retryAfter));
+      res.setHeader("Retry-After", String(retryAfter));
       res.status(429).json({
         error: {
           message: `Rate limit exceeded: more than ${limit} requests per minute. Retry in ${retryAfter}s.`,
-          type: 'rate_limit_error',
+          type: "rate_limit_error",
         },
       });
       return;

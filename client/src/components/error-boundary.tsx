@@ -1,25 +1,25 @@
-import { Component, type ReactNode } from 'react'
-import { Button } from '@/components/ui/button'
+import { Component, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
 
 interface Props {
-  children: ReactNode
+  children: ReactNode;
 }
 
 interface State {
-  hasError: boolean
+  hasError: boolean;
 }
 
 export class ErrorBoundary extends Component<Props, State> {
-  state: State = { hasError: false }
+  state: State = { hasError: false };
 
   static getDerivedStateFromError(): State {
-    return { hasError: true }
+    return { hasError: true };
   }
 
   handleReload = () => {
-    this.setState({ hasError: false })
-    window.location.reload()
-  }
+    this.setState({ hasError: false });
+    window.location.reload();
+  };
 
   render() {
     if (this.state.hasError) {
@@ -28,8 +28,8 @@ export class ErrorBoundary extends Component<Props, State> {
           <p className="text-lg text-muted-foreground">Something went wrong</p>
           <Button onClick={this.handleReload}>Reload</Button>
         </div>
-      )
+      );
     }
-    return this.props.children
+    return this.props.children;
   }
 }

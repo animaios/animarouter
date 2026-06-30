@@ -15,7 +15,7 @@ describe("feature settings registry", () => {
         effect: entry.effect,
         group: entry.group,
         parentToggle: entry.parentToggle,
-      }))
+      })),
     ).toEqual([
       {
         key: "iterative_refinement_weights",

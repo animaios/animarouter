@@ -1,7 +1,7 @@
-import { memo } from 'react'
-import ReactMarkdown, { type Components } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { cn } from '@/lib/utils'
+import { memo } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { cn } from "@/lib/utils";
 
 const components: Components = {
   p: ({ children }) => (
@@ -20,10 +20,14 @@ const components: Components = {
     </a>
   ),
   h1: ({ children }) => (
-    <h1 className="mt-4 mb-2 text-base font-semibold tracking-tight first:mt-0">{children}</h1>
+    <h1 className="mt-4 mb-2 text-base font-semibold tracking-tight first:mt-0">
+      {children}
+    </h1>
   ),
   h2: ({ children }) => (
-    <h2 className="mt-4 mb-2 text-sm font-semibold tracking-tight first:mt-0">{children}</h2>
+    <h2 className="mt-4 mb-2 text-sm font-semibold tracking-tight first:mt-0">
+      {children}
+    </h2>
   ),
   h3: ({ children }) => (
     <h3 className="mt-3 mb-1.5 text-sm font-semibold first:mt-0">{children}</h3>
@@ -48,7 +52,9 @@ const components: Components = {
     </blockquote>
   ),
   hr: () => <hr className="my-3 border-foreground/15" />,
-  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+  strong: ({ children }) => (
+    <strong className="font-semibold">{children}</strong>
+  ),
   em: ({ children }) => <em className="italic">{children}</em>,
   del: ({ children }) => <del className="opacity-70">{children}</del>,
 
@@ -57,7 +63,9 @@ const components: Components = {
       <table className="w-full border-collapse text-xs">{children}</table>
     </div>
   ),
-  thead: ({ children }) => <thead className="bg-background/40">{children}</thead>,
+  thead: ({ children }) => (
+    <thead className="bg-background/40">{children}</thead>
+  ),
   th: ({ children, style }) => (
     <th
       style={style}
@@ -67,19 +75,25 @@ const components: Components = {
     </th>
   ),
   td: ({ children, style }) => (
-    <td style={style} className="border border-foreground/15 px-2 py-1 align-top">
+    <td
+      style={style}
+      className="border border-foreground/15 px-2 py-1 align-top"
+    >
       {children}
     </td>
   ),
 
   code: ({ className, children, ...props }) => {
-    const isBlock = /language-/.test(className ?? '')
+    const isBlock = /language-/.test(className ?? "");
     if (isBlock) {
       return (
-        <code className={cn('font-mono text-[12.5px] leading-relaxed', className)} {...props}>
+        <code
+          className={cn("font-mono text-[12.5px] leading-relaxed", className)}
+          {...props}
+        >
           {children}
         </code>
-      )
+      );
     }
     return (
       <code
@@ -88,28 +102,28 @@ const components: Components = {
       >
         {children}
       </code>
-    )
+    );
   },
   pre: ({ children }) => (
     <pre className="my-2 overflow-x-auto rounded-lg border bg-background/60 p-3 first:mt-0 last:mb-0">
       {children}
     </pre>
   ),
-}
+};
 
 interface MarkdownProps {
-  children: string
-  className?: string
+  children: string;
+  className?: string;
 }
 
 function MarkdownInner({ children, className }: MarkdownProps) {
   return (
-    <div className={cn('text-sm leading-relaxed', className)}>
+    <div className={cn("text-sm leading-relaxed", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {children}
       </ReactMarkdown>
     </div>
-  )
+  );
 }
 
-export const Markdown = memo(MarkdownInner)
+export const Markdown = memo(MarkdownInner);

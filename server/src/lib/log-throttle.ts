@@ -13,20 +13,28 @@
 
 /** Fields to include in the dedup signature, keyed by event type. */
 const SIGNATURE_FIELDS: Record<string, string[]> = {
-  'heartbeat.ping': ['type', 'provider', 'model', 'keyId', 'success', 'error'],
-  'heartbeat.recheck': ['type', 'provider', 'model', 'keyId', 'success', 'error', 'attempt'],
-  'heartbeat.cycle_skipped': ['type', 'reason'],
-  'degradation.hit': ['type', 'modelDbId', 'tier'],
-  'degradation.recovery': ['type', 'modelDbId'],
+  "heartbeat.ping": ["type", "provider", "model", "keyId", "success", "error"],
+  "heartbeat.recheck": [
+    "type",
+    "provider",
+    "model",
+    "keyId",
+    "success",
+    "error",
+    "attempt",
+  ],
+  "heartbeat.cycle_skipped": ["type", "reason"],
+  "degradation.hit": ["type", "modelDbId", "tier"],
+  "degradation.recovery": ["type", "modelDbId"],
 };
 
 /** Per-event-type dedup window in milliseconds. */
 const DEFAULT_TTLS: Record<string, number> = {
-  'heartbeat.ping': 30_000,        // 30s — one per heartbeat cycle
-  'heartbeat.recheck': 15_000,     // 15s — recheck debounce
-  'heartbeat.cycle_skipped': 60_000, // 60s — don't repeat idle notices
-  'degradation.hit': 5_000,        // 5s — dedupe burst 429s
-  'degradation.recovery': 10_000,  // 10s — dedupe rapid recoveries
+  "heartbeat.ping": 30_000, // 30s — one per heartbeat cycle
+  "heartbeat.recheck": 15_000, // 15s — recheck debounce
+  "heartbeat.cycle_skipped": 60_000, // 60s — don't repeat idle notices
+  "degradation.hit": 5_000, // 5s — dedupe burst 429s
+  "degradation.recovery": 10_000, // 10s — dedupe rapid recoveries
 };
 
 const FALLBACK_TTL = 5_000; // 5s default for unlisted types
@@ -53,7 +61,9 @@ function createSignature(evt: Record<string, any>): string {
     // Fallback: use all fields except known volatile ones
     obj = {};
     for (const [key, value] of Object.entries(evt)) {
-      if (!['at', 'latencyMs', 'tokens', '_suppressed', 'ttfbMs'].includes(key)) {
+      if (
+        !["at", "latencyMs", "tokens", "_suppressed", "ttfbMs"].includes(key)
+      ) {
         obj[key] = value;
       }
     }
@@ -61,9 +71,11 @@ function createSignature(evt: Record<string, any>): string {
 
   // Sort keys for deterministic output
   const sortedObj: Record<string, any> = {};
-  Object.keys(obj).sort().forEach(key => {
-    sortedObj[key] = obj[key];
-  });
+  Object.keys(obj)
+    .sort()
+    .forEach((key) => {
+      sortedObj[key] = obj[key];
+    });
 
   return JSON.stringify(sortedObj);
 }
@@ -101,7 +113,10 @@ export class LogThrottle {
    * @param now Optional current timestamp (defaults to Date.now())
    * @returns Object with `emit` boolean and `suppressed` count of duplicates skipped
    */
-  shouldEmit(evt: Record<string, any>, now: number = Date.now()): { emit: boolean; suppressed: number } {
+  shouldEmit(
+    evt: Record<string, any>,
+    now: number = Date.now(),
+  ): { emit: boolean; suppressed: number } {
     this.evictOverflow(now);
 
     const signature = createSignature(evt);

@@ -253,7 +253,6 @@ export const MANUAL_BENCHMARK_OVERRIDES: BenchmarkRow[] = [
   ["%laguna-m-1%", 74],
   ["%step-3-7-flash%", 65],
 ];
-type BenchmarkRow = [string, number]; // [model_id_pattern, aa_index_score]
 
 // ─── BENCHMARK SCORE TABLE ───────────────────────────────────────────────
 // Patterns are matched via canonical_model_key lookup.
@@ -284,8 +283,8 @@ const BENCHMARK_SCORES: BenchmarkRow[] = [
   ["%qwen3.6-plus%", 42],
 
   // ──── High-Efficiency / Flash Tier (Fast Actions & Low Latency Agents) ─────
-    ["%mimo-v2-5-free%", 74],
-    ["%laguna-m-1%", 74],
+  ["%mimo-v2-5-free%", 74],
+  ["%laguna-m-1%", 74],
   ["%step-3.7-flash%", 65],
   ["%deepseek-v4-flash%", 62],
   ["%gemini-3.5-flash%", 55],

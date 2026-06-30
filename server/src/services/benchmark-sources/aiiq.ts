@@ -9,10 +9,10 @@
  * columns (aiiq_score, aiiq_score_updated, aiiq_confidence).
  */
 
-import { canonicalizeModelId } from '../../db/benchmark-scores.js';
-import type Database from 'better-sqlite3';
+import type Database from "better-sqlite3";
+import { canonicalizeModelId } from "../../db/benchmark-scores.js";
 
-const API_URL = 'https://www.aiiq.org/api/models';
+const API_URL = "https://www.aiiq.org/api/models";
 const FETCH_TIMEOUT_MS = 10_000;
 
 interface AIIQModel {
@@ -43,8 +43,8 @@ async function fetchAIIQData(): Promise<AIIQResponse> {
     const res = await fetch(API_URL, {
       signal: controller.signal,
       headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'AnimaRouter/1.0 (AI IQ sync; contact@animarouter.dev)',
+        Accept: "application/json",
+        "User-Agent": "AnimaRouter/1.0 (AI IQ sync; contact@animarouter.dev)",
       },
     });
 
@@ -52,17 +52,19 @@ async function fetchAIIQData(): Promise<AIIQResponse> {
       throw new Error(`HTTP ${res.status}: ${res.statusText}`);
     }
 
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.includes('application/json')) {
-      const body = await res.text().catch(() => '<unreadable>');
-      throw new Error(`Non-JSON response (${res.status}): ${body.slice(0, 80)}`);
+    const ct = res.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) {
+      const body = await res.text().catch(() => "<unreadable>");
+      throw new Error(
+        `Non-JSON response (${res.status}): ${body.slice(0, 80)}`,
+      );
     }
 
-    const data = await res.json() as AIIQResponse;
+    const data = (await res.json()) as AIIQResponse;
     return data;
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new Error('AI IQ fetch timed out');
+    if (err.name === "AbortError") {
+      throw new Error("AI IQ fetch timed out");
     }
     throw err;
   } finally {
@@ -105,7 +107,7 @@ export async function fetchAIIQScores(
 
   const models = extractModels(data);
   if (models.length === 0) {
-    errors.push('AIIQ: empty response');
+    errors.push("AIIQ: empty response");
     return { updated: 0, affectedIds, errors };
   }
 
@@ -118,12 +120,14 @@ export async function fetchAIIQScores(
       AND (aiiq_score IS NULL OR aiiq_score != ?)
   `);
 
-  const findIds = db.prepare('SELECT id FROM models WHERE canonical_model_key = ?');
+  const findIds = db.prepare(
+    "SELECT id FROM models WHERE canonical_model_key = ?",
+  );
 
   let updated = 0;
   const tx = db.transaction(() => {
     for (const m of models) {
-      const modelId = m.id || m.slug || m.name || '';
+      const modelId = m.id || m.slug || m.name || "";
       // Use AI IQ score directly; normalize from ~[55, 135] range into [0, 100]
       let score = Number(m.iq ?? 0);
       if (score > 100) score = 100; // cap AI IQ above 100

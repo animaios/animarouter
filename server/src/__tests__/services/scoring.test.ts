@@ -1,31 +1,38 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from "vitest";
 import {
-  BANDIT_PRESETS, combineScore, speedScore, latencyScore, intelligenceScore,
-  sampleBeta, reliabilityPosterior,
-  expectedReliability, SPEED_PRIOR, LATENCY_PRIOR,
-} from '../../services/scoring.js';
+  BANDIT_PRESETS,
+  combineScore,
+  expectedReliability,
+  intelligenceScore,
+  LATENCY_PRIOR,
+  latencyScore,
+  reliabilityPosterior,
+  SPEED_PRIOR,
+  sampleBeta,
+  speedScore,
+} from "../../services/scoring.js";
 
-describe('scoring: reliability posterior', () => {
-  it('uniform prior makes an unseen model genuinely uncertain (mean 0.5)', () => {
+describe("scoring: reliability posterior", () => {
+  it("uniform prior makes an unseen model genuinely uncertain (mean 0.5)", () => {
     expect(expectedReliability(0, 0)).toBeCloseTo(0.5, 5);
   });
 
-  it('successes pull the expected rate up, failures down', () => {
+  it("successes pull the expected rate up, failures down", () => {
     expect(expectedReliability(9, 1)).toBeGreaterThan(0.7);
     expect(expectedReliability(1, 9)).toBeLessThan(0.3);
   });
 
-  it('posterior adds the priors to the observed counts', () => {
+  it("posterior adds the priors to the observed counts", () => {
     expect(reliabilityPosterior(5, 3)).toEqual({ alpha: 6, beta: 4 });
   });
 });
 
-describe('scoring: speed axis', () => {
-  it('returns the exploration prior when there is no data at all', () => {
+describe("scoring: speed axis", () => {
+  it("returns the exploration prior when there is no data at all", () => {
     expect(speedScore(0)).toBe(SPEED_PRIOR);
   });
 
-  it('is bounded in [0,1] and monotonic in throughput', () => {
+  it("is bounded in [0,1] and monotonic in throughput", () => {
     const a = speedScore(10);
     const b = speedScore(50);
     const c = speedScore(200);
@@ -35,27 +42,27 @@ describe('scoring: speed axis', () => {
     expect(b).toBeLessThan(c);
   });
 
-  it('returns a throughput-only score (no TTFB blending)', () => {
+  it("returns a throughput-only score (no TTFB blending)", () => {
     expect(speedScore(80)).toBeGreaterThan(0);
   });
 });
 
-describe('scoring: latency axis', () => {
-  it('returns the exploration prior when TTFB is null', () => {
+describe("scoring: latency axis", () => {
+  it("returns the exploration prior when TTFB is null", () => {
     expect(latencyScore(null)).toBe(LATENCY_PRIOR);
   });
 
-  it('returns 1.0 for excellent TTFB (≤300ms)', () => {
+  it("returns 1.0 for excellent TTFB (≤300ms)", () => {
     expect(latencyScore(300)).toBe(1.0);
     expect(latencyScore(100)).toBe(1.0);
   });
 
-  it('returns 0.0 for poor TTFB (≥5000ms)', () => {
+  it("returns 0.0 for poor TTFB (≥5000ms)", () => {
     expect(latencyScore(5000)).toBe(0.0);
     expect(latencyScore(10000)).toBe(0.0);
   });
 
-  it('is bounded in [0,1] and monotonically decreasing with TTFB', () => {
+  it("is bounded in [0,1] and monotonically decreasing with TTFB", () => {
     const fast = latencyScore(200);
     const mid = latencyScore(1500);
     const slow = latencyScore(4000);
@@ -64,55 +71,83 @@ describe('scoring: latency axis', () => {
   });
 });
 
-describe('scoring: intelligence axis', () => {
-  it('maps min→0, max→1', () => {
+describe("scoring: intelligence axis", () => {
+  it("maps min→0, max→1", () => {
     expect(intelligenceScore(1000, 1000, 4000)).toBeCloseTo(0, 5);
     expect(intelligenceScore(4000, 1000, 4000)).toBeCloseTo(1, 5);
     expect(intelligenceScore(2500, 1000, 4000)).toBeCloseTo(0.5, 5);
   });
 
-  it('returns neutral-high when all models are equal', () => {
+  it("returns neutral-high when all models are equal", () => {
     expect(intelligenceScore(5, 5, 5)).toBe(1);
   });
 });
 
 // Degradation factor tests are in degradation.test.ts
 
-describe('scoring: combineScore', () => {
+describe("scoring: combineScore", () => {
   const perfect = { reliability: 1, speed: 1, intelligence: 1, latency: 1 };
 
-  it('stays within [0,1] for in-range inputs', () => {
-    expect(combineScore(perfect, BANDIT_PRESETS.balanced)).toBeLessThanOrEqual(1);
-    expect(combineScore({ reliability: 0, speed: 0, intelligence: 0, latency: 0 }, BANDIT_PRESETS.balanced)).toBe(0);
+  it("stays within [0,1] for in-range inputs", () => {
+    expect(combineScore(perfect, BANDIT_PRESETS.balanced)).toBeLessThanOrEqual(
+      1,
+    );
+    expect(
+      combineScore(
+        { reliability: 0, speed: 0, intelligence: 0, latency: 0 },
+        BANDIT_PRESETS.balanced,
+      ),
+    ).toBe(0);
   });
 
-  it('a 100%-reliable slow model beats a 0%-reliable fast one under balanced — no hand-cap needed', () => {
-    const reliable = combineScore({ reliability: 1, speed: 0.1, intelligence: 0.5, latency: 0.5 }, BANDIT_PRESETS.balanced);
-    const flaky = combineScore({ reliability: 0, speed: 1, intelligence: 0.5, latency: 0.5 }, BANDIT_PRESETS.balanced);
+  it("a 100%-reliable slow model beats a 0%-reliable fast one under balanced — no hand-cap needed", () => {
+    const reliable = combineScore(
+      { reliability: 1, speed: 0.1, intelligence: 0.5, latency: 0.5 },
+      BANDIT_PRESETS.balanced,
+    );
+    const flaky = combineScore(
+      { reliability: 0, speed: 1, intelligence: 0.5, latency: 0.5 },
+      BANDIT_PRESETS.balanced,
+    );
     expect(reliable).toBeGreaterThan(flaky);
   });
 
-  it('the smartest preset ranks a high-intelligence model above a fast one', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5 }, BANDIT_PRESETS.smartest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5 }, BANDIT_PRESETS.smartest);
+  it("the smartest preset ranks a high-intelligence model above a fast one", () => {
+    const smart = combineScore(
+      { reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5 },
+      BANDIT_PRESETS.smartest,
+    );
+    const fast = combineScore(
+      { reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5 },
+      BANDIT_PRESETS.smartest,
+    );
     expect(smart).toBeGreaterThan(fast);
   });
 
-  it('the fastest preset flips that ordering', () => {
-    const smart = combineScore({ reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5 }, BANDIT_PRESETS.fastest);
-    const fast = combineScore({ reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5 }, BANDIT_PRESETS.fastest);
+  it("the fastest preset flips that ordering", () => {
+    const smart = combineScore(
+      { reliability: 0.8, speed: 0.2, intelligence: 1, latency: 0.5 },
+      BANDIT_PRESETS.fastest,
+    );
+    const fast = combineScore(
+      { reliability: 0.8, speed: 1, intelligence: 0.2, latency: 0.5 },
+      BANDIT_PRESETS.fastest,
+    );
     expect(fast).toBeGreaterThan(smart);
   });
 
-  it('every preset weight vector sums to 1', () => {
+  it("every preset weight vector sums to 1", () => {
     for (const w of Object.values(BANDIT_PRESETS)) {
-      expect(w.reliability + w.speed + w.intelligence + w.latency).toBeCloseTo(1, 5);
+      expect(w.reliability + w.speed + w.intelligence + w.latency).toBeCloseTo(
+        1,
+        5,
+      );
     }
   });
 });
 
-describe('scoring: Beta sampler (Thompson exploration)', () => {
-  it('draws stay within (0,1)', () => {
+describe("scoring: Beta sampler (Thompson exploration)", () => {
+  it("draws stay within (0,1)", () => {
     for (let i = 0; i < 1000; i++) {
       const x = sampleBeta(3, 5);
       expect(x).toBeGreaterThanOrEqual(0);
@@ -120,14 +155,14 @@ describe('scoring: Beta sampler (Thompson exploration)', () => {
     }
   });
 
-  it('the sample mean approximates alpha/(alpha+beta)', () => {
+  it("the sample mean approximates alpha/(alpha+beta)", () => {
     let sum = 0;
     const n = 20000;
     for (let i = 0; i < n; i++) sum += sampleBeta(8, 2);
     expect(sum / n).toBeCloseTo(0.8, 1); // E[Beta(8,2)] = 0.8
   });
 
-  it('explores: a strong model does NOT win every single draw vs a decent one', () => {
+  it("explores: a strong model does NOT win every single draw vs a decent one", () => {
     // Beta(20,2) ≈ 0.91 vs Beta(12,4) ≈ 0.75 — overlapping tails mean the
     // weaker model should still sometimes sample higher. That overlap is what
     // keeps the router from freezing onto a single model.

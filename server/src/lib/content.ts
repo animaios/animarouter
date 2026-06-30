@@ -1,4 +1,4 @@
-import type { ChatMessage } from '@animarouter/shared/types.js';
+import type { ChatMessage } from "@animarouter/shared/types.js";
 
 // OpenAI-spec message content can be one of:
 //   - string                        (plain text)
@@ -8,29 +8,34 @@ import type { ChatMessage } from '@animarouter/shared/types.js';
 // animarouter accepts the array envelope so clients like opencode and
 // continue.dev (which always serialize as arrays) don't 400. Non-text blocks
 // are dropped silently — vision/audio aren't supported (see README).
-export type ContentTextBlock = { type: 'text'; text: string };
-export type ContentBlock = ContentTextBlock | { type: string; [key: string]: unknown };
+export type ContentTextBlock = { type: "text"; text: string };
+export type ContentBlock =
+  | ContentTextBlock
+  | { type: string; [key: string]: unknown };
 
 export function contentToString(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (content == null) return '';
+  if (typeof content === "string") return content;
+  if (content == null) return "";
   if (Array.isArray(content)) {
     return content
       .map((b) => {
-        if (typeof b === 'string') return b;
+        if (typeof b === "string") return b;
         const block = b as { type?: string; text?: unknown };
         // OpenAI blocks carry type:'text'; Gemini-lineage agents (Qwen Code,
         // AionUI) send part-style `{ text }` with no type at all — accept any
         // block whose `text` is a string and whose type doesn't say it's
         // something else. (#200)
-        if (typeof block?.text === 'string' && (block.type === 'text' || block.type === undefined)) {
+        if (
+          typeof block?.text === "string" &&
+          (block.type === "text" || block.type === undefined)
+        ) {
           return block.text;
         }
-        return '';
+        return "";
       })
-      .join('');
+      .join("");
   }
-  return '';
+  return "";
 }
 
 export function flattenMessageContent(messages: ChatMessage[]): ChatMessage[] {
@@ -47,7 +52,7 @@ export function contentHasImage(content: unknown): boolean {
   if (!Array.isArray(content)) return false;
   return content.some((block) => {
     const type = (block as { type?: string })?.type;
-    return type === 'image_url' || type === 'image';
+    return type === "image_url" || type === "image";
   });
 }
 

@@ -8,8 +8,8 @@
  *
  * Pure logic module — no database access, no HTTP concerns.
  */
-import { publishDeduped as publish } from './events.js';
-import { getFeatureSetting } from './feature-settings.js';
+import { publishDeduped as publish } from "./events.js";
+import { getFeatureSetting } from "./feature-settings.js";
 
 // ── Configuration types ────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ export interface DegradationState {
   penalty: number;
 
   /** Severity tier that drove the most recent half-life (for half-life ratchet). */
-  tier: 'minor' | 'major' | 'critical';
+  tier: "minor" | "major" | "critical";
 
   /** Consecutive failure count (all tiers) since last success. Reset on success. */
   consecutiveHits: number;
@@ -67,7 +67,9 @@ const degradationStates = new Map<number, DegradationState>();
 
 function getConfig(): DegradationConfig {
   if (!config) {
-    throw new Error('[Degradation] Engine not initialized — call initDegradation() first.');
+    throw new Error(
+      "[Degradation] Engine not initialized — call initDegradation() first.",
+    );
   }
   return config;
 }
@@ -78,38 +80,46 @@ function getConfig(): DegradationConfig {
  * Reads env vars, merges overrides, freezes config. Idempotent — calling
  * multiple times resets and re-reads.
  */
-export function initDegradation(configOverrides?: Partial<DegradationConfig>): void {
-  const minorHalfLifeMs = (getFeatureSetting('degrade_minor_half_life_min') as number) * 60 * 1000;
-  const majorHalfLifeMs = (getFeatureSetting('degrade_major_half_life_min') as number) * 60 * 1000;
-  const criticalHalfLifeMs = (getFeatureSetting('degrade_critical_half_life_min') as number) * 60 * 1000;
+export function initDegradation(
+  configOverrides?: Partial<DegradationConfig>,
+): void {
+  const minorHalfLifeMs =
+    (getFeatureSetting("degrade_minor_half_life_min") as number) * 60 * 1000;
+  const majorHalfLifeMs =
+    (getFeatureSetting("degrade_major_half_life_min") as number) * 60 * 1000;
+  const criticalHalfLifeMs =
+    (getFeatureSetting("degrade_critical_half_life_min") as number) * 60 * 1000;
 
   const base: DegradationConfig = {
     minor: {
-      weight: getFeatureSetting('degrade_minor_weight') as number,
+      weight: getFeatureSetting("degrade_minor_weight") as number,
       halfLifeMs: minorHalfLifeMs,
     },
     major: {
-      weight: getFeatureSetting('degrade_major_weight') as number,
+      weight: getFeatureSetting("degrade_major_weight") as number,
       halfLifeMs: majorHalfLifeMs,
     },
     critical: {
-      weight: getFeatureSetting('degrade_critical_weight') as number,
+      weight: getFeatureSetting("degrade_critical_weight") as number,
       halfLifeMs: criticalHalfLifeMs,
-      consecutiveThreshold: getFeatureSetting('degrade_critical_threshold') as number,
+      consecutiveThreshold: getFeatureSetting(
+        "degrade_critical_threshold",
+      ) as number,
     },
-    compoundFactor: getFeatureSetting('degrade_compound_factor') as number,
-    successRecovery: getFeatureSetting('degrade_success_recovery') as number,
-    dampStrength: getFeatureSetting('degrade_damp_strength') as number,
-    maxPenalty: getFeatureSetting('degrade_max_penalty') as number,
-    boostMin: getFeatureSetting('degrade_boost_min') as number,
-    boostMax: getFeatureSetting('degrade_boost_max') as number,
+    compoundFactor: getFeatureSetting("degrade_compound_factor") as number,
+    successRecovery: getFeatureSetting("degrade_success_recovery") as number,
+    dampStrength: getFeatureSetting("degrade_damp_strength") as number,
+    maxPenalty: getFeatureSetting("degrade_max_penalty") as number,
+    boostMin: getFeatureSetting("degrade_boost_min") as number,
+    boostMax: getFeatureSetting("degrade_boost_max") as number,
   };
 
   if (configOverrides) {
     Object.assign(base, configOverrides);
     if (configOverrides.minor) Object.assign(base.minor, configOverrides.minor);
     if (configOverrides.major) Object.assign(base.major, configOverrides.major);
-    if (configOverrides.critical) Object.assign(base.critical, configOverrides.critical);
+    if (configOverrides.critical)
+      Object.assign(base.critical, configOverrides.critical);
   }
 
   config = Object.freeze({
@@ -129,10 +139,14 @@ export function initDegradation(configOverrides?: Partial<DegradationConfig>): v
  * Pure exponential decay with float snapping — no side effects.
  * penalty × 0.5^(elapsed / halfLife). Snaps to 0 when result < 0.01.
  */
-export function applyDecay(penalty: number, elapsedMs: number, halfLifeMs: number): number {
+export function applyDecay(
+  penalty: number,
+  elapsedMs: number,
+  halfLifeMs: number,
+): number {
   if (penalty <= 0 || elapsedMs <= 0) return penalty;
   const halfLives = elapsedMs / halfLifeMs;
-  const result = penalty * Math.pow(0.5, halfLives);
+  const result = penalty * 0.5 ** halfLives;
   return result < 0.01 ? 0 : result;
 }
 
@@ -142,7 +156,7 @@ function getOrCreateState(modelDbId: number): DegradationState {
     const cfg = getConfig();
     state = {
       penalty: 0,
-      tier: 'minor',
+      tier: "minor",
       consecutiveHits: 0,
       consecutiveMajorHits: 0,
       lastHitAt: Date.now(),
@@ -163,19 +177,19 @@ function getOrCreateState(modelDbId: number): DegradationState {
  *
  * Checks `err.status` numeric field FIRST, falls back to message matching.
  */
-export function classifyError(err: any): 'minor' | 'major' | null {
-  const msg = (err?.message ?? '').toLowerCase();
+export function classifyError(err: any): "minor" | "major" | null {
+  const msg = (err?.message ?? "").toLowerCase();
 
   // ── Primary: numeric status code (most reliable) ──────────────────────────
   const status = err?.status ?? err?.statusCode ?? err?.response?.status;
-  if (typeof status === 'number') {
+  if (typeof status === "number") {
     if (status === 429) {
       // Hard quota vs soft rate limit
-      if (msg.includes('quota') || msg.includes('insufficient')) return null;
-      return 'minor';
+      if (msg.includes("quota") || msg.includes("insufficient")) return null;
+      return "minor";
     }
-    if (status === 402) return 'minor';
-    if (status >= 500 && status < 600) return 'major';
+    if (status === 402) return "minor";
+    if (status >= 500 && status < 600) return "major";
     // 4xx client errors (including 404, 403) → non-degrading
     return null;
   }
@@ -183,33 +197,43 @@ export function classifyError(err: any): 'minor' | 'major' | null {
   // ── Fallback: message-based classification ─────────────────────────────────
 
   // Client-side abort → non-degrading (check exact name; avoid matching 'econnaborted')
-  if (err?.name === 'AbortError') return null;
+  if (err?.name === "AbortError") return null;
 
   // Hard quota in message → non-degrading
-  if (msg.includes('quota') || msg.includes('insufficient')) return null;
+  if (msg.includes("quota") || msg.includes("insufficient")) return null;
 
   // 429 / rate limit → minor (soft only; quota already excluded)
-  if (msg.includes('429') || msg.includes('rate limit')) return 'minor';
+  if (msg.includes("429") || msg.includes("rate limit")) return "minor";
 
   // 402 → minor
-  if (msg.includes('402') || msg.includes('payment required')) return 'minor';
+  if (msg.includes("402") || msg.includes("payment required")) return "minor";
 
   // 5xx → major
   if (
-    msg.includes('500') || msg.includes('502') || msg.includes('503') ||
-    msg.includes('504') || msg.includes('server error') ||
-    msg.includes('service unavailable')
-  ) return 'major';
+    msg.includes("500") ||
+    msg.includes("502") ||
+    msg.includes("503") ||
+    msg.includes("504") ||
+    msg.includes("server error") ||
+    msg.includes("service unavailable")
+  )
+    return "major";
 
   // Network / timeout / TLS → major (check BEFORE generic 'abort' to catch ECONNABORTED)
   if (
-    msg.includes('timeout') || msg.includes('econnrefused') || msg.includes('econnreset') ||
-    msg.includes('etimedout') || msg.includes('enotfound') || msg.includes('eproto') ||
-    msg.includes('econnabort') || msg.includes('fetch failed')
-  ) return 'major';
+    msg.includes("timeout") ||
+    msg.includes("econnrefused") ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("enotfound") ||
+    msg.includes("eproto") ||
+    msg.includes("econnabort") ||
+    msg.includes("fetch failed")
+  )
+    return "major";
 
   // Generic abort → non-degrading (after network errors so ECONNABORTED isn't caught here)
-  if (msg.includes('abort')) return null;
+  if (msg.includes("abort")) return null;
 
   // Unknown → non-degrading
   return null;
@@ -222,7 +246,10 @@ export function classifyError(err: any): 'minor' | 'major' | null {
  * Uses lazy-read decay model: mutations apply time-decay to the stored penalty,
  * then apply their change — re-anchoring the stored penalty to the current time.
  */
-export function recordFailure(modelDbId: number, tier: 'minor' | 'major'): void {
+export function recordFailure(
+  modelDbId: number,
+  tier: "minor" | "major",
+): void {
   const state = getOrCreateState(modelDbId);
   const cfg = getConfig();
   const now = Date.now();
@@ -234,7 +261,7 @@ export function recordFailure(modelDbId: number, tier: 'minor' | 'major'): void 
 
   // 2. Increment consecutive counters
   state.consecutiveHits++;
-  if (tier === 'major') {
+  if (tier === "major") {
     state.consecutiveMajorHits++;
   } else {
     // Minor failure breaks the "consecutive major" streak
@@ -242,9 +269,12 @@ export function recordFailure(modelDbId: number, tier: 'minor' | 'major'): void 
   }
 
   // 3. Determine effective tier for this hit
-  let effectiveTier: 'minor' | 'major' | 'critical' = tier;
-  if (tier === 'major' && state.consecutiveMajorHits >= cfg.critical.consecutiveThreshold) {
-    effectiveTier = 'critical';
+  let effectiveTier: "minor" | "major" | "critical" = tier;
+  if (
+    tier === "major" &&
+    state.consecutiveMajorHits >= cfg.critical.consecutiveThreshold
+  ) {
+    effectiveTier = "critical";
   }
 
   // 4. Compute severity weight for this hit
@@ -252,7 +282,7 @@ export function recordFailure(modelDbId: number, tier: 'minor' | 'major'): void 
 
   // 5. Compound: exponent = max(0, consecutiveHits - 1)
   const exponent = Math.max(0, state.consecutiveHits - 1);
-  const compound = Math.pow(cfg.compoundFactor, exponent);
+  const compound = cfg.compoundFactor ** exponent;
   const increment = weight * compound;
 
   // 6. Accumulate, clamped
@@ -269,7 +299,7 @@ export function recordFailure(modelDbId: number, tier: 'minor' | 'major'): void 
 
   // 8. Emit event
   publish({
-    type: 'degradation.hit',
+    type: "degradation.hit",
     modelDbId,
     tier: effectiveTier,
     penalty: state.penalty,
@@ -298,7 +328,10 @@ export function recordSuccess(modelDbId: number): void {
   state.penalty = Math.max(0, state.penalty);
 
   // 2. Recovery: floor() for deterministic integer steps
-  const recovery = Math.min(state.penalty, Math.max(1, Math.floor(state.penalty * cfg.successRecovery)));
+  const recovery = Math.min(
+    state.penalty,
+    Math.max(1, Math.floor(state.penalty * cfg.successRecovery)),
+  );
   state.penalty = Math.max(0, state.penalty - recovery);
 
   // 3. Reset both consecutive counters
@@ -308,7 +341,7 @@ export function recordSuccess(modelDbId: number): void {
   // 4. If penalty is low enough, snap to zero and reset half-life
   if (state.penalty < 1) {
     state.penalty = 0;
-    state.tier = 'minor';
+    state.tier = "minor";
     state.halfLifeMs = cfg.minor.halfLifeMs;
   }
 
@@ -321,7 +354,7 @@ export function recordSuccess(modelDbId: number): void {
 
   // 6. Emit event
   publish({
-    type: 'degradation.recovery',
+    type: "degradation.recovery",
     modelDbId,
     penalty: state.penalty,
     at: now,
@@ -355,11 +388,13 @@ export function getDegradationFactor(modelDbId: number): number {
 /**
  * Maps current penalty to a display-friendly tier (FR-6 Tier Display Policy).
  */
-export function getDisplayTier(penalty: number): 'healthy' | 'minor' | 'major' | 'critical' {
-  if (penalty <= 0) return 'healthy';
-  if (penalty <= 10) return 'minor';
-  if (penalty <= 30) return 'major';
-  return 'critical';
+export function getDisplayTier(
+  penalty: number,
+): "healthy" | "minor" | "major" | "critical" {
+  if (penalty <= 0) return "healthy";
+  if (penalty <= 10) return "minor";
+  if (penalty <= 30) return "major";
+  return "critical";
 }
 
 /**
@@ -372,7 +407,10 @@ export function getAllStatesRaw(): Map<number, DegradationState> {
 /**
  * Returns decayed view of states (for dashboard/API). Penalty is time-decayed. Returns a COPY.
  */
-export function getAllStatesView(): Map<number, DegradationState & { displayTier: string }> {
+export function getAllStatesView(): Map<
+  number,
+  DegradationState & { displayTier: string }
+> {
   const result = new Map<number, DegradationState & { displayTier: string }>();
   for (const [id, state] of degradationStates) {
     const elapsed = Date.now() - state.lastHitAt;
@@ -412,7 +450,7 @@ export function setBoost(modelDbId: number, value: number): void {
   state.dirty = true;
 
   publish({
-    type: 'degradation.boost',
+    type: "degradation.boost",
     modelDbId,
     oldBoost,
     newBoost: clamped,
@@ -433,7 +471,7 @@ export function resetBoost(modelDbId: number): void {
   state.dirty = true;
 
   publish({
-    type: 'degradation.boost',
+    type: "degradation.boost",
     modelDbId,
     oldBoost,
     newBoost: 1.0,
@@ -460,7 +498,10 @@ export function loadState(modelDbId: number, state: DegradationState): void {
 /**
  * Returns states where dirty === true. Marks them as clean (dirty=false).
  */
-export function flushDirtyStates(): Array<{ modelDbId: number; state: DegradationState }> {
+export function flushDirtyStates(): Array<{
+  modelDbId: number;
+  state: DegradationState;
+}> {
   const dirty: Array<{ modelDbId: number; state: DegradationState }> = [];
   for (const [modelDbId, state] of degradationStates) {
     if (state.dirty) {
