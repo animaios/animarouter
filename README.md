@@ -17,7 +17,7 @@
 [![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=active+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
 [![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=resolved+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
 
-<sub> Fork of [`MLuqmanBR/api-gateway`](https://github.com/MLuqmanBR/api-gateway) re-attached to [`tashfeenahmed/freellmapi`](https://github.com/tashfeenahmed/freellmapi)) for better visibility. </sub> <br> <br>
+<sub> Fork of [`MLuqmanBR/api-gateway`](https://github.com/MLuqmanBR/api-gateway) re-attached to [`tashfeenahmed/freellmapi`](https://github.com/tashfeenahmed/freellmapi) for better visibility. </sub> <br> <br>
 
 </div>
 
