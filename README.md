@@ -1,22 +1,23 @@
 <div align="center">
 
-# [AnimAIOS](https://github.com/animaios/airi) - AnimaRouter
+# [Anima](https://github.com/animaios/airi)Router
 
 **One endpoint. Any provider. Every free tier. Smart routing that learns.**
 
-> Fork of [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) (which itself forks [tashfeenahmed/freellmapi](https://github.com/tashfeenahmed/freellmapi)). What follows is only what AnimaRouter adds on top of api-gateway.
-
-<img width="256" height="384" alt="kawaii anima-chan" src="https://github.com/user-attachments/assets/992ae2fc-0473-40c9-b99b-cea7840b6543" />
+<img width="256" height="384" alt="AnimAIOS mascot" src="https://github.com/user-attachments/assets/52efcf2a-6cf3-40ad-bb14-d2092c7b4f0e" />
+<br>
+<br>
 
 <!--
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 -->
 
-[![DeepSource](https://app.deepsource.com/gh/animaios/freeproxy.svg/?label=code+coverage&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/freeproxy/)
-[![DeepSource](https://app.deepsource.com/gh/animaios/freeproxy.svg/?label=active+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/freeproxy/)
-[![DeepSource](https://app.deepsource.com/gh/animaios/freeproxy.svg/?label=resolved+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/freeproxy/)
+[![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=code+coverage&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
+[![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=active+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
+[![DeepSource](https://app.deepsource.com/gh/animaios/animarouter.svg/?label=resolved+issues&show_trend=true&token=c4KmjW5MkxAjVRTm0xZ9utwK)](https://app.deepsource.com/gh/animaios/animarouter/)
 
+<sub> Fork of [`MLuqmanBR/api-gateway`](https://github.com/MLuqmanBR/api-gateway) re-attached to [`tashfeenahmed/freellmapi`](https://github.com/tashfeenahmed/freellmapi)) for better visibility. <br> What follows is only what AnimaRouter adds on top of `api-gateway`. Upstream already ships OpenAI-compatible routing, Thompson-sampling bandits, per-key rate tracking, recovery, custom provider CRUD, context handoff, encrypted storage, dark-mode dashboard, and more. If it's not listed here, `api-gateway` already has it. </sub>
 
 </div>
 
@@ -41,9 +42,6 @@
 - [License](#license)
 
 ## What AnimaRouter adds
-
-Everything below is **on top of** [MLuqmanBR/api-gateway](https://github.com/MLuqmanBR/api-gateway) — which already ships OpenAI-compatible routing, Thompson-sampling bandits, per-key rate tracking, recovery, custom provider CRUD, context handoff, encrypted storage, dark-mode dashboard, Docker support, and more. If it's not listed here, api-gateway already has it.
-
 ### Routing & Resilience
 
 | Feature | What | Why it matters |
