@@ -9,6 +9,7 @@ import {
   ResponsiveContainer,
   Tooltip,
 } from "recharts";
+import { Activity } from "lucide-react";
 import { type ModelHealthInput, toRadarAxes } from "@/lib/health-radar";
 
 interface ModelHealthPopoverProps {
@@ -39,7 +40,6 @@ function RadarTooltipContent({
   );
 }
 
-const PILL = ["#22c55e", "#3b82f6", "#a855f7", "#f59e0b", "#ff6a00"] as const;
 
 export function ModelHealthPopover({
   label,
@@ -74,14 +74,7 @@ export function ModelHealthPopover({
         onFocus={open_}
         onBlur={close_}
       >
-        {PILL.map((c) => (
-          <span
-            key={c}
-            aria-hidden
-            className="h-[5px] w-[5px] rounded-full"
-            style={{ backgroundColor: c }}
-          />
-        ))}
+        <Activity aria-hidden className="size-3" />
       </button>
       {open &&
         createPortal(
