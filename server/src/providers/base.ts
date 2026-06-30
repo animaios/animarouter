@@ -151,6 +151,23 @@ export abstract class BaseProvider {
     const decoder = new TextDecoder();
     let buffer = "";
     let sawFinishReason = false;
+    const parseSseLine = (
+      line: string,
+    ): ChatCompletionChunk | "done" | undefined => {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data: ")) return undefined;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return "done";
+      try {
+        const chunk = JSON.parse(data) as ChatCompletionChunk;
+        if (chunk.choices?.some((c) => c.finish_reason != null))
+          sawFinishReason = true;
+        return chunk;
+      } catch {
+        // Skip malformed chunks
+        return undefined;
+      }
+    };
 
     try {
       while (true) {
@@ -173,6 +190,9 @@ export abstract class BaseProvider {
         const { done, value } = result;
         if (done) {
           buffer += decoder.decode(); // flush remaining buffered bytes
+          const parsed = parseSseLine(buffer);
+          if (parsed === "done") return;
+          if (parsed) yield parsed;
           break;
         }
 
@@ -181,18 +201,9 @@ export abstract class BaseProvider {
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data: ")) continue;
-          const data = trimmed.slice(6);
-          if (data === "[DONE]") return;
-          try {
-            const chunk = JSON.parse(data) as ChatCompletionChunk;
-            if (chunk.choices?.some((c) => c.finish_reason != null))
-              sawFinishReason = true;
-            yield chunk;
-          } catch {
-            // Skip malformed chunks
-          }
+          const parsed = parseSseLine(line);
+          if (parsed === "done") return;
+          if (parsed) yield parsed;
         }
       }
     } finally {
