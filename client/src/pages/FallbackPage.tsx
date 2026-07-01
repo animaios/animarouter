@@ -28,7 +28,7 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
-import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
+import { Fragment, type ReactNode, useMemo, useState } from "react";
 import { FloatingBar } from "@/components/floating-bar";
 import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import {
@@ -1195,35 +1195,28 @@ export default function FallbackPage() {
       queryClient.invalidateQueries({ queryKey: ["fallback", "routing"] }),
   });
 
-  // Per-provider strategy state: local React map keyed by platform slug.
-  // Seeded from server-side state once on fetch (see useEffect below).
-  // Updated optimistically on click (before PUT resolves), rolled back on error.
-  const [providerStrategies, setProviderStrategies] = useState<
-    Record<string, RoutingStrategy>
-  >({});
-
+  // Server-side provider strategy state held under ["fallback","routing","provider"].
+  // No React-local mirror: the cache is the single source of truth.
+  // Optimistic mutations go through queryClient.setQueryData + rollback via context.
+  type ProviderStrategyQueryRow = {
+    platform: string;
+    strategy: RoutingStrategy;
+    updated_at: string;
+  };
   const providerStrategiesQuery = useQuery({
     queryKey: ["fallback", "routing", "provider"],
-    queryFn: async (): Promise<Record<string, RoutingStrategy>> => {
-      const res = await fetch("/api/fallback/routing/provider");
-      if (!res.ok) throw new Error("Failed to fetch provider strategies");
-      const data = (await res.json()) as Array<{
-        platform: string;
-        strategy: RoutingStrategy;
-        updated_at: string;
-      }>;
-      return data.reduce<Record<string, RoutingStrategy>>((acc, row) => {
-        acc[row.platform] = row.strategy;
-        return acc;
-      }, {});
-    },
+    queryFn: async (): Promise<ProviderStrategyQueryRow[]> =>
+      apiFetch("/api/fallback/routing/provider"),
   });
 
-  useEffect(() => {
-    if (providerStrategiesQuery.data) {
-      setProviderStrategies(providerStrategiesQuery.data);
-    }
-  }, [providerStrategiesQuery.data]);
+  // Derived map for the strategy rows (keyed by platform). Reactively derived from cache.
+  // Default "Auto" is handled in ProviderStrategyRow's isSelected computation.
+  const providerStrategies: Record<string, RoutingStrategy> = (
+    providerStrategiesQuery.data ?? []
+  ).reduce<Record<string, RoutingStrategy>>((acc, row) => {
+    acc[row.platform] = row.strategy;
+    return acc;
+  }, {});
 
   const providerStrategyMutation = useMutation({
     mutationFn: async ({
@@ -1233,26 +1226,50 @@ export default function FallbackPage() {
       platform: string;
       strategy: RoutingStrategy;
     }) => {
-      const res = await fetch("/api/fallback/routing/provider", {
+      return apiFetch<{
+        platform: string;
+        strategy: RoutingStrategy;
+        updated_at: string;
+      }>("/api/fallback/routing/provider", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ platform, strategy }),
       });
-      if (!res.ok) throw new Error("Failed to set provider strategy");
-      return res.json();
     },
     onMutate: async ({ platform, strategy }) => {
-      const previous = providerStrategies[platform];
-      setProviderStrategies((prev) => ({ ...prev, [platform]: strategy }));
+      await queryClient.cancelQueries({
+        queryKey: ["fallback", "routing", "provider"],
+      });
+      const previous = queryClient.getQueryData<ProviderStrategyQueryRow[]>([
+        "fallback",
+        "routing",
+        "provider",
+      ]);
+      queryClient.setQueryData<ProviderStrategyQueryRow[]>(
+        ["fallback", "routing", "provider"],
+        (old) => {
+          const rows = old ?? [];
+          const idx = rows.findIndex((r) => r.platform === platform);
+          const next: ProviderStrategyQueryRow = {
+            platform,
+            strategy,
+            updated_at: new Date().toISOString(),
+          };
+          if (idx === -1) {
+            return [...rows, next];
+          }
+          const copy = [...rows];
+          copy[idx] = next;
+          return copy;
+        },
+      );
       return { previous };
     },
-    onError: (_err, vars, context) => {
-      if (context !== undefined && context.previous !== undefined) {
-        const prevValue = context.previous;
-        setProviderStrategies((prev) => ({
-          ...prev,
-          [vars.platform]: prevValue,
-        }));
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(
+          ["fallback", "routing", "provider"],
+          context.previous,
+        );
       }
     },
     onSuccess: () => {

@@ -798,8 +798,10 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
     chain
       .map((e) => {
         // Resolve per-platform override; fall back to the global strategy.
-        const effectiveStrategy = resolvePlatformStrategy(e.platform) ?? strategy;
-        const entryWeights = weightsFor(effectiveStrategy) ?? BANDIT_PRESETS.balanced;
+        const effectiveStrategy =
+          resolvePlatformStrategy(e.platform) ?? strategy;
+        const entryWeights =
+          weightsFor(effectiveStrategy) ?? BANDIT_PRESETS.balanced;
         return {
           e,
           s: scoreChainEntry(
@@ -1393,7 +1395,10 @@ function routeGroupAware(
       .map((p) => {
         const platformStrategy = resolvePlatformStrategy(p.platform);
         const effectiveStrategy = platformStrategy ?? strategy;
-        const subWeights = weightsFor(effectiveStrategy) ?? weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+        const subWeights =
+          weightsFor(effectiveStrategy) ??
+          weightsFor(strategy) ??
+          BANDIT_PRESETS.balanced;
         const { subScore } = providerSubScore(
           p,
           subWeights,

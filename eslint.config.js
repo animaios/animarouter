@@ -1,5 +1,5 @@
-import tseslint from "typescript-eslint";
 import js from "@eslint/js";
+import tseslint from "typescript-eslint";
 
 // Threshold 60: catches genuinely over-complex functions (>60 branch points)
 // without noise from legitimate switch/if chains (provider translation code,
