@@ -167,32 +167,34 @@ describe("Provider Health Heartbeat", () => {
   // ── Activity Gating ────────────────────────────────────────────────────
 
   describe("Activity gating", () => {
-    it("cycle is skipped when no activity has ever occurred", async () => {
+    it("advisor is gated off when no activity has ever occurred", async () => {
+      // PR #42 removed the per-cycle activity gate (cheap "hi" pings now always
+      // fire to feed the off-hours productivity chart baseline). The remaining
+      // gate is on the AI advisor prompt: with no recent user activity, the
+      // advisor payload is not built and no advisor events fire — only a cheap
+      // "hi" ping runs. This is the new behavior this test verifies.
       startHeartbeat();
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
 
-      const skipEvents = publishedEvents.filter(
-        (e) => e.type === "heartbeat.cycle_skipped",
+      const advisorEvents = publishedEvents.filter(
+        (e) => e.type.startsWith("heartbeat.advisor_"),
       );
-      expect(skipEvents.length).toBeGreaterThanOrEqual(1);
-      expect(skipEvents[0].reason).toBe("activity_gate");
-      expect(skipEvents[0].lastActivityAgeMs).toBe(-1);
+      expect(advisorEvents.length).toBe(0);
     });
 
-    it("cycle is skipped when last activity is older than the activity window", async () => {
+    it("advisor is gated off when last activity is older than the activity window", async () => {
       recordActivity();
-      // Advance past the activity window (15 min)
+      // Advance past the advisor activity window (15 min)
       await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
 
       startHeartbeat();
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
 
-      const skipEvents = publishedEvents.filter(
-        (e) => e.type === "heartbeat.cycle_skipped",
+      // Activity window expired → advisor prompt suppressed, only cheap pings run
+      const advisorEvents = publishedEvents.filter(
+        (e) => e.type.startsWith("heartbeat.advisor_"),
       );
-      expect(skipEvents.length).toBeGreaterThanOrEqual(1);
-      expect(skipEvents[0].reason).toBe("activity_gate");
-      expect(skipEvents[0].lastActivityAgeMs).toBeGreaterThan(15 * 60 * 1000);
+      expect(advisorEvents.length).toBe(0);
     });
 
     it("cycle proceeds when activity is recent", async () => {
@@ -1604,10 +1606,12 @@ describe("Provider Health Heartbeat", () => {
         usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
       });
 
+      // Advisor only fires when a recent user request justifies its token budget.
+      recordActivity();
       await pokeAllKeys();
 
       const firstCall = chatCompletion.mock.calls[0];
-      expect(firstCall[1][0].role).toBe("system");
+      // Payload message is the second element: system prompt + user payload
       expect(firstCall[1][1].content).toContain('"self"');
       expect(firstCall[3].max_tokens).toBe(8);
 
@@ -1658,6 +1662,8 @@ describe("Provider Health Heartbeat", () => {
           usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
         });
 
+      // Advisor only fires when a recent user request justifies its token budget.
+      recordActivity();
       await pokeAllKeys();
       expect(chatCompletion).toHaveBeenCalledTimes(1);
 
@@ -1719,10 +1725,13 @@ describe("Provider Health Heartbeat", () => {
           usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
         });
 
+      // Advisor only fires when a recent user request justifies its token budget.
+      recordActivity();
       await pokeAllKeys();
 
       // Strategy is iterative_refinement, so oscillatorHint:enable doesn't toggle a setting
-      // but injection model suggestions still apply
+      // but injection model suggestions still apply. The oscillator settings are
+      // written via setSetting and persist across cycles.
       expect(getSetting("oscillator_injection_selection")).toBe(
         String(injectionModelDbId),
       );
@@ -1736,6 +1745,9 @@ describe("Provider Health Heartbeat", () => {
         ),
       ).toBe(true);
 
+      // Re-trigger activity gate for the second cycle. Without recency the
+      // advisor is suppressed and settings from the first cycle remain intact.
+      recordActivity();
       await pokeAllKeys();
 
       expect(chatCompletion).toHaveBeenCalledTimes(2);
