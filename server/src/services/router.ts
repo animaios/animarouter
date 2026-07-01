@@ -341,6 +341,7 @@ const VALID_STRATEGIES: RoutingStrategy[] = [
   "reliable",
   "custom",
   "racing",
+  "auto",
 ];
 
 export function getRoutingStrategy(): RoutingStrategy {
@@ -412,7 +413,10 @@ export function setCustomWeights(weights: RoutingWeights): void {
 }
 
 function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
-  if (strategy === "priority" || strategy === "racing") return null;
+  // priority / racing / auto finalize order outside the weighted engine — the
+  // orchestrator resolves 'auto' to a concrete arm BEFORE calling weightsFor.
+  if (strategy === "priority" || strategy === "racing" || strategy === "auto")
+    return null;
   if (strategy === "custom") return getCustomWeights();
   return BANDIT_PRESETS[strategy];
 }
