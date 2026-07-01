@@ -176,8 +176,8 @@ describe("Provider Health Heartbeat", () => {
       startHeartbeat();
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
 
-      const advisorEvents = publishedEvents.filter(
-        (e) => e.type.startsWith("heartbeat.advisor_"),
+      const advisorEvents = publishedEvents.filter((e) =>
+        e.type.startsWith("heartbeat.advisor_"),
       );
       expect(advisorEvents.length).toBe(0);
     });
@@ -191,8 +191,8 @@ describe("Provider Health Heartbeat", () => {
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
 
       // Activity window expired → advisor prompt suppressed, only cheap pings run
-      const advisorEvents = publishedEvents.filter(
-        (e) => e.type.startsWith("heartbeat.advisor_"),
+      const advisorEvents = publishedEvents.filter((e) =>
+        e.type.startsWith("heartbeat.advisor_"),
       );
       expect(advisorEvents.length).toBe(0);
     });
