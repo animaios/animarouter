@@ -33,6 +33,7 @@
 ## 📑 Contents
 
 - [What AnimaRouter adds](#what-animarouter-adds)
+- [Per-Provider Routing Strategies](#-per-provider-routing-strategies)
 - [In Development](#in-development)
 - [Quick Start](#quick-start)
 - [Docker](#docker)
@@ -60,6 +61,7 @@ What follows is only what AnimaRouter adds on top of `api-gateway`. Upstream alr
 | **Free-only enforcement** | OpenRouter and OpenCode routes restricted to `:free` models only. Monthly token budget system removed in favour of simpler quotas. | AnimaRouter is about stacking free tiers; accidentally hitting a paid endpoint through those routes costs real money. |
 | **Keyless custom providers** | Local servers that don't need auth can be added without a key. | Upstream requires a key for every provider — a blocker for self-hosted/Ollama-style endpoints that have no auth layer. |
 | **Archive instead of hard-delete** | Custom providers and models get archived (restorable), not cascade-deleted. | Upstream cascade-deletes on removal. One misclick and your whole custom provider config is gone. Archive is reversible. |
+| **Per-provider routing strategies** | Attach one of nine routing strategies (Manual, Balanced, Smartest, Iterative Refinement, Fastest, Most reliable, Custom, Racing, Auto) per provider on the `/models` page. Auto mode runs a Thompson-sampled meta-bandit over five strategy arms, learning from existing telemetry. | One-size-fits-all routing ignores that different providers have different strengths — a fast provider wants "Fastest", a reasoning provider wants "Smartest". Per-provider strategies tailor the router to each provider without sacrificing the bandit's global optimisation. |
 
 ### 🧠 Benchmarks & Intelligence
 
@@ -93,6 +95,37 @@ What follows is only what AnimaRouter adds on top of `api-gateway`. Upstream alr
 | **`api` CLI** | `api start`, `api stop`, `api status`, multi-instance tracking, log rotation. | Upstream has no CLI. Running the server means remembering `node server/dist/index.js` flags. |
 | **Server log rotation** | Prevents disk fill from unbounded logs. | Long-running instances silently eat disk until something breaks. |
 | **DeepSource coverage** | Integrated test-coverage reporting pipeline. | Continuous coverage visibility catches regressions before merge. |
+
+## 🎯 Per-Provider Routing Strategies
+
+The `/models` admin page now carries a **strategy row** per provider, letting you pick how AnimaRouter routes to *that specific provider*. Nine strategies are available:
+
+| Strategy | What it does |
+|----------|-------------|
+| **Manual** | Pick a single model; only that model routes to this provider. |
+| **Balanced** | Default — balances intelligence, speed, and reliability via Thompson sampling. |
+| **Smartest** | Always pick the highest-ranked available model. |
+| **Iterative Refinement** | Iteratively refine responses across multiple models. |
+| **Fastest** | Prioritise lowest-latency completions. |
+| **Most reliable** | Prioritise uptime and lowest error rates. |
+| **Custom** | Provider-tailored combination of metrics. |
+| **Racing** | Race multiple models and return the fastest winner. |
+| **Auto** | Run all five dynamic strategies (balanced, smartest, fastest, reliable, racing) as bandit arms and converge on the best one using existing telemetry as rewards. |
+
+### Auto-orchestration
+
+The **Auto** strategy is a Thompson-sampled meta-bandit with five arms. Each arms corresponds to a dynamic strategy under the hood. Rewards are computed from the project's existing request telemetry (latency, error rates, quality signals). Over time, Auto converges on whichever strategy gives the best outcome for the provider — without manual tuning.
+
+### API
+
+The feature exposes two REST endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/fallback/routing/provider[?platform=]` | Read the current strategy for a provider (defaults to the most-recently configured platform when `platform` is omitted). |
+| `PUT` | `/api/fallback/routing/provider` | Update the strategy for a provider. Body: `{ platform: string, strategy: StrategyName }`. |
+
+Strategies are persisted in a new `provider_strategies` SQLite table and evaluated by `server/src/services/provider-strategy.ts`. Meta-bandit orchestration lives in `server/src/services/auto-orchestrator.ts`.
 
 ## 🚧 In Development
 
@@ -317,6 +350,17 @@ curl http://localhost:3001/v1/embeddings \
 | `embeddinggemma-300m` | 768 | Cloudflare |
 
 The default family, per-provider toggles, and priorities live on the dashboard's **Models → Embeddings** page.
+
+### Admin REST APIs
+
+Beyond the OpenAI-compatible endpoints above, the server exposes configuration APIs under `/api`. The new **per-provider routing strategy** endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/fallback/routing/provider[?platform=]` | Read the current strategy for a provider. |
+| `PUT` | `/api/fallback/routing/provider` | Update the strategy for a provider (`{ platform, strategy }`). |
+
+Configure these from the `/models` admin page or call them directly.
 
 ## Context Handoff
 

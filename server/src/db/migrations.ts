@@ -386,6 +386,7 @@ function createTables(db: Database.Database) {
   ensureApiKeysUseProxyColumn(db);
   ensureModelGroupsColumns(db);
   ensureKeyStatsAdvisorColumns(db);
+  ensureProviderStrategiesTable(db);
 }
 
 // ── V34: Benchmark Unification — per-source columns (2026-06) ────────────
@@ -451,6 +452,22 @@ function ensureBenchmarkSourceWeightsTable(db: Database.Database) {
 // ── Dynamic Degradation: persistent penalty state ─────────────────────────
 // Stores per-model degradation state so penalties survive server restarts.
 // Loaded at startup with time-decay applied; flushed periodically (60s).
+// ── Per-provider routing strategy overrides ──────────────────────────────────
+// Maps each platform slug to an explicit RoutingStrategy. The orchestrator is
+// only consulted when strategy === 'auto'; all other literals route directly.
+// Allowed values match the 9-entry enum via CHECK constraint — 'auto' is one of
+// them so bandit-managed mode can be persisted exactly as its canonical key.
+function ensureProviderStrategiesTable(db: Database.Database) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_strategies (
+      platform    TEXT PRIMARY KEY,
+      strategy    TEXT NOT NULL,
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK (strategy IN ('priority','balanced','smartest','iterative_refinement','fastest','reliable','custom','racing','auto'))
+    );
+  `);
+}
+
 function ensureDegradationTable(db: Database.Database) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS model_degradation (

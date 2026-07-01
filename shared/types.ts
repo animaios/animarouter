@@ -37,6 +37,48 @@ export type Platform =
 // health checks key off the platform string and treat it identically to a
 // built-in — the only difference is the base URL lives in custom_providers.
 
+// ---- Per-Provider Routing Strategy ------------------------------------------
+// The client and the server share this union. The literal 'auto' appears only
+// at the per-provider level (never as a global fallback) and routes each
+// request through the Thompson-sampling orchestrator.
+export type ProviderRoutingStrategy =
+  | "priority"
+  | "balanced"
+  | "smartest"
+  | "iterative_refinement"
+  | "fastest"
+  | "reliable"
+  | "custom"
+  | "racing"
+  | "auto";
+
+// Arms eligible for Auto mode. Excludes `priority` (only the chain order
+// decides), `custom` (free-form weighting, not comparable across runs), and
+// `iterative_refinement` (multi-turn oscillator state doesn't decompose to a
+// single per-request reward signal).
+export const AUTO_ARMS: ProviderRoutingStrategy[] = [
+  "balanced",
+  "smartest",
+  "fastest",
+  "reliable",
+  "racing",
+];
+
+// The set of 9 literal strategies allowed in the provider_strategies CHECK
+// constraint. Repeated from `ProviderRoutingStrategy` as a value so zod and
+// other validators can reference it at runtime.
+export const VALID_PROVIDERS_STRATEGIES: readonly ProviderRoutingStrategy[] = [
+  "priority",
+  "balanced",
+  "smartest",
+  "iterative_refinement",
+  "fastest",
+  "reliable",
+  "custom",
+  "racing",
+  "auto",
+] as const;
+
 export interface CustomProvider {
   id: number;
   slug: string;

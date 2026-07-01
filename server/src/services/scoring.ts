@@ -39,10 +39,13 @@ export type RoutingStrategy =
   | "fastest"
   | "reliable"
   | "custom"
-  | "racing";
+  | "racing"
+  // Per-provider auto mode — routes via the Thompson-sampling orchestrator.
+  // 'auto' is never a global fallback; only provider_strategies rows set it.
+  | "auto";
 
 export const BANDIT_PRESETS: Record<
-  Exclude<RoutingStrategy, "priority" | "custom" | "racing">,
+  Exclude<RoutingStrategy, "priority" | "custom" | "racing" | "auto">,
   RoutingWeights
 > = {
   // Reliability leads; speed, intelligence, latency split the rest evenly.

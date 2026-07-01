@@ -28,7 +28,7 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
-import { type ReactNode, useMemo, useState } from "react";
+import { Fragment, type ReactNode, useMemo, useState } from "react";
 import { FloatingBar } from "@/components/floating-bar";
 import { ModelHealthPopover } from "@/components/ModelHealthPopover";
 import {
@@ -107,7 +107,9 @@ type RoutingStrategy =
   | "fastest"
   | "reliable"
   | "custom"
-  | "racing";
+  | "racing"
+  // Per-provider auto mode — Thompson-sampled arm selection. Never a global fallback.
+  | "auto";
 
 type RoutingWeights = {
   reliability: number;
@@ -248,6 +250,12 @@ const STRATEGIES: { key: RoutingStrategy; label: string; blurb: string }[] = [
     label: "Racing",
     blurb:
       "Fire requests to all available models in parallel (1 key per model). The first model to respond wins — its stream is forwarded to you, and the rest are cancelled. No scoring, no fallback chain; pure speed. Best for latency-sensitive queries where any capable model will do.",
+  },
+  {
+    key: "auto",
+    label: "Auto",
+    blurb:
+      "Bandit-managed: Thompson-sampled arm selection over balanced, smartest, fastest, most reliable, and racing. Rewards are derived from live telemetry; excluded arms: iterative refinement (multi-turn oscillator state).",
   },
 ];
 
@@ -1047,6 +1055,75 @@ function SortableRow({
   );
 }
 
+const PROVIDER_STRATEGY_STATUSES = [
+  "Scores update from live traffic. The order below is how requests are routed right now.",
+] as const;
+
+function ProviderStrategyRow({
+  platform,
+  activeStrategy,
+  isPending,
+  disabled,
+  onSelect,
+}: {
+  platform: string;
+  activeStrategy: RoutingStrategy | undefined;
+  isPending: boolean;
+  disabled: boolean;
+  onSelect: (strategy: RoutingStrategy) => void;
+}) {
+  return (
+    <tr
+      data-is-strategy-row="true"
+      data-platform={platform}
+      className="border-b last:border-0 bg-muted/30"
+    >
+      <td colSpan={12} className="px-0 py-0">
+        <div className="flex flex-col gap-1.5 py-2 pl-10 pr-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
+              {platform} routing
+            </div>
+            <fieldset
+              className="inline-flex flex-wrap items-center gap-1 rounded-xl border p-0 m-0"
+              aria-label={`${platform} routing strategy`}
+            >
+              {STRATEGIES.map((s) => {
+                const isSelected =
+                  activeStrategy === s.key ||
+                  (activeStrategy === undefined && s.key === "auto");
+                return (
+                  <Tooltip key={s.key} text={s.blurb}>
+                    <button
+                      type="button"
+                      aria-label={s.label}
+                      data-state={isSelected ? "on" : "off"}
+                      data-strategy={s.key}
+                      data-platform={platform}
+                      disabled={disabled || isPending}
+                      onClick={() => onSelect(s.key)}
+                      className={`px-3 py-1.5 text-xs rounded-lg transition-colors border-none bg-transparent ${
+                        isSelected
+                          ? "bg-foreground text-background font-medium"
+                          : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                      }`}
+                    >
+                      {s.label}
+                    </button>
+                  </Tooltip>
+                );
+              })}
+            </fieldset>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {PROVIDER_STRATEGY_STATUSES[0]}
+          </p>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 export default function FallbackPage() {
   const queryClient = useQueryClient();
   const [localEntries, setLocalEntries] = useState<FallbackEntry[] | null>(
@@ -1116,6 +1193,90 @@ export default function FallbackPage() {
       }),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["fallback", "routing"] }),
+  });
+
+  // Server-side provider strategy state held under ["fallback","routing","provider"].
+  // No React-local mirror: the cache is the single source of truth.
+  // Optimistic mutations go through queryClient.setQueryData + rollback via context.
+  type ProviderStrategyQueryRow = {
+    platform: string;
+    strategy: RoutingStrategy;
+    updated_at: string;
+  };
+  const providerStrategiesQuery = useQuery({
+    queryKey: ["fallback", "routing", "provider"],
+    queryFn: async (): Promise<ProviderStrategyQueryRow[]> =>
+      apiFetch("/api/fallback/routing/provider"),
+  });
+
+  // Derived map for the strategy rows (keyed by platform). Reactively derived from cache.
+  // Default "Auto" is handled in ProviderStrategyRow's isSelected computation.
+  const providerStrategies: Record<string, RoutingStrategy> = (
+    providerStrategiesQuery.data ?? []
+  ).reduce<Record<string, RoutingStrategy>>((acc, row) => {
+    acc[row.platform] = row.strategy;
+    return acc;
+  }, {});
+
+  const providerStrategyMutation = useMutation({
+    mutationFn: async ({
+      platform,
+      strategy,
+    }: {
+      platform: string;
+      strategy: RoutingStrategy;
+    }) => {
+      return apiFetch<{
+        platform: string;
+        strategy: RoutingStrategy;
+        updated_at: string;
+      }>("/api/fallback/routing/provider", {
+        method: "PUT",
+        body: JSON.stringify({ platform, strategy }),
+      });
+    },
+    onMutate: async ({ platform, strategy }) => {
+      await queryClient.cancelQueries({
+        queryKey: ["fallback", "routing", "provider"],
+      });
+      const previous = queryClient.getQueryData<ProviderStrategyQueryRow[]>([
+        "fallback",
+        "routing",
+        "provider",
+      ]);
+      queryClient.setQueryData<ProviderStrategyQueryRow[]>(
+        ["fallback", "routing", "provider"],
+        (old) => {
+          const rows = old ?? [];
+          const idx = rows.findIndex((r) => r.platform === platform);
+          const next: ProviderStrategyQueryRow = {
+            platform,
+            strategy,
+            updated_at: new Date().toISOString(),
+          };
+          if (idx === -1) {
+            return [...rows, next];
+          }
+          const copy = [...rows];
+          copy[idx] = next;
+          return copy;
+        },
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(
+          ["fallback", "routing", "provider"],
+          context.previous,
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["fallback", "routing", "provider"],
+      });
+    },
   });
 
   // Boost mutation: thumbs up → 2.0, thumbs down → 0.5, click active → reset to 1.0.
@@ -1695,15 +1856,34 @@ export default function FallbackPage() {
                             >
                               <tbody>
                                 {activeRows.map((row, i) => (
-                                  <SortableRow
-                                    key={rowKey(row)}
-                                    row={row}
-                                    rank={i + 1}
-                                    onEdit={setEditingModel}
-                                    onArchive={handleArchive}
-                                    onBoost={handleBoost}
-                                    showEligibilityChip={!isFailOpen}
-                                  />
+                                  <Fragment key={rowKey(row)}>
+                                    <SortableRow
+                                      row={row}
+                                      rank={i + 1}
+                                      onEdit={setEditingModel}
+                                      onArchive={handleArchive}
+                                      onBoost={handleBoost}
+                                      showEligibilityChip={!isFailOpen}
+                                    />
+                                    {row.isGroup && row.platform && (
+                                      <ProviderStrategyRow
+                                        platform={row.platform}
+                                        activeStrategy={
+                                          providerStrategies[row.platform]
+                                        }
+                                        isPending={
+                                          providerStrategyMutation.isPending
+                                        }
+                                        disabled={false}
+                                        onSelect={(strategy) =>
+                                          providerStrategyMutation.mutate({
+                                            platform: row.platform,
+                                            strategy,
+                                          })
+                                        }
+                                      />
+                                    )}
+                                  </Fragment>
                                 ))}
                               </tbody>
                             </SortableContext>
@@ -1716,27 +1896,46 @@ export default function FallbackPage() {
                           {tableHead}
                           <tbody>
                             {activeRows.map((row, i) => (
-                              <motion.tr
-                                key={rowKey(row)}
-                                layout="position"
-                                layoutId={`model-${rowKey(row)}`}
-                                transition={{
-                                  type: "spring",
-                                  stiffness: 350,
-                                  damping: 30,
-                                }}
-                                className="border-b last:border-0 group"
-                              >
-                                <RowContent
-                                  row={row}
-                                  rank={i + 1}
-                                  draggable={false}
-                                  onEdit={setEditingModel}
-                                  onArchive={handleArchive}
-                                  onBoost={handleBoost}
-                                  showEligibilityChip={!isFailOpen}
-                                />
-                              </motion.tr>
+                              <Fragment key={rowKey(row)}>
+                                <motion.tr
+                                  layout="position"
+                                  layoutId={`model-${rowKey(row)}`}
+                                  transition={{
+                                    type: "spring",
+                                    stiffness: 350,
+                                    damping: 30,
+                                  }}
+                                  className="border-b last:border-0 group"
+                                >
+                                  <RowContent
+                                    row={row}
+                                    rank={i + 1}
+                                    draggable={false}
+                                    onEdit={setEditingModel}
+                                    onArchive={handleArchive}
+                                    onBoost={handleBoost}
+                                    showEligibilityChip={!isFailOpen}
+                                  />
+                                </motion.tr>
+                                {row.isGroup && row.platform && (
+                                  <ProviderStrategyRow
+                                    platform={row.platform}
+                                    activeStrategy={
+                                      providerStrategies[row.platform]
+                                    }
+                                    isPending={
+                                      providerStrategyMutation.isPending
+                                    }
+                                    disabled={false}
+                                    onSelect={(strategy) =>
+                                      providerStrategyMutation.mutate({
+                                        platform: row.platform,
+                                        strategy,
+                                      })
+                                    }
+                                  />
+                                )}
+                              </Fragment>
                             ))}
                           </tbody>
                         </table>

@@ -4,6 +4,7 @@ import { getDb, getSetting, setSetting } from "../db/index.js";
 import { decrypt } from "../lib/crypto.js";
 import type { BaseProvider } from "../providers/base.js";
 import { buildProviderFor } from "../providers/index.js";
+import { selectAutoStrategy } from "./auto-orchestrator.js";
 import {
   getAllStatesView,
   getBoost,
@@ -25,6 +26,7 @@ import {
   type KeyStats,
 } from "./heartbeat.js";
 import { isExhausted } from "./key-exhaustion.js";
+import { getProviderStrategy } from "./provider-strategy.js";
 import {
   type TransportId,
   transportIdFromUseProxy,
@@ -341,8 +343,10 @@ const VALID_STRATEGIES: RoutingStrategy[] = [
   "reliable",
   "custom",
   "racing",
+  "auto",
 ];
 
+// Re-export for the routing engine persistence layer
 export function getRoutingStrategy(): RoutingStrategy {
   ensureDegradationInit();
   const raw = getSetting(STRATEGY_KEY);
@@ -357,6 +361,44 @@ export function setRoutingStrategy(strategy: RoutingStrategy): void {
   }
   setSetting(STRATEGY_KEY, strategy);
 }
+
+/**
+ * Resolve the effective routing strategy for a specific platform.
+ *
+ * Resolution order:
+ * 1. Per-platform override in `provider_strategies` (non-Auto literal wins).
+ * 2. Orchestrator-selected arm (only when per-platform strategy === 'auto').
+ * 3. Global fallback — `getRoutingStrategy()` (unchanged behaviour).
+ *
+ * Manual override (any non-Auto literal) always wins over the orchestrator;
+ * the orchestrator is ONLY called when the stored strategy is exactly `auto`.
+ */
+export function resolvePlatformStrategy(
+  platform: string,
+  ctx?: { strategy?: RoutingStrategy } | null,
+): RoutingStrategy {
+  if (
+    ctx?.strategy &&
+    ctx.strategy !== "auto" &&
+    VALID_STRATEGIES.includes(ctx.strategy)
+  ) {
+    return ctx.strategy;
+  }
+
+  const provider = getProviderStrategy(platform);
+  if (!provider) return getRoutingStrategy();
+  if (provider === "auto") return selectAutoStrategy(platform);
+  return provider;
+}
+
+// Re-export the orchestrator's reset helper so route tests can isolate it.
+export { resetAutoOrchestratorCache } from "./auto-orchestrator.js";
+// Re-export the persistence helpers so callers don't need two import lines.
+export {
+  getProviderStrategy,
+  listProviderStrategies,
+  setProviderStrategy,
+} from "./provider-strategy.js";
 
 // ── Custom weights (persisted) ──────────────────────────────────────────────
 // User-tuned weight vector for the 'custom' strategy. Stored normalized (sums
@@ -412,7 +454,10 @@ export function setCustomWeights(weights: RoutingWeights): void {
 }
 
 function weightsFor(strategy: RoutingStrategy): RoutingWeights | null {
-  if (strategy === "priority" || strategy === "racing") return null;
+  // priority / racing / auto finalize order outside the weighted engine — the
+  // orchestrator resolves 'auto' to a concrete arm BEFORE calling weightsFor.
+  if (strategy === "priority" || strategy === "racing" || strategy === "auto")
+    return null;
   if (strategy === "custom") return getCustomWeights();
   return BANDIT_PRESETS[strategy];
 }
@@ -711,29 +756,34 @@ function scoreChainEntry(
  */
 function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
   const weights = weightsFor(strategy);
-  if (!weights) {
-    // Legacy priority mode: base priority + 429 penalty, ascending.
+  const hasOverride = chain.some(
+    (e) => resolvePlatformStrategy(e.platform) !== strategy,
+  );
+
+  // Fast path: no per-platform overrides AND global strategy is legacy priority/racing →
+  // ascending priority + 429 penalty — preserves existing behavior exactly.
+  if (!hasOverride && !weights) {
     return chain
       .map((e) => ({ e, eff: e.priority + getPenalty(e.model_db_id) }))
       .sort((a, b) => a.eff - b.eff || a.e.priority - b.e.priority)
       .map((x) => x.e);
   }
 
-  // Intelligence composites for min-max normalization
+  // Intelligence composites for min-max normalization.
   const intelComposites = chain.map((e) =>
     intelligenceComposite(e.size_label, e.intelligence_rank, e.benchmark_score),
   );
   const intelMin = intelComposites.length ? Math.min(...intelComposites) : 0;
   const intelMax = intelComposites.length ? Math.max(...intelComposites) : 0;
 
-  // Speed composites for min-max normalization
+  // Speed composites for min-max normalization.
   const speedComposites = chain.map((e) =>
     speedCompositeFromRank(e.speed_rank, e.size_label),
   );
   const speedMin = speedComposites.length ? Math.min(...speedComposites) : 0;
   const speedMax = speedComposites.length ? Math.max(...speedComposites) : 0;
 
-  // Latency composites for min-max normalization
+  // Latency composites for min-max normalization.
   const latencyComposites = chain.map((e) =>
     latencyCompositeFromSize(e.size_label),
   );
@@ -746,20 +796,27 @@ function orderChain(chain: ChainRow[], strategy: RoutingStrategy): ChainRow[] {
 
   return (
     chain
-      .map((e) => ({
-        e,
-        s: scoreChainEntry(
+      .map((e) => {
+        // Resolve per-platform override; fall back to the global strategy.
+        const effectiveStrategy =
+          resolvePlatformStrategy(e.platform) ?? strategy;
+        const entryWeights =
+          weightsFor(effectiveStrategy) ?? BANDIT_PRESETS.balanced;
+        return {
           e,
-          weights,
-          intelMin,
-          intelMax,
-          speedMin,
-          speedMax,
-          latencyMin,
-          latencyMax,
-          true,
-        ).score,
-      }))
+          s: scoreChainEntry(
+            e,
+            entryWeights,
+            intelMin,
+            intelMax,
+            speedMin,
+            speedMax,
+            latencyMin,
+            latencyMax,
+            true,
+          ).score,
+        };
+      })
       // Higher score first; manual priority breaks ties so the chain still matters.
       .sort((a, b) => b.s - a.s || a.e.priority - b.e.priority)
       .map((x) => x.e)
@@ -1331,12 +1388,20 @@ function routeGroupAware(
       continue;
     }
 
-    const weightsForSub = weightsFor(strategy) ?? BANDIT_PRESETS.balanced;
+    // Resolve per-provider effective strategy. A per-platform override in the
+    // provider_strategies table wins; if the override is "auto" the orchestrator
+    // selects an arm; otherwise falls back to the group-level strategy.
     const providersScored = providers
       .map((p) => {
+        const platformStrategy = resolvePlatformStrategy(p.platform);
+        const effectiveStrategy = platformStrategy ?? strategy;
+        const subWeights =
+          weightsFor(effectiveStrategy) ??
+          weightsFor(strategy) ??
+          BANDIT_PRESETS.balanced;
         const { subScore } = providerSubScore(
           p,
-          weightsForSub,
+          subWeights,
           speedMin,
           speedMax,
           latencyMin,
