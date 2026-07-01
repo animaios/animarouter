@@ -1,6 +1,17 @@
 import type Database from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { initDb } from "../../db/index.js";
+import { resetAutoOrchestratorCache } from "../../services/auto-orchestrator.js";
+import {
+  getProviderStrategy,
+  listProviderStrategies,
+  setProviderStrategy,
+} from "../../services/provider-strategy.js";
+import {
+  getRoutingStrategy,
+  resolvePlatformStrategy,
+  setRoutingStrategy,
+} from "../../services/router.js";
 import type { RoutingStrategy } from "../../services/scoring.js";
 
 /**
@@ -97,5 +108,104 @@ describe("RoutingStrategy type union", () => {
       "racing",
     ];
     expect(legacy).toHaveLength(8);
+  });
+});
+
+describe("provider strategy persistence", () => {
+  beforeEach(() => {
+    initDb(":memory:");
+    resetAutoOrchestratorCache();
+  });
+
+  it("round-trips a strategy for a platform", () => {
+    setProviderStrategy("groq", "reliable");
+    expect(getProviderStrategy("groq")).toBe("reliable");
+  });
+
+  it("upserts — second write wins", () => {
+    setProviderStrategy("groq", "reliable");
+    setProviderStrategy("groq", "fastest");
+    expect(getProviderStrategy("groq")).toBe("fastest");
+  });
+
+  it("returns null for platforms with no row", () => {
+    expect(getProviderStrategy("unconfigured-platform")).toBeNull();
+  });
+
+  it("lists all platforms that have been written", () => {
+    setProviderStrategy("groq", "reliable");
+    setProviderStrategy("cerebras", "auto");
+    const rows = listProviderStrategies();
+    expect(rows).toHaveLength(2);
+    const byPlatform = Object.fromEntries(
+      rows.map((r) => [r.platform, r.strategy]),
+    );
+    expect(byPlatform).toEqual({ groq: "reliable", cerebras: "auto" });
+  });
+
+  it("returned strategy is always one of the 9 canonical literals", () => {
+    const allStrategies: RoutingStrategy[] = [
+      "priority",
+      "balanced",
+      "smartest",
+      "iterative_refinement",
+      "fastest",
+      "reliable",
+      "custom",
+      "racing",
+      "auto",
+    ];
+    for (const s of allStrategies) {
+      setProviderStrategy(`pf-${s}`, s);
+      const stored = getProviderStrategy(`pf-${s}`);
+      expect(allStrategies.includes(stored as RoutingStrategy)).toBe(true);
+    }
+  });
+});
+
+describe("resolvePlatformStrategy", () => {
+  beforeEach(() => {
+    initDb(":memory:");
+    resetAutoOrchestratorCache();
+  });
+
+  it("returns per-platform strategy when row exists (manual override)", () => {
+    setRoutingStrategy("balanced");
+    setProviderStrategy("groq", "reliable");
+    expect(resolvePlatformStrategy("groq")).toBe("reliable");
+  });
+
+  it("returns global when no row exists", () => {
+    setRoutingStrategy("balanced");
+    expect(resolvePlatformStrategy("nim")).toBe("balanced");
+  });
+
+  it("returns an Auto arm when per-platform strategy === 'auto'", () => {
+    setRoutingStrategy("priority");
+    setProviderStrategy("groq", "auto");
+    const validArms = new Set<RoutingStrategy>([
+      "balanced",
+      "smartest",
+      "fastest",
+      "reliable",
+      "racing",
+    ]);
+    for (let i = 0; i < 20; i++) {
+      resetAutoOrchestratorCache();
+      const arm = resolvePlatformStrategy("groq");
+      expect(validArms.has(arm)).toBe(true);
+    }
+  });
+
+  it("getRoutingStrategy() is isolated from per-platform rows", () => {
+    setRoutingStrategy("balanced");
+    setProviderStrategy("groq", "reliable");
+    expect(getRoutingStrategy()).toBe("balanced");
+  });
+
+  it("setRoutingStrategy() only updates the global setting, not per-platform", () => {
+    setProviderStrategy("groq", "reliable");
+    setRoutingStrategy("fastest");
+    expect(getProviderStrategy("groq")).toBe("reliable");
   });
 });

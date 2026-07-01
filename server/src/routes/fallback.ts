@@ -1,3 +1,4 @@
+import type { ProviderRoutingStrategy } from "@animarouter/shared/types.js";
 import type { Request, Response } from "express";
 import { Router } from "express";
 import { z } from "zod";
@@ -8,6 +9,11 @@ import {
   resetBoost,
   setBoost,
 } from "../services/degradation.js";
+import {
+  getProviderStrategy,
+  listProviderStrategies,
+  setProviderStrategy,
+} from "../services/provider-strategy.js";
 import {
   getAllPenalties,
   getCustomWeights,
@@ -203,6 +209,66 @@ fallbackRouter.put("/routing", (req: Request, res: Response) => {
     presets: BANDIT_PRESETS,
     customWeights: getCustomWeights(),
   });
+});
+
+// ── Per-provider routing strategy overrides ─────────────────────────────────
+// GET  /routing/provider            → list all platform → strategy rows.
+// GET  /routing/provider?platform=X → single row (404 if no row for X).
+// PUT  /routing/provider            → write {platform, strategy}. Strategy
+//                                     MUST be one of VALID_STRATEGIES. The
+//                                     endpoint is decoupled from the global
+//                                     PUT /routing — global rejects `auto`.
+const VALID_PROVIDER_STRATEGIES: readonly string[] = [
+  "priority",
+  "balanced",
+  "smartest",
+  "iterative_refinement",
+  "fastest",
+  "reliable",
+  "custom",
+  "racing",
+  "auto",
+];
+
+const providerStrategySchema = z.object({
+  platform: z.string().min(1),
+  strategy: z.enum(VALID_PROVIDER_STRATEGIES as [string, ...string[]]),
+});
+
+fallbackRouter.get("/routing/provider", (req: Request, res: Response) => {
+  const platform =
+    typeof req.query.platform === "string" ? req.query.platform : undefined;
+  if (platform) {
+    const strategy = getProviderStrategy(platform);
+    if (strategy === null) {
+      res.status(404).json({
+        error: { message: `No strategy found for platform '${platform}'` },
+      });
+      return;
+    }
+    res.json({ platform, strategy, updated_at: new Date().toISOString() });
+    return;
+  }
+  const rows = listProviderStrategies();
+  res.json(rows);
+});
+
+fallbackRouter.put("/routing/provider", (req: Request, res: Response) => {
+  const parsed = providerStrategySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: {
+        message: parsed.error.errors.map((e) => e.message).join(", "),
+      },
+    });
+    return;
+  }
+  const { platform, strategy } = parsed.data;
+  const row = setProviderStrategy(
+    platform,
+    strategy as ProviderRoutingStrategy,
+  );
+  res.json(row);
 });
 
 // Get fallback chain (with dynamic penalties)

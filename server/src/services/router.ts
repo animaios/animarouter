@@ -4,6 +4,7 @@ import { getDb, getSetting, setSetting } from "../db/index.js";
 import { decrypt } from "../lib/crypto.js";
 import type { BaseProvider } from "../providers/base.js";
 import { buildProviderFor } from "../providers/index.js";
+import { selectAutoStrategy } from "./auto-orchestrator.js";
 import {
   getAllStatesView,
   getBoost,
@@ -25,6 +26,7 @@ import {
   type KeyStats,
 } from "./heartbeat.js";
 import { isExhausted } from "./key-exhaustion.js";
+import { getProviderStrategy } from "./provider-strategy.js";
 import {
   type TransportId,
   transportIdFromUseProxy,
@@ -344,6 +346,7 @@ const VALID_STRATEGIES: RoutingStrategy[] = [
   "auto",
 ];
 
+// Re-export for the routing engine persistence layer
 export function getRoutingStrategy(): RoutingStrategy {
   ensureDegradationInit();
   const raw = getSetting(STRATEGY_KEY);
@@ -358,6 +361,44 @@ export function setRoutingStrategy(strategy: RoutingStrategy): void {
   }
   setSetting(STRATEGY_KEY, strategy);
 }
+
+/**
+ * Resolve the effective routing strategy for a specific platform.
+ *
+ * Resolution order:
+ * 1. Per-platform override in `provider_strategies` (non-Auto literal wins).
+ * 2. Orchestrator-selected arm (only when per-platform strategy === 'auto').
+ * 3. Global fallback — `getRoutingStrategy()` (unchanged behaviour).
+ *
+ * Manual override (any non-Auto literal) always wins over the orchestrator;
+ * the orchestrator is ONLY called when the stored strategy is exactly `auto`.
+ */
+export function resolvePlatformStrategy(
+  platform: string,
+  ctx?: { strategy?: RoutingStrategy } | null,
+): RoutingStrategy {
+  if (
+    ctx?.strategy &&
+    ctx.strategy !== "auto" &&
+    VALID_STRATEGIES.includes(ctx.strategy)
+  ) {
+    return ctx.strategy;
+  }
+
+  const provider = getProviderStrategy(platform);
+  if (!provider) return getRoutingStrategy();
+  if (provider === "auto") return selectAutoStrategy(platform);
+  return provider;
+}
+
+// Re-export the orchestrator's reset helper so route tests can isolate it.
+export { resetAutoOrchestratorCache } from "./auto-orchestrator.js";
+// Re-export the persistence helpers so callers don't need two import lines.
+export {
+  getProviderStrategy,
+  listProviderStrategies,
+  setProviderStrategy,
+} from "./provider-strategy.js";
 
 // ── Custom weights (persisted) ──────────────────────────────────────────────
 // User-tuned weight vector for the 'custom' strategy. Stored normalized (sums
