@@ -60,7 +60,7 @@ const TELEMETRY_SQL = `
   SELECT
     COALESCE(SUM(successes), 0)       AS totalSuccesses,
     COALESCE(SUM(failures), 0)        AS totalFailures,
-    COALESCE(SUM(tokPerSec), 0)       AS totalTokPerSec,
+    COALESCE(AVG(CASE WHEN tokPerSec > 0 THEN tokPerSec ELSE NULL END), 0)                                           AS totalTokPerSec,
     COALESCE(SUM(avgTtfbMs), 0)       AS totalAvgTtfbMs,
     COALESCE(SUM(CASE WHEN avgTtfbMs IS NOT NULL THEN 1 ELSE 0 END), 0)
                                       AS totalAvgTtfbMsCount
